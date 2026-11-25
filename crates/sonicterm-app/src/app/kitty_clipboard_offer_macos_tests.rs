@@ -228,3 +228,19 @@ fn names_sharing_one_pasteboard_type_publish_it_once() {
         assert_eq!(board.data("public.jpeg").as_deref(), Some(&b"first"[..]));
     });
 }
+
+/// An external pasteboard type can advertise a MIME name without being the UTI a new registration
+/// of that MIME would produce. Read the listed representation under its actual pasteboard type.
+#[test]
+fn clipboard_name_macos_reads_the_actual_listed_type() {
+    objc2::rc::autoreleasepool(|_| {
+        let board = Private::new();
+        let name = "application/x-listed!type";
+        board.0.clearContents();
+        assert!(board
+            .0
+            .setData_forType(Some(&NSData::with_bytes(&[0xa5])), &NSString::from_str(name)));
+        assert_eq!(list_types(&board.0), TypeListing::Types(vec![name.into()]));
+        assert_eq!(read_type(&board.0, name, 8), TypeRead::Bytes(vec![0xa5]));
+    });
+}

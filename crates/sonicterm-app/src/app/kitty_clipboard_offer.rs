@@ -27,9 +27,7 @@ const MAX_MIME_NAME_BYTES: usize = 255;
 
 /// The native format `name` maps to; `None` when it is not a valid MIME name or text alias.
 pub(in crate::app) fn native_format(name: &str) -> Option<NativeFormat> {
-    // The X11 text atoms are not MIME names, but programs offer text under them.
-    if matches!(name, "UTF8_STRING" | "TEXT" | "STRING") || super::kitty_clipboard_tx::is_text(name)
-    {
+    if super::kitty_clipboard_tx::is_text(name) {
         // When: name is plain text or a text alias, it is the one text representation.
         return Some(NativeFormat::Text);
     }

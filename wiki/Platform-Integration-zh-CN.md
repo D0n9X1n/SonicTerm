@@ -582,7 +582,7 @@ OSC 5522 提交（见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）发布系�
 | 系统 | 保存 | 发布 |
 | --- | --- | --- |
 | macOS | 文本为 `public.utf8-plain-text`，`text/html` 为 `public.html`，`image/png` 为 `public.png`，其他 MIME 名称使用 `UTType typeWithMIMEType:` 给出的统一类型：有系统类型时用系统类型，否则用系统派生的动态 `dyn.*` 类型。所有项都是 `file:` URI 的 `text/uri-list` 为每个文件一个 `public.file-url` 项；单个其他绝对 URL 为 `public.url`；两者混合、多个其他 URL 或含非 URI 行的列表被省略。 | 一个 `NSPasteboardItem` 携带所有类型（以及第一个文件 URL），每个后续文件再各占一项，然后在事件循环线程上调用 `clearContents` 和 `writeObjects`，因此变更计数只增加一次。无法暂存的类型不会改动剪贴板；`writeObjects` 被拒绝时回复 `EIO`。与其他类型并存的文本保持字节不变；只有文本时照旧写入。超过 512 KiB 的提供与其他程序写入一样以 `EFBIG` 拒绝。 |
-| Windows | 文本为 `CF_UNICODETEXT`（UTF-16；无效 UTF-8 变为 U+FFFD），`text/html` 为注册格式 `HTML Format`（CF_HTML：`Version:0.9` 头部，其中 `StartHTML`、`EndHTML`、`StartFragment` 与 `EndFragment` 为十位字节偏移，片段包在带片段注释的 `<html><body>` 中），`image/png` 只用注册格式 `PNG`（不转换为 `CF_DIB`），每项都是指向驱动器或 UNC 路径的 `file:` URI 时 `text/uri-list` 为 `CF_HDROP`，其他 MIME 名称用 `RegisterClipboardFormatW` 以该名称注册的格式。注册名称在会话内全局且永不释放，因此每个进程至多注册 128 个不同的自定义名称；之后的新名称被省略。空的 PNG 或自定义负载被省略。 | 在剪贴板工作线程上执行，绝不在事件循环上：每个数据块都在 `OpenClipboard`（最多 10 次，间隔 10 毫秒）之前分配并填充，然后在同一会话中调用 `EmptyClipboard`，并对每个数据块调用一次 `SetClipboardData`。任何数据块被拒绝时，其余数据块被释放，剪贴板在 `CloseClipboard` 之前再次清空，因此没有程序看到部分提供，写入回复 `EIO`。分配失败，或剪贴板始终被其他进程占用时，保留原剪贴板并回复 `EIO`。 |
+| Windows | 文本为 `CF_UNICODETEXT`（UTF-16；无效 UTF-8 变为 U+FFFD），`text/html` 为注册格式 `HTML Format`（CF_HTML：`Version:0.9` 头部，其中 `StartHTML`、`EndHTML`、`StartFragment` 与 `EndFragment` 为十位字节偏移，片段包在带片段注释的 `<html><body>` 中），`image/png` 只用注册格式 `PNG`（不转换为 `CF_DIB`），每项都是指向驱动器或 UNC 路径的 `file:` URI 时 `text/uri-list` 为 `CF_HDROP`，其他 MIME 名称用 `RegisterClipboardFormatW` 以该名称注册的格式。注册名称在会话内全局且永不释放，因此每个进程至多注册 128 个不同的自定义名称；之后的新名称被省略。空的 PNG 或自定义负载被省略。多个名称（包括仅大小写不同的名称）注册为同一格式 ID 时，只发布第一份表示。 | 在剪贴板工作线程上执行，绝不在事件循环上：每个数据块都在 `OpenClipboard`（最多 10 次，间隔 10 毫秒）之前分配并填充，然后在同一会话中调用 `EmptyClipboard`，并对每个数据块调用一次 `SetClipboardData`。任何数据块被拒绝时，其余数据块被释放，剪贴板在 `CloseClipboard` 之前再次清空，因此没有程序看到部分提供，写入回复 `EIO`。分配失败，或剪贴板始终被其他进程占用时，保留原剪贴板并回复 `EIO`。 |
 | Linux（X11 或 XWayland） | CLIPBOARD 与 PRIMARY 均按原字节提供文本，目标为 `UTF8_STRING`、`text/plain;charset=utf-8`、`text/plain` 和 `TEXT`。只有 UTF-8 文本能表示为 Latin-1 图形字符、制表符和换行符时，才增加以 Latin-1 编码的 `STRING`。HTML、PNG、URI 列表和自定义 MIME 类型以原 MIME 名称作为原子。每进程至多接纳 256 个数据原子名称（含八个固定目标），超出的名称在创建原子前省略。 | 选区所有者线程暂存程序的全部表示，在第一次请求所有权前检查一次写入绑定，随后用服务器时间戳调用 `SetSelectionOwner`，再用 `GetSelectionOwner` 确认窗口。每个选区独立确认。如果 CLIPBOARD 已确认而 PRIMARY 被拒绝，系统写入失败（需要状态回复时为 `EIO`），但窗口继续提供 CLIPBOARD 的数据，原有的 arboard 份额继续计费，直到 arboard 自身替换对应的选区；服务器确认不能证明 arboard 已释放缓冲区。用户复制和仅含有效 UTF-8 文本的写入仍走 arboard。不支持没有 XWayland 的原生 Wayland。 |
 
 除数据外，所有者还提供 `TARGETS` 和取得选区时的 `TIMESTAMP`。单次服务器请求容不下的值通过 `INCR` 传输，
@@ -605,7 +605,7 @@ OSC 5522 读取文本以外的类型时经过同一系统层，每个类型上�
 
 | 系统 | 系统调用 | 上限 |
 | --- | --- | --- |
-| macOS | 对 MIME 名称映射到的类型（`public.html`、`public.png` 或自定义名称的统一类型）调用 `dataForType`；`text/uri-list` 以 CRLF 连接每项的 `public.file-url`（否则 `public.url`），至多检查 4096 项 | 长度超过上限的值在复制进 Rust 之前按长度拒绝 |
+| macOS | 对列表中首个匹配 MIME 名称的系统类型或该 MIME 映射到的类型（`public.html`、`public.png` 或自定义名称的统一类型）调用 `dataForType`；`text/uri-list` 以 CRLF 连接每项的 `public.file-url`（否则 `public.url`），至多检查 4096 项 | 长度超过上限的值在复制进 Rust 之前按长度拒绝 |
 | Windows | 经 `EnumClipboardFormats`（至多检查 64 个）按注册名称找到的格式，因此读取从不注册名称；`text/uri-list` 读取 `CF_HDROP` | `GlobalSize` 在 `GlobalLock` 之前决定：超过上限的数据块被拒绝（`CF_HDROP` 为上限的两倍）。CF_HTML 以其片段提供；`CF_HDROP` 以 `file:` URI 提供。`PNG` 或自定义数据块按其 `GlobalSize` 提供，可能包含数据之后的分配余量。 |
 | Linux（X11） | 以已有的区分大小写的 MIME 原子为目标调用 `ConvertSelection`，不为未知名称创建原子 | 仅接受所请求类型的格式 8 字节，直接读取或通过 `INCR` 传输，大小和时限检查与文本相同 |
 

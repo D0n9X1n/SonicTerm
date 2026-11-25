@@ -565,8 +565,16 @@ impl<C: Win32Clipboard> WindowsOffer<C> {
 
 impl<C: Win32Clipboard> OfferBackend for WindowsOffer<C> {
     fn stage(&mut self, format: &NativeFormat, bytes: &[u8]) -> bool {
-        let (Some(id), Some(data)) = (self.format_id(format), encode(format, bytes)) else {
-            // When: the format cannot be registered or encoded, the offer cannot be staged.
+        let Some(id) = self.format_id(format) else {
+            // When: format_id failed, the complete offer cannot be staged.
+            return false;
+        };
+        if self.staged.iter().any(|(known, _)| *known == id) {
+            // When: staged already contains id, the first spelling owns the native representation.
+            return true;
+        }
+        let Some(data) = encode(format, bytes) else {
+            // When: encode fails, no partial set of formats may be published.
             return false;
         };
         let fill = |out: &mut [u8]| data.fill(out);

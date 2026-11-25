@@ -15,7 +15,7 @@ use objc2_foundation::{NSArray, NSData, NSString};
 
 use super::{CommitGate, NativeFormat, OfferBackend, Published};
 use crate::app::osc52_read_source::{
-    list_native_types, TypeListing, TypeRead, MAX_NATIVE_TYPES_SCANNED,
+    list_native_types, native_type_mime, TypeListing, TypeRead, MAX_NATIVE_TYPES_SCANNED,
 };
 
 // `UTType` lives in UniformTypeIdentifiers; linking it here keeps the class resolvable in every
@@ -230,7 +230,21 @@ pub(super) fn read_type(board: &NSPasteboard, mime: &str, max_bytes: usize) -> T
         // When: format is UriList, it is joined from the items' URLs.
         return read_uri_list(board, max_bytes);
     }
-    let kind = pasteboard_type(&format).filter(|_| format != NativeFormat::Text);
+    if format == NativeFormat::Text {
+        // When: format is Text, the bounded text reader owns that conversion.
+        return TypeRead::Absent;
+    }
+    let kind = board
+        .types()
+        .and_then(|types| {
+            (0..types.count().min(MAX_NATIVE_TYPES_SCANNED))
+                .map(|index| types.objectAtIndex(index))
+                .find(|identifier| {
+                    native_type_mime(&listing_name(identifier))
+                        .is_some_and(|name| name.eq_ignore_ascii_case(mime))
+                })
+        })
+        .or_else(|| pasteboard_type(&format));
     let Some(data) = kind.and_then(|kind| board.dataForType(&kind)) else {
         // When: the type has no pasteboard type or the board does not hold it, it is absent.
         return TypeRead::Absent;
@@ -271,6 +285,15 @@ fn read_uri_list(board: &NSPasteboard, max_bytes: usize) -> TypeRead {
     }
 }
 
+/// The native name fed to the listing mapper. URL pasteboard items are interpreted as URI lists.
+fn listing_name(identifier: &NSString) -> String {
+    let native = identifier.to_string();
+    match native.as_str() {
+        FILE_URL_TYPE | URL_TYPE => "text/uri-list".into(),
+        _ => preferred_mime(identifier).unwrap_or(native),
+    }
+}
+
 /// The MIME names `board` offers: each pasteboard type named by its uniform type's preferred MIME
 /// name where it has one, else by its identifier, then mapped as every platform's listing is, so
 /// private and protocol types are never listed. Only names are read, never content.
@@ -280,10 +303,7 @@ pub(super) fn list_types(board: &NSPasteboard) -> TypeListing {
         return TypeListing::Types(Vec::new());
     };
     let count = types.count().min(MAX_NATIVE_TYPES_SCANNED);
-    list_native_types((0..count).map(|index| {
-        let identifier = types.objectAtIndex(index);
-        preferred_mime(&identifier).unwrap_or_else(|| identifier.to_string())
-    }))
+    list_native_types((0..count).map(|index| listing_name(&types.objectAtIndex(index))))
 }
 
 #[cfg(test)]

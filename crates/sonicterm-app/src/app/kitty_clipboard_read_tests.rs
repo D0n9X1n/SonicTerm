@@ -422,3 +422,16 @@ fn unsupported_mime_read_without_listing_answers_enosys() {
         packet("ENOSYS").into_bytes()
     );
 }
+
+/// Read aliases use the bounded text path, not per-platform custom-format lookup.
+#[test]
+fn clipboard_name_text_aliases_read_as_text() {
+    let source = FakeTypes::holding("test");
+    for name in ["UTF8_STRING", "TEXT", "STRING"] {
+        assert_eq!(
+            read_one(&source, ReadLocation::Clipboard, name),
+            Ok(Some(b"test".to_vec())),
+            "{name}"
+        );
+    }
+}

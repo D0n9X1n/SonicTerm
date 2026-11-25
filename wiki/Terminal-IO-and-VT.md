@@ -477,7 +477,7 @@ reader thread and is delivered as one message through the sensitive reply channe
 reply spool: `OK`, the listing as one `DATA` packet with `mime=Lg==` (types space-joined plus a
 newline, at most 64 names and 4096 bytes so it fits one packet, payload omitted when empty),
 `DATA` chunks of at most 4096 raw bytes per served type with the id and MIME repeated in every
-packet, then `DONE`. `text/plain` types are read as text; any other type is read through the
+packet, then `DONE`. `text/plain` and the write aliases (`UTF8_STRING`, `TEXT`, `STRING`) are read as text; any other type is read through the
 native layer (see [Platform Integration](Platform-Integration)): HTML stripped to its fragment on
 Windows, PNG and custom types byte for byte, `text/uri-list` from file and URL items. A type the
 clipboard does not hold is omitted, which the protocol reads as unavailable. Each type is read

@@ -219,3 +219,12 @@ fn read_replies_peak_within_reservation() {
         assert!(peak <= reserved, "{labels:?}: peak {peak} over the {reserved} reserved");
     }
 }
+
+/// A name retained by the listing must obey the same RFC restricted-name grammar as a write,
+/// including all permitted punctuation and the required initial alphanumeric in each component.
+#[test]
+fn clipboard_name_listing_uses_publish_alphabet() {
+    let valid = "application/x!#$&-^_.+";
+    let names = [valid, "x/-invalid", "x/.leading"];
+    assert_eq!(list_native_types(names.map(str::to_owned)), TypeListing::Types(vec![valid.into()]));
+}

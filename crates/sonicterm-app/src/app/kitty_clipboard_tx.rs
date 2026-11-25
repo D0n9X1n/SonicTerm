@@ -318,9 +318,13 @@ impl OpenWrite {
     }
 }
 
-/// Whether `mime` names plain text: `text/plain`, or `text/plain;` with parameters of printable
+/// Whether `mime` names plain text: an X11 text alias, `text/plain`, or parameters of printable
 /// ASCII other than space (`charset=utf-8`), as programs offer it.
 pub(in crate::app) fn is_text(mime: &str) -> bool {
+    if matches!(mime, "UTF8_STRING" | "TEXT" | "STRING") {
+        // When: UTF8_STRING, TEXT or STRING matches, reads and writes use the text representation.
+        return true;
+    }
     match mime.strip_prefix("text/plain") {
         Some("") => true,
         Some(rest) => rest.strip_prefix(';').is_some_and(|parameters| {

@@ -504,3 +504,14 @@ fn global_size_refuses_before_lock() {
     let mut fake = FakeWin32 { refuse_open: true, ..holding_text("x") };
     assert_eq!(read_text_with(&mut fake, 5), ReadOutcome::Failed, "the clipboard stayed held");
 }
+
+/// RegisterClipboardFormatW ignores ASCII case. Two valid spellings that return one format ID
+/// must publish only the first representation and allocate exactly one native block.
+#[test]
+fn clipboard_name_windows_duplicate_format_id_keeps_first() {
+    let custom = offer(&[("application/x-case", b"first"), ("APPLICATION/X-CASE", b"second")]);
+    let mut backend = WindowsOffer::new(previous());
+    assert_eq!(publish_offer(&mut backend, &custom, &|| true), Published::Written);
+    assert_eq!((backend.clipboard.sets, backend.clipboard.allocs), (1, 1));
+    assert_eq!(backend.clipboard.clipboard, [(0xC000, b"first".to_vec())]);
+}

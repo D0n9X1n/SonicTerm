@@ -98,7 +98,7 @@ const MAX_LISTED_TYPES: usize = 64;
 /// types map to theirs, a MIME-shaped name passes without its parameters, and private, dynamic and
 /// protocol types map to `None`, so they are never listed.
 #[cfg(any(test, target_os = "macos", target_os = "windows"))]
-fn native_type_mime(name: &str) -> Option<String> {
+pub(in crate::app) fn native_type_mime(name: &str) -> Option<String> {
     let mapped = match name {
         "public.utf8-plain-text"
         | "public.plain-text"
@@ -118,14 +118,8 @@ fn native_type_mime(name: &str) -> Option<String> {
         _ => {
             // When: the name is no known platform type, only a type/subtype MIME shape passes.
             let mime = name.split(';').next().unwrap_or_default().trim();
-            let (kind, subtype) = mime.split_once('/')?;
-            let token = |part: &str| {
-                !part.is_empty()
-                    && part
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || b"+-.".contains(&byte))
-            };
-            return (token(kind) && token(subtype)).then(|| mime.to_ascii_lowercase());
+            return super::kitty_clipboard_offer::valid_mime(mime)
+                .then(|| mime.to_ascii_lowercase());
         }
     };
     Some(mapped.to_owned())
