@@ -585,6 +585,8 @@ OSC 5522 提交（见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）发布系�
 | Windows | 文本为 `CF_UNICODETEXT`（UTF-16；无效 UTF-8 变为 U+FFFD），`text/html` 为注册格式 `HTML Format`（CF_HTML：`Version:0.9` 头部，其中 `StartHTML`、`EndHTML`、`StartFragment` 与 `EndFragment` 为十位字节偏移，片段包在带片段注释的 `<html><body>` 中），`image/png` 只用注册格式 `PNG`（不转换为 `CF_DIB`），每项都是指向驱动器或 UNC 路径的 `file:` URI 时 `text/uri-list` 为 `CF_HDROP`，其他 MIME 名称用 `RegisterClipboardFormatW` 以该名称注册的格式。注册名称在会话内全局且永不释放，因此每个进程至多注册 128 个不同的自定义名称；之后的新名称被省略。空的 PNG 或自定义负载被省略。多个名称（包括仅大小写不同的名称）注册为同一格式 ID 时，只发布第一份表示。 | 在剪贴板工作线程上执行，绝不在事件循环上：每个数据块都在 `OpenClipboard`（最多 10 次，间隔 10 毫秒）之前分配并填充，然后在同一会话中调用 `EmptyClipboard`，并对每个数据块调用一次 `SetClipboardData`。任何数据块被拒绝时，其余数据块被释放，剪贴板在 `CloseClipboard` 之前再次清空，因此没有程序看到部分提供，写入回复 `EIO`。分配失败，或剪贴板始终被其他进程占用时，保留原剪贴板并回复 `EIO`。 |
 | Linux（X11 或 XWayland） | CLIPBOARD 与 PRIMARY 均按原字节提供文本，目标为 `UTF8_STRING`、`text/plain;charset=utf-8`、`text/plain` 和 `TEXT`。只有 UTF-8 文本能表示为 Latin-1 图形字符、制表符和换行符时，才增加以 Latin-1 编码的 `STRING`。HTML、PNG、URI 列表和自定义 MIME 类型以原 MIME 名称作为原子。每进程至多接纳 256 个数据原子名称（含八个固定目标），超出的名称在创建原子前省略。 | 选区所有者线程暂存程序的全部表示，在第一次请求所有权前检查一次写入绑定，随后用服务器时间戳调用 `SetSelectionOwner`，再用 `GetSelectionOwner` 确认窗口。每个选区独立确认。如果 CLIPBOARD 已确认而 PRIMARY 被拒绝，系统写入失败（需要状态回复时为 `EIO`），但窗口继续提供 CLIPBOARD 的数据，原有的 arboard 份额继续计费，直到 arboard 自身替换对应的选区；服务器确认不能证明 arboard 已释放缓冲区。用户复制和仅含有效 UTF-8 文本的写入仍走 arboard。不支持没有 XWayland 的原生 Wayland。 |
 
+OSC 5522 写入只针对一个位置。OSC 52 的 `cp` 写入依次操作两个选区；不存在跨选区的事务或回滚。
+
 除数据外，所有者还提供 `TARGETS` 和取得选区时的 `TIMESTAMP`。单次服务器请求容不下的值通过 `INCR` 传输，
 每块不超过 256 KiB，且能放进一次请求。每份提供最多同时接纳八个请求者，每块限时五秒。`SelectionClear`
 停止在失去的选区上接纳新请求；已接纳的传输保留原字节直至完成或超时。仍持有的提供在一小时后过期。

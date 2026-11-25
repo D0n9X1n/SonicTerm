@@ -326,7 +326,7 @@ refuse the large selections users copy.
 | --- | --- |
 | `c`, `s`, `0`–`9`, empty kinds | standard clipboard |
 | `p` | Linux PRIMARY; dropped on macOS and Windows |
-| `cp` | every destination the platform has |
+| `cp` | every destination the platform has; on X11 the two selections are written in turn, not atomically. A failed write can change CLIPBOARD while leaving PRIMARY unchanged. |
 | unknown letter | ignored; a kinds field with no known letter is dropped |
 | `52;c` (no data), `52;c;` | clears the clipboard |
 | Base64 padding | optional, but padding that is present must complete the last group (`aG=` is refused); any other byte discards the write |
