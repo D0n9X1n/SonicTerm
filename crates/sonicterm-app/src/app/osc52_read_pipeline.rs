@@ -163,13 +163,13 @@ impl std::fmt::Debug for ClipboardReads {
 }
 
 impl ClipboardReads {
-    /// Test-only: whether the reader's result waits to be settled, as (carries replies, completed
-    /// before its deadline); the result is put back untouched.
+    /// Test-only: whether the reader's result waits to be settled, as (a copy of its replies,
+    /// completed before its deadline); the result is put back untouched.
     #[cfg(test)]
-    pub(in crate::app) fn peek_finished_read(&self) -> Option<(bool, bool)> {
+    pub(in crate::app) fn peek_finished_read(&self) -> Option<(Option<Vec<u8>>, bool)> {
         let done = self.done_rx.try_recv().ok()?;
         let deadline = self.in_flight.as_ref().map(|in_flight| in_flight.deadline);
-        let seen = (done.replies.is_some(), deadline.is_some_and(|at| done.completed_at < at));
+        let seen = (done.replies.clone(), deadline.is_some_and(|at| done.completed_at < at));
         let _ = self.done_tx.send(done);
         Some(seen)
     }

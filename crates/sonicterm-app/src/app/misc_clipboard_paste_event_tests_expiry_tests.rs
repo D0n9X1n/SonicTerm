@@ -6,6 +6,12 @@
 
 use super::*;
 
+/// The whole reply the fake clipboard's `secret` makes for the `text/plain` read `k`: OK, the DATA
+/// frame, DONE. Matching it exactly tells the data apart from any status the read could carry.
+const SERVED_REPLY: &[u8] = b"\x1b]5522;type=read:status=OK:id=k\x1b\\\
+    \x1b]5522;type=read:status=DATA:id=k:mime=dGV4dC9wbGFpbg==;c2VjcmV0\x1b\\\
+    \x1b]5522;type=read:status=DONE:id=k\x1b\\";
+
 /// A harness whose pane got a paste event and holds its live grant; returns the pane and the
 /// event's one-time password.
 fn granted() -> (Harness, u64, String) {
@@ -61,7 +67,8 @@ fn grant_ending_within_one_admission_turn_is_not_served() {
     harness.follow_up(pane, "Paste event", &password);
     harness.wait_for(|harness| harness.app.clip_state.reads.peek_finished_read().is_some());
     let finished = harness.app.clip_state.reads.peek_finished_read();
-    assert_eq!(finished, Some((true, true)), "an on-time completion carrying data");
+    let on_time = Some((Some(SERVED_REPLY.to_vec()), true));
+    assert_eq!(finished, on_time, "an on-time completion carrying the DATA frame");
     let turn = Instant::now();
     harness.end_grants();
     harness.app.pump_clipboard_reads_at(turn);
@@ -70,16 +77,19 @@ fn grant_ending_within_one_admission_turn_is_not_served() {
 }
 
 /// Contract: a reply whose writer admission was contended, and whose grant ends before the retry,
-/// is neither served nor lost: its stale bytes are dropped and the read asks again.
+/// is neither served nor lost: its stale bytes are dropped and the read asks again. The contended
+/// attempt is checked to have carried the DATA frame, so the retry withheld real data.
 #[test]
 fn contended_retry_past_the_grant_returns_to_consent() {
     let (mut harness, pane, password) = granted();
     harness.contend.store(true, Ordering::SeqCst);
     harness.follow_up(pane, "Paste event", &password);
-    harness.pump_until(|harness| harness.contended.load(Ordering::SeqCst) == 1);
+    harness.pump_until(|harness| harness.contended.lock().unwrap().len() == 1);
     harness.end_grants();
     harness.contend.store(false, Ordering::SeqCst);
     harness.app.pump_clipboard_reads();
+    let contended = harness.contended.lock().unwrap().clone();
+    assert_eq!(contended, [SERVED_REPLY], "the one contended attempt carried the DATA frame");
     assert!(!harness.served(pane), "no reply after the grant ended");
     assert_eq!(harness.waiting(), 1, "the read asks again");
 }
@@ -95,7 +105,8 @@ fn late_read_with_an_ended_grant_returns_to_consent() {
     harness.follow_up(pane, "Paste event", &password);
     harness.wait_for(|harness| harness.app.clip_state.reads.peek_finished_read().is_some());
     let finished = harness.app.clip_state.reads.peek_finished_read();
-    assert_eq!(finished, Some((true, false)), "a late completion");
+    let late = Some((Some(SERVED_REPLY.to_vec()), false));
+    assert_eq!(finished, late, "a late completion carrying the DATA frame");
     harness.end_grants();
     harness.pump_until_reader_idle();
     let sent = harness.sent.lock().unwrap().clone();
@@ -126,22 +137,26 @@ fn abandoned_read_past_its_grant_is_answered_once() {
 
 /// Contract: a paste-approved reply carries its grant's end to the PTY writer, which checks it under
 /// its admission lock immediately before queuing; a reply the writer refuses there as expired is
-/// not lost and not retried as busy: its data is dropped and the read asks again.
+/// not lost and not retried as busy: its data is dropped and the read asks again. The refused
+/// attempt carried the DATA frame and exactly the end its grant was issued with.
 #[test]
 fn reply_refused_as_expired_at_admission_returns_to_consent() {
     let (mut harness, pane, password) = granted();
-    let deadlines = Arc::new(Mutex::new(Vec::new()));
-    let seen = deadlines.clone();
+    // The pane holds one grant; the follow-up consumes it, so its end is read first.
+    let issued = harness.app.clip_state.reads.paste_grants.oldest_issue().expect("a held grant");
+    let grant_end = issued + PASTE_GRANT_LIFETIME;
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let seen = attempts.clone();
     harness.app.clip_state.reads.port = Some(Box::new(move |_pane, reply: SensitiveReply| {
-        seen.lock().unwrap().push(reply.valid_until());
+        seen.lock().unwrap().push((reply.valid_until(), reply.bytes().to_vec()));
         // The writer finds the grant's end passed at its admission instant.
         Err(SensitiveReplyError::Expired(reply))
     }));
     harness.follow_up(pane, "Paste event", &password);
     harness.pump_until_reader_idle();
-    let deadlines = deadlines.lock().unwrap().clone();
-    assert_eq!(deadlines.len(), 1, "one admission attempt, no busy status after it");
-    assert!(deadlines[0].is_some(), "the reply carries its grant's end");
+    let attempts = attempts.lock().unwrap().clone();
+    // One admission attempt, no busy status after it, with the data and the grant's own end.
+    assert_eq!(attempts, [(Some(grant_end), SERVED_REPLY.to_vec())]);
     assert_eq!(harness.waiting(), 1, "the read asks again");
 }
 

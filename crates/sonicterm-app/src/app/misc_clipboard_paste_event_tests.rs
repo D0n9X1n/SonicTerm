@@ -86,8 +86,8 @@ struct Harness {
     refuse: Arc<AtomicBool>,
     /// While set, every sensitive reply finds the writer's admission lock taken (`Contended`).
     contend: Arc<AtomicBool>,
-    /// The admissions refused as contended so far.
-    contended: Arc<AtomicUsize>,
+    /// The bytes of each reply whose admission was refused as contended, in order.
+    contended: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
 fn harness() -> Harness {
@@ -108,12 +108,13 @@ fn harness() -> Harness {
     app.clip_state.reads.source = offer.clone();
     let sent = Arc::new(Mutex::new(Vec::new()));
     let refuse = Arc::new(AtomicBool::new(false));
-    let (contend, contended) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+    let contend = Arc::new(AtomicBool::new(false));
+    let contended = Arc::new(Mutex::new(Vec::new()));
     let (sink, refusing) = (sent.clone(), refuse.clone());
     let (contending, contentions) = (contend.clone(), contended.clone());
     app.clip_state.reads.port = Some(Box::new(move |pane_id, reply: SensitiveReply| {
         if contending.load(Ordering::SeqCst) {
-            contentions.fetch_add(1, Ordering::SeqCst);
+            contentions.lock().unwrap().push(reply.bytes().to_vec());
             return Err(SensitiveReplyError::Contended(reply));
         }
         if refusing.load(Ordering::SeqCst) {
