@@ -249,7 +249,7 @@ fn chunks_4096_raw_id_and_mime_repeated_per_packet() {
 fn max_id_512_mime_256_sixteen_types_frame_within_12_mib() {
     assert_eq!(data_packet_len(512, "text/plain".len(), KITTY_READ_CHUNK_BYTES, false), 6033);
     let id = "i".repeat(512);
-    let types: Vec<String> = (0..16).map(|index| format!("text/plain;{index:x<245}")).collect();
+    let types: Vec<String> = (0..16).map(|index| format!("text/plain;x={index:x<243}")).collect();
     assert!(types.iter().all(|mime| mime.len() == MAX_KITTY_CLIPBOARD_MIME_BYTES));
     let source = FakeTypes::holding(&"a".repeat(6 * 1024 * 1024));
     let wide = request(&format!("type=read:id={id}"), &types.join(" "));
@@ -313,7 +313,7 @@ fn peak_working_set_within_21_mib_reservation() {
 #[test]
 fn frame_bound_checked_before_allocation() {
     let id = "i".repeat(512);
-    let mime = format!("text/plain;{:x<245}", 0);
+    let mime = format!("text/plain;x={:x<243}", 0);
     let source = FakeTypes::holding(&"a".repeat(7 * 1024 * 1024 + 800 * 1024));
     let wide = request(&format!("type=read:id={id}"), &mime);
     let counter = CountAllocations::start();

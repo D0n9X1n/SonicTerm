@@ -425,7 +425,7 @@ answered packet's terminator.
 
 At commit the aliases are applied in order over every staged representation, then every name is
 mapped to a native format (see [Platform Integration](Platform-Integration)): `text/plain`,
-`text/plain;…`, `UTF8_STRING`, `TEXT` and `STRING` are text; `text/html`, `image/png` and
+`text/plain` with `;name=value` parameters, `UTF8_STRING`, `TEXT` and `STRING` are text. Parameter names are RFC 2045 tokens; values are tokens or quoted strings with backslash escapes. A missing assignment, unterminated quote or control character invalidates the name; `text/html`, `image/png` and
 `text/uri-list` are well known; any other RFC 6838 `type/subtype` name of at most 255 bytes is a
 custom type. A name that is not a MIME name, or that the platform cannot hold, is omitted, as
 Ghostty does. Each format is kept once and its first name wins, so an alias that names

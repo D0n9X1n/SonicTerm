@@ -326,8 +326,7 @@ PTY 或命令变化、窗口进入 READONLY，或其票据有效期在剪贴板 
 数据包的结束符。
 
 提交时，别名按顺序应用于所有暂存的表示，然后每个名称映射到一种原生格式（见
-[平台集成](Platform-Integration-zh-CN)）：`text/plain`、`text/plain;…`、`UTF8_STRING`、`TEXT` 和
-`STRING` 是文本；`text/html`、`image/png` 和 `text/uri-list` 是常见类型；其他至多 255 字节、符合
+[平台集成](Platform-Integration-zh-CN)）：`text/plain`、带 `;name=value` 参数的 `text/plain`、`UTF8_STRING`、`TEXT` 和 `STRING` 是文本。参数名为 RFC 2045 词元；值可以是词元或允许反斜杠转义的引号字符串。缺少赋值、引号未闭合或非法控制字符都会使名称无效；`text/html`、`image/png` 和 `text/uri-list` 是常见类型；其他至多 255 字节、符合
 RFC 6838 `type/subtype` 的名称是自定义类型。不是 MIME 名称或平台无法保存的名称会被省略，与 Ghostty
 相同。每种格式只保留一次，以第一个名称为准，因此将 `text/plain` 指向其他类型的别名仍能得到文本。
 未暂存任何内容的提交会清空剪贴板。所有名称都被省略，或在 Linux 以外使用 `loc=primary` 时，回复 `ENOSYS`。只有文本时走下文的文本路径。保留了其他类型时，它们与其余表示组成一个

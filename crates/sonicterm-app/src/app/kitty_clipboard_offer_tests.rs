@@ -179,17 +179,37 @@ fn reservation_counts_native_copies_and_text_only() {
     assert_eq!(text.into_text(), b"t".to_vec());
 }
 
-/// Contract: `text/plain` with parameters is text only when the parameters are printable ASCII
-/// with no space; an empty or controlled suffix is not a text name, and so is not text.
+/// Each plain-text MIME parameter has a token name and either a token or quoted value.
+/// Quoted delimiters, spaces and quoted-pair escapes are data, never parameter separators.
 #[test]
 fn text_plain_parameters_are_validated() {
     use super::super::kitty_clipboard_tx::is_text;
-    for name in ["text/plain", "text/plain;charset=utf-8", "text/plain;x=1;y=2"] {
+    for name in [
+        "text/plain",
+        "text/plain;charset=utf-8",
+        "text/plain;x=1;y=2",
+        r#"text/plain;note="one; two";x="a\"b""#,
+        r#"text/plain;x="""#,
+    ] {
         assert!(is_text(name), "{name}");
     }
-    for name in
-        ["text/plain;", "text/plain;a b", "text/plain;\u{1b}", "text/plainx", "text/plain\n"]
-    {
+    for name in [
+        "text/plain;",
+        "text/plain;a b",
+        "text/plain;\u{1b}",
+        "text/plainx",
+        "text/plain\n",
+        "text/plain;name",
+        "text/plain;=x",
+        "text/plain;x=",
+        "text/plain;x=a/b",
+        "text/plain;x=a=b",
+        "text/plain;x=1;",
+        "text/plain;x*=invalid?",
+        r#"text/plain;x="value"tail"#,
+        r#"text/plain;x="unterminated"#,
+        "text/plain;x=\"a\n\"",
+    ] {
         assert!(!is_text(name), "{name:?}");
     }
 }

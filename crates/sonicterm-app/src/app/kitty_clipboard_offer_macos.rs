@@ -120,6 +120,7 @@ pub(super) fn holds(format: &NativeFormat, bytes: &[u8]) -> bool {
 /// further file of a `text/uri-list`.
 pub(super) struct Pasteboard {
     board: Retained<NSPasteboard>,
+    write_objects: fn(&NSPasteboard, &NSArray<ProtocolObject<dyn NSPasteboardWriting>>) -> bool,
     item: Retained<NSPasteboardItem>,
     extra: Vec<Retained<NSPasteboardItem>>,
 }
@@ -132,7 +133,12 @@ impl Pasteboard {
 
     /// Stage onto `board`.
     pub(super) fn on(board: Retained<NSPasteboard>) -> Self {
-        Self { board, item: NSPasteboardItem::new(), extra: Vec::new() }
+        Self {
+            board,
+            write_objects: NSPasteboard::writeObjects,
+            item: NSPasteboardItem::new(),
+            extra: Vec::new(),
+        }
     }
 
     /// Stage a `text/uri-list`: its first file URL on the item, each further one on its own item,
@@ -200,7 +206,7 @@ impl OfferBackend for Pasteboard {
             return Published::Unchanged;
         }
         self.board.clearContents();
-        if self.board.writeObjects(&NSArray::from_retained_slice(&items)) {
+        if (self.write_objects)(&self.board, &NSArray::from_retained_slice(&items)) {
             Published::Written
         } else {
             // When: writeObjects refuses the items, the cleared pasteboard holds no partial offer.

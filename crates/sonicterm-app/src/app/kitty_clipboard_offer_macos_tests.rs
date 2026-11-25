@@ -299,3 +299,22 @@ fn uri_batch_macos_read_never_returns_a_prefix() {
         assert_eq!(read_uri_list(&board.0, 1 << 20), TypeRead::TooLarge);
     });
 }
+
+/// A refusal from the writeObjects call, after the gate and clear on a private pasteboard, must
+/// return Failed (EIO). Real staged items reach the injected call, so this is not a stage failure.
+#[test]
+fn macos_writeobjects_no_answers_eio() {
+    objc2::rc::autoreleasepool(|_| {
+        let board = Private::new();
+        let mut pasteboard = Pasteboard::on(board.0.clone());
+        let before = board.0.changeCount();
+        let staged = offer(&[("text/plain", b"data"), ("text/html", b"<p/>")]);
+        pasteboard.write_objects = |_, items| {
+            assert_eq!(items.count(), 1);
+            false
+        };
+        assert_eq!(publish_offer(&mut pasteboard, &staged, &|| true), Published::Failed);
+        assert_ne!(board.0.changeCount(), before, "publish reached clearContents");
+        assert!(board.data("public.utf8-plain-text").is_none());
+    });
+}

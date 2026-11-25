@@ -318,20 +318,65 @@ impl OpenWrite {
     }
 }
 
-/// Whether `mime` names plain text: an X11 text alias, `text/plain`, or parameters of printable
-/// ASCII other than space (`charset=utf-8`), as programs offer it.
+/// Whether `mime` is a text alias or `text/plain` followed by well-formed MIME parameters.
 pub(in crate::app) fn is_text(mime: &str) -> bool {
     if matches!(mime, "UTF8_STRING" | "TEXT" | "STRING") {
         // When: UTF8_STRING, TEXT or STRING matches, reads and writes use the text representation.
         return true;
     }
-    match mime.strip_prefix("text/plain") {
-        Some("") => true,
-        Some(rest) => rest.strip_prefix(';').is_some_and(|parameters| {
-            !parameters.is_empty() && parameters.bytes().all(|byte| byte.is_ascii_graphic())
-        }),
-        None => false,
+    mime.strip_prefix("text/plain").is_some_and(|suffix| parameters(suffix.as_bytes()).is_some())
+}
+
+/// Consume a complete list of semicolon-delimited parameters without allocating.
+fn parameters(mut rest: &[u8]) -> Option<()> {
+    while !rest.is_empty() {
+        let after_semicolon = rest.strip_prefix(b";")?;
+        let whitespace =
+            after_semicolon.iter().take_while(|byte| matches!(byte, b' ' | b'\t')).count();
+        let value = after_token(&after_semicolon[whitespace..])?.strip_prefix(b"=")?;
+        rest = match value.strip_prefix(b"\"") {
+            Some(quoted) => after_quoted(quoted)?,
+            None => after_token(value)?,
+        };
     }
+    Some(())
+}
+
+/// Consume a nonempty RFC 2045 token, leaving its delimiter for the caller.
+fn after_token(bytes: &[u8]) -> Option<&[u8]> {
+    let length = bytes
+        .iter()
+        .take_while(|byte| byte.is_ascii_graphic() && !b"()<>@,;:\\\"/[]?=".contains(byte))
+        .count();
+    (length != 0).then_some(&bytes[length..])
+}
+
+/// The opening quote was consumed. A quoted pair consumes its escaped byte, so only an
+/// unescaped quote ends the value. Never accept a control sequence or folded header here.
+fn after_quoted(mut bytes: &[u8]) -> Option<&[u8]> {
+    while let Some((&byte, tail)) = bytes.split_first() {
+        match byte {
+            b'"' => {
+                // When: byte is an unescaped quote, the parameter ends here.
+                return Some(tail);
+            }
+            b'\\' => {
+                // When: byte is a backslash, consume the quoted pair without interpreting its delimiter.
+                let (&escaped, rest) = tail.split_first()?;
+                if !escaped.is_ascii_graphic() && escaped != b' ' && escaped != b'\t' {
+                    // When: escaped is not printable ASCII or a tab, it is not an allowed quoted pair.
+                    return None;
+                }
+                bytes = rest;
+            }
+            b' '..=b'~' | b'\t' => bytes = tail,
+            _ => {
+                // When: byte is neither quoted text nor a delimiter, the parameter is malformed.
+                return None;
+            }
+        }
+    }
+    None
 }
 
 /// The most `plan` allocates for names of `name_lengths` (every staged type, then every alias):
