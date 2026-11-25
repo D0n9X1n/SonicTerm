@@ -643,33 +643,9 @@ pub(super) fn warp_named_quad_producers_match_software_linear_blend() {
     }
 }
 
-/// A headless device and queue on the host's default adapter (WARP on Windows).
+/// The process's shared headless device and queue on the host's default adapter (WARP on Windows).
 pub(super) fn headless_device_and_queue() -> (wgpu::Device, wgpu::Queue) {
-    #[cfg(target_os = "windows")]
-    let (descriptor, force_fallback_adapter) = (
-        wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::DX12,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        },
-        true,
-    );
-    #[cfg(not(target_os = "windows"))]
-    let (descriptor, force_fallback_adapter) =
-        (wgpu::InstanceDescriptor::new_without_display_handle(), false);
-    let instance = wgpu::Instance::new(descriptor);
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::LowPower,
-        compatible_surface: None,
-        force_fallback_adapter,
-        apply_limit_buckets: false,
-    }))
-    .expect("headless test adapter");
-    let software = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
-    pollster::block_on(
-        adapter
-            .request_device(&crate::core::device_descriptor_for(software, wgpu::Features::empty())),
-    )
-    .expect("headless test device")
+    crate::lib_tests::shared_headless_device()
 }
 
 pub(super) fn uniform_test_device() -> wgpu::Device {

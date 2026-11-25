@@ -174,28 +174,9 @@ impl RetainedPixelFixture {
 
     /// A `width_px` x `height_px` retained target, at most 64 pixels wide (one aligned readback row).
     pub(in crate::core) fn sized(width_px: u32, height_px: u32) -> Self {
-        #[cfg(target_os = "windows")]
-        let (backends, fallback) = (wgpu::Backends::DX12, true);
-        #[cfg(not(target_os = "windows"))]
-        let (backends, fallback) = (wgpu::Backends::all(), false);
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: None,
-            force_fallback_adapter: fallback,
-            apply_limit_buckets: false,
-        }))
-        .expect("retained-pixel adapter");
-        let features = selected_optional_device_features(adapter.features(), cfg!(windows));
-        let dual_source = features.contains(wgpu::Features::DUAL_SOURCE_BLENDING);
-        let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor_for(
-            adapter.get_info().device_type == wgpu::DeviceType::Cpu,
-            features,
-        )))
-        .expect("retained-pixel device");
+        // The process's shared device with production's optional features.
+        let (device, queue) = crate::lib_tests::shared_featured_device();
+        let dual_source = device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING);
         let pipeline = WeztermPipeline::new(&device, wgpu::TextureFormat::Bgra8UnormSrgb, 3);
         let atlas = GlyphAtlas::new(1, 1);
         let image_upload = crate::atlas_upload::AtlasUpload::new(

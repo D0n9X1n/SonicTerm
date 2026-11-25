@@ -6,6 +6,60 @@ use sonicterm_engine::FontStack;
 
 pub(crate) static TRACKED_FONT_STACK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// One headless device and queue for the whole test process, created once on the host's default
+/// adapter (WARP on Windows) with `features` the adapter offers. Tests share it instead of each
+/// creating its own: a Linux software adapter (lavapipe) can crash when many devices are created
+/// and destroyed at once across test threads. `Device` and `Queue` are cheap handles, and wgpu
+/// keeps error scopes per thread, so tests sharing the device never see each other's scopes.
+fn shared_device(
+    slot: &'static std::sync::OnceLock<(wgpu::Device, wgpu::Queue)>,
+    features: impl FnOnce(&wgpu::Adapter) -> wgpu::Features,
+) -> (wgpu::Device, wgpu::Queue) {
+    slot.get_or_init(|| {
+        #[cfg(target_os = "windows")]
+        let (descriptor, force_fallback_adapter) = (
+            wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::DX12,
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
+            },
+            true,
+        );
+        #[cfg(not(target_os = "windows"))]
+        let (descriptor, force_fallback_adapter) =
+            (wgpu::InstanceDescriptor::new_without_display_handle(), false);
+        let instance = wgpu::Instance::new(descriptor);
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter,
+            apply_limit_buckets: false,
+        }))
+        .expect("headless test adapter");
+        let software = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
+        let features = features(&adapter);
+        pollster::block_on(
+            adapter.request_device(&crate::core::device_descriptor_for(software, features)),
+        )
+        .expect("headless test device")
+    })
+    .clone()
+}
+
+/// The process's shared headless device with no optional features.
+pub(crate) fn shared_headless_device() -> (wgpu::Device, wgpu::Queue) {
+    static PLAIN: std::sync::OnceLock<(wgpu::Device, wgpu::Queue)> = std::sync::OnceLock::new();
+    shared_device(&PLAIN, |_| wgpu::Features::empty())
+}
+
+/// The process's shared headless device with the optional features production selects, such as
+/// dual-source blending where the adapter offers it.
+pub(crate) fn shared_featured_device() -> (wgpu::Device, wgpu::Queue) {
+    static FEATURED: std::sync::OnceLock<(wgpu::Device, wgpu::Queue)> = std::sync::OnceLock::new();
+    shared_device(&FEATURED, |adapter| {
+        crate::core::selected_optional_device_features(adapter.features(), cfg!(windows))
+    })
+}
+
 pub(crate) fn tracked_font_stack(font_size: f64) -> FontStack {
     let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../sonicterm-font/test-fonts/rec-mono");
@@ -94,6 +148,40 @@ pub(crate) fn fallback_stack_with_locator(
     )
     .unwrap();
     FallbackStack { stack, directory }
+}
+
+/// Off Windows, every device a lib test uses comes from `shared_device`, so no two test threads
+/// create or destroy a software device at once. A `request_device` call in another test or fixture
+/// file must be Windows-only (WARP), which this scan checks by the `cfg` above its function.
+#[test]
+fn only_the_shared_helper_creates_a_device_off_windows() {
+    let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut unshared = Vec::new();
+    for entry in std::fs::read_dir(&source).expect("source directory") {
+        let path = entry.expect("source entry").path();
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_owned();
+        let test_code = name.ends_with("_tests.rs") || name.contains("fixture");
+        if !test_code || name == "lib_tests.rs" {
+            // When: the file is not test code, or is this shared helper's own file, it is skipped.
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("test source");
+        for (at, _) in text.match_indices(".request_device(") {
+            let line_start = text[..at].rfind('\n').map_or(0, |start| start + 1);
+            if text[line_start..at].contains('"') {
+                // When: a quote opens before the call on its line, it is a source-scan literal.
+                continue;
+            }
+            // The nearest function header above the call, and the lines just above it.
+            let head = text[..at].rfind("\nfn ").or_else(|| text[..at].rfind(" fn "));
+            let above = head.map_or("", |start| &text[start.saturating_sub(160)..start]);
+            if !above.contains("target_os = \"windows\"") {
+                // When: the call's function carries no Windows-only cfg, it runs on Linux too.
+                unshared.push(format!("{name}:{at}"));
+            }
+        }
+    }
+    assert!(unshared.is_empty(), "test devices outside the shared helper: {unshared:?}");
 }
 
 #[test]
