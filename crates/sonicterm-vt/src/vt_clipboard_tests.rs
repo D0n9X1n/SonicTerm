@@ -176,3 +176,16 @@ fn inbox_debug_redacted() {
     assert!(!printed.contains("c2VjcmV0"), "{printed}");
     assert!(printed.contains("queued_bytes"), "{printed}");
 }
+
+/// Contract: a pop for a stream the host abandoned takes nothing from a newer stream: the queue
+/// is in stream order, so a stale request drops only its own older chunks and stops at a newer
+/// one, which the next write still finds whole.
+#[test]
+fn stale_pop_leaves_a_newer_streams_chunks() {
+    let inbox = ClipboardInbox::default();
+    inbox.push(1, b"old".to_vec());
+    inbox.push(2, b"new".to_vec());
+    assert_eq!(inbox.pop(1), Some(b"old".to_vec()));
+    assert_eq!(inbox.pop(1), None, "stream 1 has nothing more");
+    assert_eq!(inbox.pop(2), Some(b"new".to_vec()), "the newer stream's chunk is still queued");
+}

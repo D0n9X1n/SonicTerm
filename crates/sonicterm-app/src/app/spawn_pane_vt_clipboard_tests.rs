@@ -183,3 +183,15 @@ fn status_replies_split_at_packets_within_the_spool_cap() {
         .sum();
     assert_eq!(statuses, 64, "every denied read answered once");
 }
+
+/// Contract: a stream cancelled after it queued a full chunk leaves the next write in the same
+/// chunk whole: the cancelled stream's stale `Data` event takes none of the newer stream's data,
+/// so the write is its own text, never an empty clear.
+#[test]
+fn cancelled_stream_then_write_keeps_the_write() {
+    let (_pane, handles, _staging) = clipboard_worker();
+    let full = "A".repeat(sonicterm_vt::vt::MAX_CLIPBOARD_CHUNK_BYTES);
+    // "osc52" is b3NjNTI=; CAN (0x18) cancels the first stream after its full chunk queued.
+    let bytes = format!("\x1b]52;c;{full}\x18\x1b]52;c;b3NjNTI=\x07");
+    assert_eq!(posted_texts(&handles, bytes.as_bytes()), ["osc52"]);
+}

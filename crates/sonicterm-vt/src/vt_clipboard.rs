@@ -96,9 +96,16 @@ impl ClipboardInbox {
     }
 
     /// Take the oldest chunk of `stream`, dropping older chunks of streams the host abandoned.
+    /// Stream ids only grow, so a chunk of a newer stream ends the search and stays queued: a
+    /// stale request for an abandoned stream never takes a later write's data.
     pub fn pop(&self, stream: u64) -> Option<Vec<u8>> {
         let mut queue = self.queue();
-        while let Some((queued, chunk)) = queue.pop_front() {
+        while let Some((queued, _)) = queue.front() {
+            if *queued > stream {
+                // When: the front chunk belongs to a newer stream, `stream` has nothing queued.
+                return None;
+            }
+            let (queued, chunk) = queue.pop_front().expect("a front chunk");
             if queued == stream {
                 // When: the front chunk belongs to `stream`, it is the next one in order.
                 return Some(chunk);
