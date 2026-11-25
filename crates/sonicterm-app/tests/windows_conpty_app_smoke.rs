@@ -2,10 +2,12 @@
 //! F-ConPTY app rows: a child behind a real pseudoconsole sends each query, and the host answers
 //! through a SonicTerm pane running the production VT publisher
 //! (`App::__test_clipboard_reply_pane`), so
-//! the child reports the exact reply bytes a pane's reply path wrote back through ConPTY. The
-//! expected reply comes from a fresh reference pane fed only that case's output, except the
-//! clipboard reads', the OSC 5522 write's and DECRQM 5522's, which are the literal
-//! [`OSC52_READ_REPLY`], [`KITTY_READ_REPLY`], [`KITTY_WRITE_DONE`] and [`DECRQM_5522_REPLY`]. Every pane settles clipboard writes against a fake clipboard and reads
+//! the child reports the exact reply bytes a pane's reply path wrote back through ConPTY. Every
+//! row's expected reply is a literal pinned here ([`QUERY_REPLIES`] for the color, pointer and
+//! program-status queries, then [`OSC52_READ_REPLY`], [`KITTY_READ_REPLY`], [`KITTY_WRITE_DONE`] and
+//! [`DECRQM_5522_REPLY`]), never recomputed by another pane, so a pane that stopped answering fails
+//! its row instead of matching an empty expectation. Every pane settles clipboard writes against a
+//! fake clipboard and reads
 //! clipboard text under `osc52_read = "allow"` from one holding [`CLIPBOARD_FIXTURE`] beside fixed
 //! HTML, PNG and custom-type representations, never the user's clipboard.
 //!
@@ -88,12 +90,35 @@ const KITTY_MULTI_READ_CASE: &str = "osc5522-read-multi";
 /// The name of the DECRQM 5522 row, whose expectation is [`DECRQM_5522_REPLY`].
 const DECRQM_5522_CASE: &str = "decrqm-5522";
 
+/// Each query row and its exact reply under the default theme: palette entry 1, the foreground
+/// and background, OSC 21's foreground with an unknown key named in unpadded Base64, the pointer
+/// shape query (`1` supported, `0` not), and the program-status capability list.
+const QUERY_REPLIES: [(&str, &str, &[u8]); 5] = [
+    ("osc4-query", "\x1b]4;1;?\x1b\\", b"\x1b]4;1;rgb:fbfb/4949/3434\x1b\\"),
+    (
+        "osc10-query-chain",
+        "\x1b]10;?;?\x07",
+        b"\x1b]10;rgb:cfcf/bcbc/9797\x07\x1b]11;rgb:1414/1616/1717\x07",
+    ),
+    (
+        "osc21-query",
+        "\x1b]21;foreground=?;nonsense=?\x1b\\",
+        b"\x1b]21;foreground=rgb:cf/bc/97;unknown=bm9uc2Vuc2U\x1b\\",
+    ),
+    ("osc22-query", "\x1b]22;?pointer,nonsense\x07", b"\x1b]22;1,0\x07"),
+    (
+        "osc7501-query",
+        "\x1b]7501;?\x07",
+        b"\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x07",
+    ),
+];
+
 /// A reply pane whose clipboard reads answer from the fake clipboard.
 fn clipboard_pane() -> TestReplyPane {
     App::__test_clipboard_reply_pane(PTY_COLS, PTY_ROWS, CLIPBOARD_FIXTURE)
 }
 
-/// The live pane the child talks to; each case's expectation comes from a fresh pane.
+/// The live pane the child talks to; each case's expectation is a pinned literal.
 struct AppEngine {
     live: TestReplyPane,
 }
@@ -128,7 +153,11 @@ impl Engine for AppEngine {
             // When: the case is the DECRQM 5522 query, the advertised `1` is pinned.
             return DECRQM_5522_REPLY.to_vec();
         }
-        clipboard_pane().replies(&case.output)
+        match QUERY_REPLIES.iter().find(|(name, _, _)| *name == case.name) {
+            Some((_, _, reply)) => reply.to_vec(),
+            // When: no reply is pinned, the row is the positive control, which expects no reply.
+            None => Vec::new(),
+        }
     }
 }
 
@@ -141,13 +170,11 @@ fn cases() -> Vec<Case> {
             .input(InputPhase::Echo(b"ping".to_vec()))
             .output_required()
             .input_required(),
-        Case::new("osc4-query", "\x1b]4;1;?\x1b\\").input(reply()).input_required(),
-        Case::new("osc10-query-chain", "\x1b]10;?;?\x07").input(reply()).input_required(),
-        Case::new("osc21-query", "\x1b]21;foreground=?;nonsense=?\x1b\\")
-            .input(reply())
-            .input_required(),
-        Case::new("osc22-query", "\x1b]22;?pointer,nonsense\x07").input(reply()).input_required(),
-        Case::new("osc7501-query", "\x1b]7501;?\x07").input(reply()).input_required(),
+        Case::new(QUERY_REPLIES[0].0, QUERY_REPLIES[0].1).input(reply()).input_required(),
+        Case::new(QUERY_REPLIES[1].0, QUERY_REPLIES[1].1).input(reply()).input_required(),
+        Case::new(QUERY_REPLIES[2].0, QUERY_REPLIES[2].1).input(reply()).input_required(),
+        Case::new(QUERY_REPLIES[3].0, QUERY_REPLIES[3].1).input(reply()).input_required(),
+        Case::new(QUERY_REPLIES[4].0, QUERY_REPLIES[4].1).input(reply()).input_required(),
         Case::new(OSC52_READ_CASE, "\x1b]52;cp;?\x07").input(reply()).input_required(),
         Case::new(KITTY_WRITE_CASE, KITTY_WRITE).input(reply()).input_required(),
         Case::new(KITTY_READ_CASE, "\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\")

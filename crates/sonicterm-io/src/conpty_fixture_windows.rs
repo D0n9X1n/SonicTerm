@@ -128,8 +128,13 @@ fn test_args(test_name: &str) -> [String; 5] {
 fn run_host<E: Engine>(role: &str, test_name: &str, cases: &[Case], mut engine: E) {
     let mut go_line = String::new();
     // The outer test writes `go` only after this process is in its job object, so nothing this
-    // host spawns can escape the job; a read error leaves the line empty and proceeds the same.
-    let _ = std::io::stdin().read_line(&mut go_line);
+    // host spawns can escape the job. Anything but an exact `go` line (EOF, a read error, other
+    // bytes) means the parent never confirmed the job, so the host spawns nothing.
+    let read = std::io::stdin().read_line(&mut go_line);
+    assert!(
+        read.is_ok() && go_line == "go\n",
+        "the parent did not confirm this host's job object; no PTY is spawned"
+    );
     let selection = Arc::new(Mutex::new(None));
     // A fresh host process has no subscriber yet; failure would only lose the selection record,
     // which then fails the runtime check below instead of passing silently.
@@ -493,7 +498,13 @@ fn run_one_host(host: &Path, role: &str, test_name: &str, budget: Duration) -> H
     }
     let job = Job::new().expect("create job object");
     let mut child = command.spawn().expect("spawn fixture host");
-    job.assign(&child).expect("assign fixture host to its job");
+    if let Err(error) = job.assign(&child) {
+        // When: assign fails, the host is outside the job, so it is killed and reaped here before
+        // the failure, never left to read `go` from a closed pipe and spawn its PTY.
+        let _ = child.kill();
+        wait_exit(&mut child, REAP_BUDGET);
+        panic!("assign fixture host to its job: {error}");
+    }
     if let Some(mut stdin) = child.stdin.take() {
         // When: the host's `stdin` pipe exists, send `go`; a failed write shows as a budget expiry.
         let _ = stdin.write_all(b"go\n");
