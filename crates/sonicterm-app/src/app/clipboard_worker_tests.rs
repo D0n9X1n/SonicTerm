@@ -199,8 +199,8 @@ impl ClipboardSink for FakeClipboard {
 
     fn publish_offer(
         &mut self,
-        _offer: NativeOffer,
         _lease: ClipLease,
+        _offer: NativeOffer,
         targets: ClipTargets,
         binding: WriteBinding,
     ) -> WriteResult {
@@ -769,5 +769,36 @@ fn refused_offer_payload_freed_before_lease() {
     });
     drop(Committed::settled(job, ClipWriteOutcome::Denied));
     assert_eq!(SAMPLE.take().unwrap().1, 4096, "lease still held at payload deallocation");
+    assert_eq!(staging.reserved_bytes(), 0);
+}
+
+/// The real sink's stale commit gate runs before pasteboard mutation. Even on this early return
+/// its owned offer must drop before the lease, not at the end of an outer argument scope.
+#[cfg(target_os = "macos")]
+#[test]
+fn refused_native_publish_frees_payload_before_lease() {
+    thread_local! {static SAMPLE:RefCell<Option<(Arc<ClipboardStaging>,usize)>>=const { RefCell::new(None) };}
+    let staging = ClipboardStaging::with_budget(8192, 8192);
+    let mut lease = staging.lease();
+    assert!(lease.grow_to(4096));
+    let binding = WriteBinding::unbound(&staging);
+    staging.bump_policy_generation();
+    let payload = vec![0xff; 2048];
+    let address = payload.as_ptr() as usize;
+    SAMPLE.set(Some((staging.clone(), 0)));
+    crate::lib_tests::watch_free(address, || {
+        SAMPLE.with_borrow_mut(|sample| {
+            let (staging, count) = sample.as_mut().unwrap();
+            *count = staging.reserved_bytes();
+        })
+    });
+    let result = NativeSink::default().publish_offer(
+        lease,
+        NativeOffer::raw_text(payload),
+        ClipTargets { clipboard: true, primary: false },
+        binding,
+    );
+    assert!(!result.committed);
+    assert_eq!(SAMPLE.take().unwrap().1, 4096);
     assert_eq!(staging.reserved_bytes(), 0);
 }

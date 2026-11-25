@@ -121,11 +121,11 @@ pub(in crate::app) trait ClipboardSink {
         false
     }
 
-    /// Publish the whole offer to its targets only while the binding permits it; the owner takes the lease.
+    /// Lifecycle: lease precedes offer so parameter destruction frees its bytes before releasing the budget.
     fn publish_offer(
         &mut self,
-        _offer: NativeOffer,
         _lease: ClipLease,
+        _offer: NativeOffer,
         targets: ClipTargets,
         _binding: WriteBinding,
     ) -> WriteResult {
@@ -222,7 +222,7 @@ fn commit_program(
     if let Some(offer) = offer {
         // When: the job carries an offer, its owner takes the lease. X11 confirmation does not
         // prove arboard freed its old buffer, so leave arboard's shares alone.
-        let result = sink.publish_offer(offer, lease, targets, binding);
+        let result = sink.publish_offer(lease, offer, targets, binding);
         if !result.committed {
             // When: committed is false, the gate refused before either selection was changed.
             return (committed.into_stale(), None);
@@ -904,18 +904,19 @@ impl ClipboardSink for NativeSink {
 
     fn publish_offer(
         &mut self,
-        offer: NativeOffer,
         lease: ClipLease,
+        offer: NativeOffer,
         targets: ClipTargets,
         binding: WriteBinding,
     ) -> WriteResult {
         #[cfg(target_os = "linux")]
         {
-            self.owner.publish(offer, lease, targets, binding)
+            self.owner.publish(lease, offer, targets, binding)
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _retained = lease;
+            // Borrow rather than move the lease; the offer parameter must drop first.
+            let _held = &lease;
             match super::kitty_clipboard_offer::publish_native(&offer, &|| binding.may_commit()) {
                 Published::Written => WriteResult::each(targets, TargetOutcome::Taken),
                 Published::Failed => WriteResult::each(targets, TargetOutcome::Refused),

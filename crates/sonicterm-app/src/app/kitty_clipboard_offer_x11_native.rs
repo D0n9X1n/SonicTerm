@@ -39,8 +39,8 @@ impl SelectionServer {
     /// Stage and confirm one complete offer before the ordering domain advances.
     pub(in crate::app) fn publish(
         &mut self,
-        offer: NativeOffer,
         lease: ClipLease,
+        offer: NativeOffer,
         targets: ClipTargets,
         binding: WriteBinding,
     ) -> WriteResult {
@@ -191,7 +191,7 @@ impl Server {
                 wake.read_exact(&mut [0]).ok()?;
                 let command = commands.recv().ok()?;
                 let targets = command.targets;
-                let result = self.install(command.offer, command.lease, targets, command.binding);
+                let result = self.install(command.lease, command.offer, targets, command.binding);
                 let _ = command.answer.send(
                     result.unwrap_or_else(|| WriteResult::each(targets, TargetOutcome::Refused)),
                 );
@@ -199,10 +199,11 @@ impl Server {
         }
     }
 
+    /// Lifecycle: lease precedes offer on each installation boundary so failed setup drops bytes first.
     fn install(
         &mut self,
-        offer: NativeOffer,
         lease: ClipLease,
+        offer: NativeOffer,
         targets: ClipTargets,
         binding: WriteBinding,
     ) -> Option<WriteResult> {
@@ -225,7 +226,7 @@ impl Server {
             .ok()?
             .check()
             .ok()?;
-        let result = self.install_on(window, offer, lease, targets, binding);
+        let result = self.install_on(window, lease, offer, targets, binding);
         if !self.offers.contains_key(&window) {
             // When: offers has no entry for window, neither selection needs it to serve data.
             let _ = self.port.0.destroy_window(window);
@@ -236,8 +237,8 @@ impl Server {
     fn install_on(
         &mut self,
         window: u32,
-        offer: NativeOffer,
         lease: ClipLease,
+        offer: NativeOffer,
         targets: ClipTargets,
         binding: WriteBinding,
     ) -> Option<WriteResult> {
@@ -266,7 +267,7 @@ impl Server {
         };
         // ChangeProperty has a 24-byte header and BIG-REQUESTS can add another 4 bytes.
         let direct = self.port.0.maximum_request_bytes().checked_sub(28)? & !3;
-        let owner = Owner::stage(&mut self.port, offer, lease, stamp, direct, Instant::now())?;
+        let owner = Owner::stage(&mut self.port, lease, offer, stamp, direct, Instant::now())?;
         // Fixed slots retain each destination's identity even for PRIMARY-only offers.
         let primary = u32::from(AtomEnum::PRIMARY);
         let selections = [

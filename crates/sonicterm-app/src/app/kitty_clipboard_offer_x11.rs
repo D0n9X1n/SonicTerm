@@ -244,10 +244,11 @@ impl Owner {
             &self.offer.entries[index]
         }
     }
+    /// Lifecycle: lease precedes offer so any early return drops the payload before its reservation.
     fn stage(
         port: &mut impl OwnerPort,
-        offer: NativeOffer,
         mut lease: ClipLease,
+        offer: NativeOffer,
         stamp: u32,
         direct_bytes: usize,
         now: Instant,
@@ -294,15 +295,19 @@ impl Owner {
                 indices.push(index);
             }
         }
+        // Finish all fallible staging before moving either parameter into the result.
+        let atom_type = port.intern("ATOM")?;
+        let integer_type = port.intern("INTEGER")?;
+        let incr = port.intern("INCR")?;
         Some(Self {
             offer,
             _lease: lease,
             latin1,
             atoms,
             indices,
-            atom_type: port.intern("ATOM")?,
-            integer_type: port.intern("INTEGER")?,
-            incr: port.intern("INCR")?,
+            atom_type,
+            integer_type,
+            incr,
             stamp,
             direct_bytes,
             expires: now + WRITE_LIFETIME,

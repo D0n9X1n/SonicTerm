@@ -59,7 +59,7 @@ fn x11_targets_timestamp_and_incr_serving() {
         panic!("offer")
     };
     let mut port = Port::default();
-    let mut owner = Owner::stage(&mut port, offer, staging.lease(), 27, 290_000, now).unwrap();
+    let mut owner = Owner::stage(&mut port, staging.lease(), offer, 27, 290_000, now).unwrap();
     let targets = port.intern("TARGETS").unwrap();
     let timestamp = port.intern("TIMESTAMP").unwrap();
     let names = [
@@ -94,7 +94,7 @@ fn x11_targets_timestamp_and_incr_serving() {
 }
 
 fn raw_owner(port: &mut Port, staging: &std::sync::Arc<ClipboardStaging>, now: Instant) -> Owner {
-    Owner::stage(port, NativeOffer::raw_text(vec![0xfe; 3]), staging.lease(), 18, 2, now).unwrap()
+    Owner::stage(port, staging.lease(), NativeOffer::raw_text(vec![0xfe; 3]), 18, 2, now).unwrap()
 }
 
 /// Losing the selection refuses new clients, not the old client's remaining chunks. The real
@@ -206,7 +206,7 @@ fn x11_table_is_reserved_before_interning() {
     assert!(tables >= size_of::<Cursor>() * 8 + size_of::<u32>() * 7);
     let staging = ClipboardStaging::with_budget(tables - 1, 64);
     let mut port = Port::default();
-    assert!(Owner::stage(&mut port, raw, staging.lease(), 2, 256, Instant::now()).is_none());
+    assert!(Owner::stage(&mut port, staging.lease(), raw, 2, 256, Instant::now()).is_none());
     assert_eq!(staging.reserved_bytes(), 0);
     assert!(port.names.is_empty());
 }
@@ -355,8 +355,8 @@ fn x11_string_target_only_offers_representable_latin1() {
         let mut port = Port::default();
         let mut owner = Owner::stage(
             &mut port,
-            NativeOffer::raw_text(raw.to_vec()),
             staging.lease(),
+            NativeOffer::raw_text(raw.to_vec()),
             9,
             1024,
             now,
@@ -374,4 +374,34 @@ fn x11_string_target_only_offers_representable_latin1() {
         assert!(owner.request(&mut port, dest(7), utf8, now));
         assert_eq!(port.bytes.last().unwrap().1, raw);
     }
+}
+
+/// A refused table reservation frees the existing payload while its original lease is held.
+#[test]
+fn refused_owner_stage_frees_payload_before_lease() {
+    use std::{cell::RefCell, sync::Arc};
+    thread_local! {static SAMPLE:RefCell<Option<(Arc<ClipboardStaging>,usize)>>=const { RefCell::new(None) };}
+    let staging = ClipboardStaging::with_budget(4096, 4096);
+    let mut lease = staging.lease();
+    assert!(lease.grow_to(4096));
+    let payload = vec![0xff; 4096];
+    let address = payload.as_ptr() as usize;
+    SAMPLE.set(Some((staging.clone(), 0)));
+    crate::lib_tests::watch_free(address, || {
+        SAMPLE.with_borrow_mut(|sample| {
+            let (staging, count) = sample.as_mut().unwrap();
+            *count = staging.reserved_bytes();
+        })
+    });
+    assert!(Owner::stage(
+        &mut Port::default(),
+        lease,
+        NativeOffer::raw_text(payload),
+        2,
+        256,
+        Instant::now()
+    )
+    .is_none());
+    assert_eq!(SAMPLE.take().unwrap().1, 4096);
+    assert_eq!(staging.reserved_bytes(), 0);
 }
