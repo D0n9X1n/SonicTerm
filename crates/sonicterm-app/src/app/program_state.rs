@@ -751,6 +751,17 @@ impl App {
     }
 
     /// Acknowledge focus in window `win_id` before its markers are read for a frame.
+    /// Settle what one dispatched event changed: tab visits and the frontmost window's focused
+    /// pane. A focus move (a split, a tab or a closed pane) is acknowledged on the event that made
+    /// it, so a pane focused and left again before the next redraw still sees its records end.
+    pub(super) fn after_dispatch(&mut self) {
+        self.acknowledge_tab_activations();
+        // Only the frontmost window has a focused pane; others lost theirs on their blur.
+        if let Some(win_id) = self.registry.frontmost_window {
+            self.acknowledge_focused_status_in(win_id);
+        }
+    }
+
     pub(super) fn acknowledge_focused_status_in(&mut self, win_id: WindowId) {
         let frontmost = self.registry.frontmost_window == Some(win_id);
         if let Some(window) = self.registry.windows.get_mut(&win_id) {

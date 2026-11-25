@@ -1165,8 +1165,8 @@ URI to 8 KiB and client id to 1 KiB.
   `done` and `error` end when the pane gains focus (its window becomes frontmost, or its tab or
   split becomes active there) or the user types a key into it, checked against the pane's own
   records, so one the tab marker does not show yet ends too. A window focus change applies on
-  its native focus event, so a blur and refocus between two frames still counts; a tab or split
-  switch applies at the window's next frame. The key releases SonicTerm sends for keys still held when a
+  its native focus event, and a tab or split switch at the end of the event that made it, so a
+  pane focused and left again between two frames still counts. The key releases SonicTerm sends for keys still held when a
   window loses focus are not the user typing and end nothing. RIS ends every record. The most
   urgent record of a tab's panes is the tab marker described in [Usage](Usage). A discarded
   report logs a fixed reason code, rate-limited, never its text; ids, apps, titles and messages

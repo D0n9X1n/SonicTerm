@@ -13,7 +13,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.note_frame_user_wake();
         let started = self.frame_clock_start();
         self.do_user_event(event_loop, event);
-        self.acknowledge_tab_activations();
+        self.after_dispatch();
         self.note_frame_dispatch(frame_counters::DispatchKind::UserEvent, started);
         self.emit_frame_lines(None);
     }
@@ -33,7 +33,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.note_redraw_requested(win_id);
         }
         self.do_window_event(event_loop, win_id, event);
-        self.acknowledge_tab_activations();
+        self.after_dispatch();
         if let Some(started) = started {
             // the gate is on, the window's handler time is recorded.
             self.note_window_handler(win_id, started, counted);

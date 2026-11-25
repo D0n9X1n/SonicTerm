@@ -219,6 +219,51 @@ fn a_blur_and_refocus_between_redraws_acknowledges() {
     assert_eq!(markers(&mut app, child)[1], None);
 }
 
+/// A focus move is acknowledged on the event that made it, not on the next redraw: switching to a
+/// tab and back again before any frame still ends the visited pane's done record, because each
+/// dispatched event settles the frontmost window's focused pane.
+#[test]
+fn a_tab_visited_and_left_between_redraws_acknowledges() {
+    let (mut app, child, front, back) = two_tabs();
+    app.handle_window_focus_changed(child, true);
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(0);
+    app.after_dispatch();
+    feed(&mut app, back, "\x1b]7501;state=done\x07");
+    feed(&mut app, front, "\x1b]7501;state=error\x07");
+    // Two events, A -> B -> A, with no redraw in between.
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(1);
+    app.after_dispatch();
+    app.registry.windows.get_mut(&child).unwrap().tabs.activate(0);
+    app.after_dispatch();
+    // The visited back pane's done ended; returning to the front is a new edge for its error too.
+    assert_eq!(markers(&mut app, child), vec![None, None]);
+}
+
+/// The same holds for a split: focusing the other pane of one tab and coming back before a frame
+/// ends the visited pane's record, through the keymap's real pane-focus path.
+#[test]
+fn a_split_visited_and_left_between_redraws_acknowledges() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let child = app.__test_seed_child_window(&["split"]);
+    let first = app.registry.windows[&child].tab_states[0].active_pane;
+    assert!(app.__test_child_split_active_right(child));
+    let second = app.registry.windows[&child].tab_states[0].active_pane;
+    assert_ne!(first, second, "the split focused its new pane");
+    app.handle_window_focus_changed(child, true);
+    app.after_dispatch();
+    let left = sonicterm_cfg::keymap::Direction::Left;
+    let right = sonicterm_cfg::keymap::Direction::Right;
+    assert!(app.__test_invoke_focus_pane_dir_in_child(child, left));
+    app.after_dispatch();
+    feed(&mut app, second, "\x1b]7501;state=done\x07");
+    // Two events, first -> second -> first, with no redraw in between.
+    assert!(app.__test_invoke_focus_pane_dir_in_child(child, right));
+    app.after_dispatch();
+    assert!(app.__test_invoke_focus_pane_dir_in_child(child, left));
+    app.after_dispatch();
+    assert_eq!(markers(&mut app, child), vec![None]);
+}
+
 /// Focus-loss key cleanup is not the user looking: the release bytes it writes as keyboard input
 /// leave a done or error record in place.
 #[test]
