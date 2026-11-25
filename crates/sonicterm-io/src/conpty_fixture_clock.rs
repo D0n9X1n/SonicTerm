@@ -113,6 +113,11 @@ impl CaseClock {
         Arrival::InTime
     }
 
+    /// The case whose section is open, if any.
+    pub(crate) fn open_case(&self) -> Option<&str> {
+        self.open.as_deref()
+    }
+
     /// Record the open section closing in a chunk received at `received_at`.
     pub(crate) fn closed(&mut self, received_at: Instant) -> Arrival {
         self.ended(received_at)
@@ -138,6 +143,34 @@ impl CaseClock {
 /// The case a section belongs to: `name` in `name/out` or `name/in`.
 fn case_of(section: &str) -> &str {
     section.rsplit_once('/').map_or(section, |(case, _)| case)
+}
+
+/// Why a host's scan ended.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ScanEnd {
+    /// The child's `DONE` arrived in time.
+    Done,
+    /// A deadline passed, with the named case's section open or none.
+    Expired(Option<String>),
+    /// The child's output ended before `DONE`.
+    Disconnected,
+}
+
+/// The `scan` field of a host's end line: `done` for a timely `DONE`; `required` only when the
+/// deadline passed inside the last case, that case is scan-optional, and every other case's
+/// sections closed (`others_closed`); `expired` for anything else, a disconnect included.
+pub(crate) fn scan_status(
+    end: &ScanEnd,
+    last_optional: Option<&str>,
+    others_closed: bool,
+) -> &'static str {
+    match end {
+        ScanEnd::Done => "done",
+        ScanEnd::Expired(Some(open)) if Some(open.as_str()) == last_optional && others_closed => {
+            "required"
+        }
+        ScanEnd::Expired(_) | ScanEnd::Disconnected => "expired",
+    }
 }
 
 /// The outer test's one total deadline. Work (staging and each host's run) ends a teardown

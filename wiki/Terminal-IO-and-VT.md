@@ -833,8 +833,9 @@ required row on the packaged runtime; the other rows are printed as evidence. Ea
 one 5 s deadline from its first section, which no later sentinel extends. A chunk of output the
 host receives at or past the deadline in force is refused whole, so none of its sentinels can
 close, abandon or open a section; between cases a host waits at most 5 s. A host's end line says
-whether its scan reached the child's `DONE`; an expired scan fails the run unless it expired inside
-the last, recorded 4 MiB case after every other case closed. One 150 s
+whether its scan reached the child's `DONE`. A scan that expired or whose output ended first fails
+the run, except a deadline inside the last case when that case is the recorded 4 MiB write marked
+scan-optional and every other case closed. One 150 s
 deadline covers staging, the host copies, both hosts and their teardowns. A host runs at most
 60 s and is not launched with less than 45 s of scanning left before its 10 s report margin,
 enough for a runtime that answers no query. The outer test refuses an end line its reader took

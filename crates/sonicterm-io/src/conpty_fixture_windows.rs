@@ -43,8 +43,8 @@ use windows::{
 };
 
 use super::clock::{
-    abandon, collect_input, confirmed, reap, settle_input, wait_until, Arrival, CaseClock, Input,
-    Launch, RunClock, Teardown, Unjobbed, HOST_BUDGET, REPORT_MARGIN,
+    abandon, collect_input, confirmed, reap, scan_status, settle_input, wait_until, Arrival,
+    CaseClock, Input, Launch, RunClock, ScanEnd, Teardown, Unjobbed, HOST_BUDGET, REPORT_MARGIN,
 };
 use super::{
     classify, classify_repaint, find, hex, json_field, row_line, Case, Evidence, Expected,
@@ -170,7 +170,7 @@ fn run_host<E: Engine>(role: &str, test_name: &str, cases: &[Case], mut engine: 
         spawned.is_ok(),
         selected.unwrap_or_default(),
     );
-    let (closed, scanned) = match spawned {
+    let (closed, scan_end) = match spawned {
         Ok(pty) => drive(&pty, cases, &mut engine, loop_budget),
         Err(error) => {
             // The launch failed, so every row is inconclusive; the error names no payload.
@@ -178,29 +178,26 @@ fn run_host<E: Engine>(role: &str, test_name: &str, cases: &[Case], mut engine: 
                 "{LINE_PREFIX}{{\"kind\":\"launch-error\",\"error\":{:?}}}",
                 error.to_string()
             );
-            (HashMap::new(), false)
+            (HashMap::new(), ScanEnd::Disconnected)
         }
     };
     emit_rows(cases, &closed, runtime_ok, &mut engine);
-    // `scan` is `done` when the child's DONE arrived in time, `required` when the scan expired only
-    // inside a scan-optional case after every other case closed, else `expired`.
-    let scan = match (scanned, required_closed(cases, &closed)) {
-        (true, _) => "done",
-        (false, true) => "required",
-        (false, false) => "expired",
-    };
+    // Only the last case may be scan-optional, and only a deadline inside it after every other
+    // case closed lets the run pass without DONE.
+    let last_optional = cases.last().filter(|case| case.scan_optional).map(|case| case.name);
+    let scan = scan_status(&scan_end, last_optional, required_closed(cases, &closed));
     println!("{LINE_PREFIX}{{\"kind\":\"end\",\"role\":\"{role}\",\"scan\":\"{scan}\"}}");
 }
 
 /// Scan the child's output until `DONE` or the deadline [`CaseClock`] puts in force; return each
-/// section's evidence that closed in time and whether `DONE` arrived. A chunk's time is when the
+/// section's evidence that closed in time and why the scan ended. A chunk's time is when the
 /// host received it from the PTY reader. Dropping `pty` afterwards kills and reaps the child.
 fn drive<E: Engine>(
     pty: &PtyHandle,
     cases: &[Case],
     engine: &mut E,
     loop_budget: Duration,
-) -> (HashMap<String, Evidence>, bool) {
+) -> (HashMap<String, Evidence>, ScanEnd) {
     let started = Instant::now();
     let mut clock = CaseClock::new(started, started + loop_budget);
     let mut scanner = Scanner::default();
@@ -220,7 +217,7 @@ fn drive<E: Engine>(
         else {
             // When: checked_duration_since finds the deadline in force passed, open sections read
             // inconclusive.
-            return (closed, false);
+            return (closed, ScanEnd::Expired(clock.open_case().map(str::to_owned)));
         };
         // The wait never runs past the deadline in force, so a chunk is stamped when it arrived.
         let chunk = match pty.out_rx.recv_timeout(left.min(Duration::from_millis(50))) {
@@ -231,14 +228,14 @@ fn drive<E: Engine>(
             }
             Err(RecvTimeoutError::Disconnected) => {
                 // When: the output channel is Disconnected, the child is gone; report what closed.
-                return (closed, false);
+                return (closed, ScanEnd::Disconnected);
             }
         };
         let received_at = Instant::now();
         if clock.admits(received_at) == Arrival::Late {
             // When: admits says Arrival::Late, the chunk is refused whole: none of its sentinels
             // may end the expired section, open another or finish the run.
-            return (closed, false);
+            return (closed, ScanEnd::Expired(clock.open_case().map(str::to_owned)));
         }
         let reply = engine.output(&chunk);
         if !reply.is_empty() {
@@ -251,7 +248,7 @@ fn drive<E: Engine>(
                     // When: a section `Opened`, an `/in` section may need injected bytes or a resize.
                     if clock.opened(&name, received_at) == Arrival::Late {
                         // When: clock.opened says Arrival::Late, nothing after it is evidence.
-                        return (closed, false);
+                        return (closed, ScanEnd::Expired(clock.open_case().map(str::to_owned)));
                     }
                     let phase = name
                         .strip_suffix("/in")
@@ -274,7 +271,7 @@ fn drive<E: Engine>(
                     // When: a section `Closed`, its evidence counts only inside its case's deadline.
                     if clock.closed(received_at) == Arrival::Late {
                         // When: clock.closed says Arrival::Late, the late row is refused.
-                        return (closed, false);
+                        return (closed, ScanEnd::Expired(clock.open_case().map(str::to_owned)));
                     }
                     closed.insert(name, evidence);
                 }
@@ -283,12 +280,12 @@ fn drive<E: Engine>(
                     // inconclusive; silence is measured from it.
                     if clock.abandoned(received_at) == Arrival::Late {
                         // When: clock.abandoned says Arrival::Late, nothing after it is evidence.
-                        return (closed, false);
+                        return (closed, ScanEnd::Expired(clock.open_case().map(str::to_owned)));
                     }
                 }
                 ScanEvent::Done => {
                     // When: the child printed `Done`, every section it will print has arrived.
-                    return (closed, true);
+                    return (closed, ScanEnd::Done);
                 }
             }
         }

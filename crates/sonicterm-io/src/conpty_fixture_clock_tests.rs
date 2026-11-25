@@ -419,3 +419,22 @@ fn the_least_loop_covers_a_runtime_that_answers_nothing() {
     // Pre-staged runs admit both hosts a full loop with their teardowns.
     assert!(HOST_BUDGET * 2 + TEARDOWN_BUDGET * 2 <= TOTAL_BUDGET);
 }
+
+/// A scan passes without `DONE` only when its deadline passed inside the last case, that case is
+/// scan-optional, and every other case closed: a timeout inside the optional tail is `required`,
+/// while a disconnect (with or without every mandatory row), an expiry in another case, an
+/// expiry between cases, or any suite without an optional tail is `expired`.
+#[test]
+fn only_a_deadline_inside_the_optional_tail_passes_without_done() {
+    let tail = Some("osc52-c-4mib");
+    let in_tail = ScanEnd::Expired(Some("osc52-c-4mib".to_owned()));
+    assert_eq!(scan_status(&ScanEnd::Done, None, false), "done");
+    assert_eq!(scan_status(&in_tail, tail, true), "required");
+    assert_eq!(scan_status(&in_tail, tail, false), "expired", "a mandatory row is missing");
+    assert_eq!(scan_status(&ScanEnd::Disconnected, tail, true), "expired", "EOF after every row");
+    assert_eq!(scan_status(&ScanEnd::Disconnected, None, true), "expired", "EOF, no optional tail");
+    assert_eq!(scan_status(&in_tail, None, true), "expired", "the suite has no optional tail");
+    let elsewhere = ScanEnd::Expired(Some("osc4-query".to_owned()));
+    assert_eq!(scan_status(&elsewhere, tail, true), "expired", "expired in another case");
+    assert_eq!(scan_status(&ScanEnd::Expired(None), tail, true), "expired", "between cases");
+}
