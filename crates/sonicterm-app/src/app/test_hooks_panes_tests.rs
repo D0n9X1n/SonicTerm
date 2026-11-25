@@ -104,3 +104,22 @@ dGV4dC9odG1sIGltYWdlL3BuZyBhcHBsaWNhdGlvbi94LXNvbmljdGVybS10ZXN0IHRleHQvcGxhaW4=
 \x1b]5522;type=read:status=DONE:id=m\x1b\\";
     assert_eq!(String::from_utf8(pane.replies(request)).unwrap(), expected);
 }
+
+/// Contract: the clipboard reply pane counts a write as committed only when it reaches the
+/// commit behind its binding, as the worker does: an admitted write commits once and answers
+/// `DONE`, while a write under `osc52 = "deny"` commits nothing and never answers `DONE`, so the
+/// F-ConPTY smoke's `DONE` row stands for a write that committed.
+#[test]
+fn clipboard_reply_pane_counts_only_committed_writes() {
+    let write = b"\x1b]5522;type=write:id=fixture\x07\
+\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\\
+\x1b]5522;type=wdata\x07";
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    assert!(String::from_utf8_lossy(&pane.replies(write)).contains("status=DONE"));
+    assert_eq!(pane.writes_committed(), 1, "an admitted write commits");
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    pane.set_write_policy(sonicterm_cfg::config::Osc52Policy::Deny);
+    let reply = pane.replies(write);
+    assert_eq!(pane.writes_committed(), 0, "a denied write commits nothing");
+    assert!(!String::from_utf8_lossy(&reply).contains("DONE"), "{reply:?}");
+}

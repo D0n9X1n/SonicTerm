@@ -845,6 +845,8 @@ impl App {
             handles,
             sync_latch: super::spawn_pane::SyncLatch::default(),
             clipboard: None,
+            writes_committed: 0,
+            staging: None,
             _pane: pane,
         }
     }
@@ -864,54 +866,18 @@ impl App {
             sonicterm_cfg::config::DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES,
         );
         staging.set_read_policy(sonicterm_cfg::config::Osc52ReadPolicy::Allow);
+        pane.staging = Some(Arc::clone(&staging));
         pane.handles = pane.handles.with_clipboard_staging(staging);
         pane.clipboard = Some(Arc::new(FixedClipboard(text.to_string())));
         pane
     }
 }
 
-/// A fake clipboard that always holds one text and [`REPLY_PANE_TYPES`], for reply panes; never
-/// the user's clipboard.
 #[cfg(any(test, feature = "test-support"))]
-struct FixedClipboard(String);
-
-/// The non-text representations every reply pane's fake clipboard holds, which the F-ConPTY
-/// multi-type rows read.
+#[path = "test_hooks_panes_clipboard.rs"]
+mod fixed_clipboard;
 #[cfg(any(test, feature = "test-support"))]
-const REPLY_PANE_TYPES: &[(&str, &[u8])] = &[
-    ("text/html", b"<b>fixture</b>"),
-    ("image/png", b"PNG"),
-    ("application/x-sonicterm-test", b"custom"),
-];
-
-#[cfg(any(test, feature = "test-support"))]
-impl super::osc52_read_source::ClipboardTextSource for FixedClipboard {
-    fn read_text_bounded(
-        &self,
-        _location: super::osc52_read_source::ReadLocation,
-        max_bytes: usize,
-    ) -> super::osc52_read_source::ReadOutcome {
-        if self.0.len() > max_bytes {
-            // When: the text is longer than max_bytes, it is refused as a native read would be.
-            return super::osc52_read_source::ReadOutcome::TooLarge;
-        }
-        super::osc52_read_source::ReadOutcome::Text(self.0.clone())
-    }
-
-    fn read_type_bounded(
-        &self,
-        _location: super::osc52_read_source::ReadLocation,
-        mime: &str,
-        max_bytes: usize,
-    ) -> super::osc52_read_source::TypeRead {
-        use super::osc52_read_source::TypeRead;
-        match REPLY_PANE_TYPES.iter().find(|(name, _)| *name == mime) {
-            Some((_, bytes)) if bytes.len() > max_bytes => TypeRead::TooLarge,
-            Some((_, bytes)) => TypeRead::Bytes(bytes.to_vec()),
-            None => TypeRead::Absent,
-        }
-    }
-}
+use fixed_clipboard::FixedClipboard;
 
 /// Test-only: a pane without a PTY or window whose batches run the production publisher,
 /// `publish_pane_vt_batch_with`, and return the bytes it hands the pane's reply path.
@@ -922,6 +888,10 @@ pub struct TestReplyPane {
     sync_latch: super::spawn_pane::SyncLatch,
     /// The fake clipboard readable tickets are answered from; `None` answers every read empty.
     clipboard: Option<Arc<dyn super::osc52_read_source::ClipboardTextSource>>,
+    /// Writes committed behind their binding so far.
+    writes_committed: usize,
+    /// The private staging a clipboard reply pane reserves from; `None` for a plain reply pane.
+    staging: Option<Arc<super::osc52_stream::ClipboardStaging>>,
     /// Keeps the pane state the handles were cloned from alive for the pane's whole life.
     _pane: PaneState,
 }
@@ -968,14 +938,35 @@ impl TestReplyPane {
                     .extend(ticket.failure_reply(sonicterm_vt::vt::KittyClipboardStatus::Eperm)),
             }
         }
-        // The fake clipboard takes every posted write, so an OSC 5522 write is answered `DONE`
-        // through the production status builder; an OSC 52 write has no status.
+        // Each posted write commits as the worker does, behind its binding: one the binding still
+        // admits counts as written and an OSC 5522 write answers `DONE`; a stale one changes
+        // nothing and answers nothing. An OSC 52 write has no status.
         for job in writes.iter().filter_map(|write| write.take()) {
+            if !job.binding.may_commit() {
+                // When: may_commit refuses, the write went stale after posting and is dropped.
+                continue;
+            }
+            self.writes_committed += 1;
             if let Some(kitty) = &job.kitty {
                 replies.extend(kitty.status(sonicterm_vt::vt::KittyClipboardStatus::Done));
             }
         }
         replies
+    }
+
+    /// The writes this pane committed to its fake clipboard so far.
+    #[doc(hidden)]
+    pub fn writes_committed(&self) -> usize {
+        self.writes_committed
+    }
+
+    /// Change `osc52` on this pane's private staging, as a reload does, moving its policy
+    /// generation.
+    #[doc(hidden)]
+    pub fn set_write_policy(&self, policy: sonicterm_cfg::config::Osc52Policy) {
+        let staging = self.staging.as_ref().expect("a clipboard reply pane");
+        staging.set_write_policy(policy);
+        staging.bump_policy_generation();
     }
 }
 
