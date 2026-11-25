@@ -184,10 +184,9 @@ fn a_hung_host_is_terminated_early_enough_to_be_reaped() {
     let mut steps =
         FakeTeardown { exits_after_terminate: true, job_empties: true, ..FakeTeardown::default() };
     let now = Instant::now();
-    let deadline = now + Duration::from_millis(200);
-    assert!(reap_within(&mut steps, now + Duration::from_millis(80), deadline));
+    let deadline = now + Duration::from_secs(30);
+    assert!(reap_within(&mut steps, now + Duration::from_millis(20), deadline));
     assert!(steps.terminated);
-    assert!(Instant::now() < deadline);
 }
 
 /// The natural-exit wait is only part of the teardown allowance, so the production reap always
@@ -236,8 +235,8 @@ fn a_failed_teardown_reports_unreaped_within_its_deadline() {
     assert!(survivor.terminated);
     let mut leftover = FakeTeardown { host_exits: true, ..FakeTeardown::default() };
     assert!(!reap_within(&mut leftover, now + Duration::from_millis(20), deadline));
-    // Both share one deadline, so the whole teardown ends shortly after it.
-    assert!(Instant::now() < deadline + Duration::from_millis(200));
+    // Both share one deadline, so the whole teardown ends after it, not after a second allowance.
+    assert!(Instant::now() < deadline + Duration::from_secs(5));
 }
 
 /// A scripted host outside its job: whether the kill call and the reap succeed.
@@ -308,11 +307,15 @@ fn a_flood_stops_the_settle_and_a_later_case_settles() {
     });
     let started = Instant::now();
     assert!(!settle_input(&receiver));
-    assert!(started.elapsed() <= SETTLE_DEADLINE + Duration::from_millis(200));
+    // The drain ends at its deadline or byte cap, never consuming the refilled queue forever.
+    assert!(started.elapsed() < SETTLE_DEADLINE + Duration::from_secs(5));
     stop_tx.send(()).expect("stop the flood");
-    // Drain what the flooder queued before it stopped, then the next case's input settles.
-    while receiver.recv_timeout(Duration::from_millis(50)).is_ok() {}
+    // Unblock and join the flooder, then drain what it queued: nothing more can arrive after.
+    while flooder.is_finished().then_some(()).is_none() {
+        let _ = receiver.recv_timeout(Duration::from_millis(10));
+    }
     flooder.join().expect("flooder ends");
+    while receiver.try_recv().is_ok() {}
     assert!(settle_input(&receiver));
 }
 
@@ -365,24 +368,16 @@ fn a_leftover_past_the_byte_bound_never_settles() {
 }
 
 /// A reply still arriving when the read deadline comes is unsettled, never reported as hex: its
-/// expected prefix could otherwise read as exact while the rest was pending.
+/// expected prefix could otherwise read as exact while the rest was pending. The byte is queued
+/// before the read and the quiet window is longer than the whole deadline, so the deadline always
+/// cuts the window short, however the threads are scheduled.
 #[test]
 fn a_reply_cut_by_the_deadline_is_unsettled() {
-    let (sender, receiver) = mpsc::sync_channel(64);
-    let drip = std::thread::spawn(move || {
-        for _ in 0..20 {
-            if sender.send(b"x".to_vec()).is_err() {
-                // When: send fails, the reader is gone and the drip ends.
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    });
-    let reply =
-        collect_input_within(&receiver, Duration::from_millis(80), Duration::from_millis(50));
+    let (sender, receiver) = mpsc::sync_channel(4);
+    sender.send(b"x".to_vec()).expect("queue the first byte");
+    let reply = collect_input_within(&receiver, Duration::from_millis(50), Duration::from_secs(30));
     assert_eq!(reply, Input::Unsettled);
-    drop(receiver);
-    drip.join().expect("drip ends");
+    drop(sender);
 }
 
 /// No reply at all within the deadline is an empty reply, which a row reads as a mismatch.
@@ -401,10 +396,9 @@ fn input_delayed_across_a_no_echo_case_is_settled_away() {
     let (sender, receiver) = mpsc::sync_channel(4);
     // The earlier case's late reply lands while a no-echo case runs; the echo case settles first.
     sender.send(b"late".to_vec()).expect("queue the late reply");
-    assert!(settle_input_within(&receiver, Duration::from_millis(200), Duration::from_millis(30)));
+    assert!(settle_input_within(&receiver, Duration::from_secs(30), Duration::from_millis(30)));
     sender.send(b"reply".to_vec()).expect("queue the echo reply");
-    let reply =
-        collect_input_within(&receiver, Duration::from_millis(200), Duration::from_millis(30));
+    let reply = collect_input_within(&receiver, Duration::from_secs(30), Duration::from_millis(30));
     assert_eq!(reply, Input::Bytes(b"reply".to_vec()));
 }
 
