@@ -52,12 +52,21 @@ pub(crate) fn shared_headless_device() -> (wgpu::Device, wgpu::Queue) {
 }
 
 /// The process's shared headless device with the optional features production selects, such as
-/// dual-source blending where the adapter offers it.
+/// dual-source blending where the adapter offers it. Off Windows production selects none, so this
+/// is the plain device itself: one device, created once, so no two test threads ever create one.
 pub(crate) fn shared_featured_device() -> (wgpu::Device, wgpu::Queue) {
-    static FEATURED: std::sync::OnceLock<(wgpu::Device, wgpu::Queue)> = std::sync::OnceLock::new();
-    shared_device(&FEATURED, |adapter| {
-        crate::core::selected_optional_device_features(adapter.features(), cfg!(windows))
-    })
+    #[cfg(target_os = "windows")]
+    {
+        static FEATURED: std::sync::OnceLock<(wgpu::Device, wgpu::Queue)> =
+            std::sync::OnceLock::new();
+        shared_device(&FEATURED, |adapter| {
+            crate::core::selected_optional_device_features(adapter.features(), true)
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        shared_headless_device()
+    }
 }
 
 pub(crate) fn tracked_font_stack(font_size: f64) -> FontStack {
@@ -151,8 +160,10 @@ pub(crate) fn fallback_stack_with_locator(
 }
 
 /// Off Windows, every device a lib test uses comes from `shared_device`, so no two test threads
-/// create or destroy a software device at once. A `request_device` call in another test or fixture
-/// file must be Windows-only (WARP), which this scan checks by the `cfg` above its function.
+/// create or destroy a software device at once. The scan reads code only (comments and literals
+/// blanked) and finds the call by its tokens, whatever whitespace splits them. A call is allowed
+/// only inside `shared_device` itself or inside a function whose own attributes include exactly
+/// `#[cfg(target_os = "windows")]`; a negated or borrowed cfg does not count.
 #[test]
 fn only_the_shared_helper_creates_a_device_off_windows() {
     let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -160,28 +171,71 @@ fn only_the_shared_helper_creates_a_device_off_windows() {
     for entry in std::fs::read_dir(&source).expect("source directory") {
         let path = entry.expect("source entry").path();
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_owned();
-        let test_code = name.ends_with("_tests.rs") || name.contains("fixture");
-        if !test_code || name == "lib_tests.rs" {
-            // When: the file is not test code, or is this shared helper's own file, it is skipped.
+        if !(name.ends_with("_tests.rs") || name.contains("fixture")) {
+            // When: the file is not test code, production's own device creation is not this rule's.
             continue;
         }
         let text = std::fs::read_to_string(&path).expect("test source");
-        for (at, _) in text.match_indices(".request_device(") {
-            let line_start = text[..at].rfind('\n').map_or(0, |start| start + 1);
-            if text[line_start..at].contains('"') {
-                // When: a quote opens before the call on its line, it is a source-scan literal.
-                continue;
-            }
-            // The nearest function header above the call, and the lines just above it.
-            let head = text[..at].rfind("\nfn ").or_else(|| text[..at].rfind(" fn "));
-            let above = head.map_or("", |start| &text[start.saturating_sub(160)..start]);
-            if !above.contains("target_os = \"windows\"") {
-                // When: the call's function carries no Windows-only cfg, it runs on Linux too.
-                unshared.push(format!("{name}:{at}"));
-            }
-        }
+        let calls = unshared_device_calls(&text);
+        unshared.extend(calls.into_iter().map(|line| format!("{name}:{line}")));
     }
     assert!(unshared.is_empty(), "test devices outside the shared helper: {unshared:?}");
+}
+
+/// The 1-based lines of `.request_device(` calls in `text` that run off Windows outside
+/// `shared_device`.
+fn unshared_device_calls(text: &str) -> Vec<usize> {
+    use crate::source_scan::{code_only, line_number, token_matches};
+    let code = code_only(text);
+    let mut lines = Vec::new();
+    for at in token_matches(&code, ".request_device(") {
+        let Some(header) = code[..at].rfind("fn ") else {
+            // When: no `fn` precedes the call, it is outside any function: reported.
+            lines.push(line_number(text, at));
+            continue;
+        };
+        let after = &code[header + 3..];
+        let name_end = after.find(|char: char| !char.is_alphanumeric() && char != '_');
+        if &after[..name_end.unwrap_or(after.len())] == "shared_device" {
+            // When: the call is inside `shared_device`, it is the one allowed creation.
+            continue;
+        }
+        // The function's own attributes: the lines between the previous item's end and its header.
+        let before = &code[..header];
+        let item_start = before.rfind(['}', ';']).map_or(0, |end| end + 1);
+        // `code_only` blanks the cfg's string, so the attribute is read from the source text at the
+        // same offsets.
+        let windows_only = text[item_start..header]
+            .lines()
+            .any(|line| line.trim() == "#[cfg(target_os = \"windows\")]");
+        if !windows_only {
+            // When: the function's own attributes are not exactly Windows-only, it runs on Linux.
+            lines.push(line_number(text, at));
+        }
+    }
+    lines
+}
+
+/// The scan reports a Linux-reachable call, a negated cfg and a cfg borrowed from an earlier item,
+/// and accepts a Windows-only function, the shared helper, and the call's text inside a string or
+/// a comment.
+#[test]
+fn the_device_scan_reads_each_calls_own_cfg() {
+    let linux = "fn helper() {\n    adapter.request_device(&descriptor);\n}\n";
+    assert_eq!(unshared_device_calls(linux), vec![2]);
+    let negated = "#[cfg(not(target_os = \"windows\"))]\nfn helper() {\n    adapter\n        \
+                   .request_device (&descriptor);\n}\n";
+    assert_eq!(unshared_device_calls(negated).len(), 1, "a negated cfg runs on Linux");
+    let borrowed = "#[cfg(target_os = \"windows\")]\nfn warp() {}\nfn linux() {\n    \
+                    adapter.request_device(&descriptor);\n}\n";
+    assert_eq!(unshared_device_calls(borrowed).len(), 1, "an earlier item's cfg is not its own");
+    let windows = "#[cfg(target_os = \"windows\")]\nfn warp() {\n    \
+                   adapter.request_device(&descriptor);\n}\n";
+    assert!(unshared_device_calls(windows).is_empty());
+    let shared = "fn shared_device() {\n    adapter.request_device(&descriptor);\n}\n";
+    assert!(unshared_device_calls(shared).is_empty());
+    let quoted = "fn scan() {\n    let text = \".request_device(\"; // .request_device(\n}\n";
+    assert!(unshared_device_calls(quoted).is_empty());
 }
 
 #[test]
