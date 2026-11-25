@@ -4,9 +4,10 @@
 //! A read's payload is a strict Base64 list of MIME types, where `.` asks for the type listing. The
 //! reply is one message: `OK`, an optional listing `DATA` packet, `DATA` chunks of at most 4096 raw
 //! bytes per served type, each repeating the opening id and the MIME type, then `DONE`. Every bound
-//! is checked before anything grows: a type's text is read with an 8 MiB cap and served only while
-//! the whole frame stays within 12 MiB; otherwise it is omitted, which the protocol reads as
-//! unavailable. Only text representations are read; other types are omitted.
+//! is checked before anything grows: another type is read only while the frame already built leaves
+//! the 21 MiB reservation room for that type's worst case, its text is read with an 8 MiB cap, and
+//! it is served only while the whole frame stays within 12 MiB; otherwise it is omitted, which the
+//! protocol reads as unavailable.
 
 use base64::Engine as _;
 use sonicterm_vt::vt::{
@@ -37,10 +38,16 @@ pub(in crate::app) const KITTY_LISTING_CAP_BYTES: usize = 4096;
 /// Names one listing carries at most.
 const MAX_KITTY_LISTING_NAMES: usize = 64;
 
-/// What one read job reserves from the reply budget before its first native read: its frame, one
-/// type's raw text and the listing, rounded up, so three jobs fit the 64 MiB budget and a fourth
-/// is refused.
+/// What one read job reserves from the reply budget before its first native read, so three jobs fit
+/// the 64 MiB budget and a fourth is refused. It covers the frame already built plus
+/// [`TYPE_HEADROOM_BYTES`] for the type being read, which [`build_read_reply`] checks before every
+/// type.
 pub(in crate::app) const KITTY_READ_RESERVATION_BYTES: usize = 21 * 1024 * 1024;
+
+/// The most reading and serving one type may add to the frame already built: its raw bytes (8 MiB),
+/// plus the larger of their conversion's output (8 MiB, while the native bytes are alive) and the
+/// frame regrown to hold its packets (12 MiB, while the old frame is moved and the text is alive).
+const TYPE_HEADROOM_BYTES: usize = KITTY_READ_TYPE_CAP_BYTES + KITTY_READ_FRAME_CAP_BYTES;
 
 /// One parsed `type=read` request: where its replies go and what it asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,8 +195,10 @@ fn join_listing(names: Vec<String>) -> String {
 
 /// The whole reply to `request`, read through `source`: a status alone when the location is
 /// unavailable (`ENOSYS`) or a native read fails (`EIO`), else OK, the listing, every servable
-/// type's chunks and DONE. At most one type's raw text is alive at once, and the frame never
-/// grows past [`KITTY_READ_FRAME_CAP_BYTES`].
+/// type's chunks and DONE. At most one type's raw text is alive at once, the frame never grows past
+/// [`KITTY_READ_FRAME_CAP_BYTES`], and a type is read only while the frame built so far plus
+/// [`TYPE_HEADROOM_BYTES`] fits [`KITTY_READ_RESERVATION_BYTES`], so the job's peak stays within
+/// what it reserved.
 pub(in crate::app) fn build_read_reply(
     source: &dyn ClipboardTextSource,
     request: &KittyReadRequest,
@@ -222,10 +231,16 @@ pub(in crate::app) fn build_read_reply(
     let done_len = request.data_len(0, 0);
     let mut reply = Vec::with_capacity(fixed);
     push_packet(&mut reply, request, "OK", None);
-    if let Some(joined) = &listing {
+    if let Some(joined) = listing {
+        // The listing is dropped once it is in the frame, so it holds none of the headroom.
         push_packet(&mut reply, request, "DATA", Some((".", joined.as_bytes())));
     }
     for mime in &request.types {
+        if reply.capacity() + TYPE_HEADROOM_BYTES > KITTY_READ_RESERVATION_BYTES {
+            // When: reply.capacity plus TYPE_HEADROOM_BYTES passes KITTY_READ_RESERVATION_BYTES,
+            // this and every later type are omitted unread, since the frame only grows.
+            break;
+        }
         let bytes = match read_one(source, location, mime) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {

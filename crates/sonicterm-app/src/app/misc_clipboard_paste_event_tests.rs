@@ -18,19 +18,28 @@ use sonicterm_io::pty::{SensitiveReply, SensitiveReplyError};
 use sonicterm_ui::broadcast::BroadcastState;
 use sonicterm_ui::copy_mode::CopyModeState;
 use sonicterm_vt::vt::KittyClipboardLocation;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// A clipboard offer: the types a listing names, the version the platform reports (`None` when it
-/// cannot), and the text a follow-up read is served.
+/// cannot), and the text a follow-up read is served. With a gate, each content read blocks, as a
+/// slow native read does, until the test releases it; `reads` counts the content reads made.
 struct FakeOffer {
     types: Mutex<Vec<String>>,
     version: Mutex<Option<u64>>,
+    gate: Mutex<Option<crossbeam_channel::Receiver<()>>>,
+    reads: AtomicUsize,
 }
 
 impl ClipboardTextSource for FakeOffer {
     fn read_text_bounded(&self, _location: ReadLocation, _max_bytes: usize) -> ReadOutcome {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        let gate = self.gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            // A bounded wait, so a test that never releases fails instead of hanging.
+            let _ = gate.recv_timeout(Duration::from_secs(5));
+        }
         ReadOutcome::Text("secret".into())
     }
 
@@ -64,6 +73,8 @@ fn harness() -> Harness {
     let offer = Arc::new(FakeOffer {
         types: Mutex::new(vec!["text/plain".into()]),
         version: Mutex::new(Some(7)),
+        gate: Mutex::new(None),
+        reads: AtomicUsize::new(0),
     });
     app.clip_state.reads.source = offer.clone();
     let sent = Arc::new(Mutex::new(Vec::new()));
@@ -133,6 +144,36 @@ impl Harness {
 
     fn waiting(&self) -> usize {
         self.app.clip_state.reads.waiting.len()
+    }
+
+    /// Block every later content read until the returned sender sends once for it.
+    fn gate_reads(&self) -> crossbeam_channel::Sender<()> {
+        let (release, gate) = crossbeam_channel::unbounded();
+        *self.offer.gate.lock().unwrap() = Some(gate);
+        release
+    }
+
+    /// The content reads the fake clipboard served so far.
+    fn reads(&self) -> usize {
+        self.offer.reads.load(Ordering::SeqCst)
+    }
+
+    /// Run the read pipeline until `done` holds; panics after 5 s.
+    fn pump_until(&mut self, done: impl Fn(&Self) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done(self) {
+            assert!(Instant::now() < deadline, "the read pipeline did not settle");
+            self.app.pump_clipboard_reads();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Run the read pipeline until no read is queued or outstanding.
+    fn pump_until_reader_idle(&mut self) {
+        self.pump_until(|harness| {
+            let reads = &harness.app.clip_state.reads;
+            reads.queued.is_empty() && reads.in_flight.is_none()
+        });
     }
 
     /// Run the read pipeline until `pane` is served; false after 5 s.
@@ -285,8 +326,12 @@ fn clipboard_changed_after_event_requires_consent() {
     let (_, password) = password_of(&harness.events()[0].1);
     *harness.offer.version.lock().unwrap() = Some(8);
     harness.follow_up(pane, "Paste event", &password);
-    assert_eq!(harness.waiting(), 1, "the read asks");
     assert_eq!(harness.grant_count(), 0, "the stale grant is gone");
+    // The reader compares the version before it reads anything, so the read asks instead.
+    harness.pump_until_reader_idle();
+    assert_eq!(harness.waiting(), 1, "the read asks");
+    assert!(!harness.served(pane));
+    assert_eq!(harness.reads(), 0, "the changed offer is never read");
 }
 
 /// Contract: a platform that cannot report the offer version gets the event, but no grant, so the
@@ -470,4 +515,98 @@ fn readonly_receiver_gets_nothing() {
     assert_eq!(targets, vec![harness.pane]);
     assert_eq!(harness.grant_count(), 1);
     assert!(harness.app.__test_drain_pty_writes().is_empty());
+}
+
+/// Contract: a paste grant's approval keeps the offer it was issued for until delivery. A grant
+/// accepted while the one reader is busy waits in the queue; when the clipboard then changes, no
+/// read is served the new offer: the busy read fails its after-read check, the queued one its
+/// before-read check without any native read, and both ask again as ordinary `ask` reads.
+#[test]
+fn offer_change_after_otp_approval_while_queued_asks_again() {
+    let mut harness = harness();
+    let (_, receiver, _peer) = broadcast(&mut harness);
+    let source = harness.pane;
+    feed(&harness.app, source, b"\x1b[?5522h");
+    feed(&harness.app, receiver, b"\x1b[?5522h");
+    harness.paste();
+    let events = harness.events();
+    let (_, source_password) = password_of(&events[0].1);
+    let (_, receiver_password) = password_of(&events[1].1);
+    let release = harness.gate_reads();
+    harness.follow_up(receiver, "Paste event", &receiver_password);
+    harness.pump_until(|harness| harness.reads() == 1);
+    // The receiver's read holds the one reader, so the source's approved read queues behind it.
+    harness.follow_up(source, "Paste event", &source_password);
+    assert_eq!(harness.app.clip_state.reads.queued.len(), 1, "queued behind the busy reader");
+    *harness.offer.version.lock().unwrap() = Some(8);
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    harness.pump_until_reader_idle();
+    assert!(!harness.served(receiver), "the in-progress read is not served the new offer");
+    assert!(!harness.served(source), "nor is the queued one");
+    assert_eq!(harness.waiting(), 2, "both ask again");
+    assert_eq!(harness.reads(), 1, "the queued read never reached the clipboard");
+}
+
+/// Contract: an offer replaced while the approved read runs is caught by the reader's after-read
+/// version check: the data read is dropped, never delivered, and the read asks again.
+#[test]
+fn offer_change_during_native_read_asks_again() {
+    let mut harness = harness();
+    let pane = harness.pane;
+    feed(&harness.app, pane, b"\x1b[?5522h");
+    harness.paste();
+    let (_, password) = password_of(&harness.events()[0].1);
+    let release = harness.gate_reads();
+    harness.follow_up(pane, "Paste event", &password);
+    harness.pump_until(|harness| harness.reads() == 1);
+    *harness.offer.version.lock().unwrap() = Some(8);
+    release.send(()).unwrap();
+    harness.pump_until_reader_idle();
+    assert!(!harness.served(pane), "the data read across the change is dropped");
+    assert_eq!(harness.waiting(), 1, "the read asks again");
+}
+
+/// Contract: DECRST 5522 or RIS after the follow-up was accepted revokes its approval before
+/// delivery, whether the read is in progress or queued: the read is not served, and after DECRST it
+/// asks again as an ordinary `ask` read; another pane's approval is untouched.
+#[test]
+fn decrst_or_ris_after_otp_approval_revokes_before_delivery() {
+    for reset in [&b"\x1b[?5522l"[..], b"\x1bc"] {
+        let mut harness = harness();
+        let pane = harness.pane;
+        feed(&harness.app, pane, b"\x1b[?5522h");
+        harness.paste();
+        let (_, password) = password_of(&harness.events()[0].1);
+        let release = harness.gate_reads();
+        harness.follow_up(pane, "Paste event", &password);
+        harness.pump_until(|harness| harness.reads() == 1);
+        feed(&harness.app, pane, reset);
+        release.send(()).unwrap();
+        harness.pump_until_reader_idle();
+        assert!(!harness.served(pane), "{reset:?}: revoked while the read ran");
+        assert_eq!(harness.waiting(), 1, "{reset:?}: the read asks again");
+    }
+
+    let mut harness = harness();
+    let (_, receiver, _peer) = broadcast(&mut harness);
+    let source = harness.pane;
+    feed(&harness.app, source, b"\x1b[?5522h");
+    feed(&harness.app, receiver, b"\x1b[?5522h");
+    harness.paste();
+    let events = harness.events();
+    let (_, source_password) = password_of(&events[0].1);
+    let (_, receiver_password) = password_of(&events[1].1);
+    let release = harness.gate_reads();
+    harness.follow_up(receiver, "Paste event", &receiver_password);
+    harness.pump_until(|harness| harness.reads() == 1);
+    harness.follow_up(source, "Paste event", &source_password);
+    feed(&harness.app, source, b"\x1b[?5522l");
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    harness.pump_until_reader_idle();
+    assert!(harness.served(receiver), "the receiver's approval still holds");
+    assert!(!harness.served(source), "the queued read lost its approval");
+    assert_eq!(harness.waiting(), 1, "and asks again");
+    assert_eq!(harness.reads(), 1, "without reading the clipboard");
 }

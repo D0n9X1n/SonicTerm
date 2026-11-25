@@ -191,7 +191,7 @@ fn read_with(
     }
     let first = fetch(connection, window, &atoms, max_bytes)?;
     let started = Instant::now();
-    if let FirstReply::Done(outcome) = classify_first(&first, max_bytes) {
+    if let FirstReply::Done(outcome) = classify_first(first, max_bytes) {
         // When: classify_first answers at once, the fetch already deleted the property.
         return Some(outcome);
     }

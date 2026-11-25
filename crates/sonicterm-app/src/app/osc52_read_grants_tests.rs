@@ -11,6 +11,7 @@ fn binding(pane_id: u64) -> ReadBinding {
         command_epoch: 0,
         policy_generation: 0,
         created_at: Instant::now(),
+        paste: None,
     }
 }
 

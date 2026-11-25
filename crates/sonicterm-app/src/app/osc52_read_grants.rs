@@ -10,6 +10,7 @@
 
 use sonicterm_vt::vt::KittyClipboardLocation;
 
+use super::osc52_read_source::ReadLocation;
 use super::osc52_read_ticket::ReadBinding;
 
 /// Grants one pane keeps at most; recording another evicts that pane's oldest.
@@ -187,6 +188,19 @@ pub(in crate::app) struct PasteBinding {
     /// The pane's published paste-events word: DECSET 5522 and its reset count.
     pub(in crate::app) paste_mode: u64,
     pub(in crate::app) policy_generation: u64,
+}
+
+/// What a consumed paste grant approved one read under: the recipient identity the grant was bound
+/// to, and the location and offer version the read must still find. The read's binding carries it
+/// through the native read to delivery, so a later offer or a reset recipient never answers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::app) struct PasteApproval {
+    /// The recipient identity and DECSET 5522 word the grant was issued to.
+    pub(in crate::app) binding: PasteBinding,
+    /// The selection the approved read takes.
+    pub(in crate::app) location: ReadLocation,
+    /// The offer version the event was built from; the reader compares it before and after reading.
+    pub(in crate::app) offer_version: u64,
 }
 
 /// One pane's one-time paste grant: a named read from the same recipient, carrying `password`,

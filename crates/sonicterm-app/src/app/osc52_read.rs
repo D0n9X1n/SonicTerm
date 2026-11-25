@@ -41,11 +41,12 @@ pub(in crate::app) fn frame_bytes(text_bytes: usize) -> usize {
     7 + base64::encoded_len(text_bytes, true).unwrap_or(usize::MAX - 9) + 2
 }
 
-/// Bytes a read of `label_count` destinations reserves before it starts: the largest raw text
-/// one destination may hold plus every destination's largest frame.
+/// Bytes a read of `label_count` destinations reserves before it starts: one destination's largest
+/// text plus its largest frame, and for each later destination two more frames, because appending
+/// its frame may move the frames already built while that destination's text is still alive.
 pub(in crate::app) fn read_reservation_bytes(label_count: usize) -> usize {
     let cap = destination_cap(label_count);
-    cap + label_count * frame_bytes(cap)
+    cap + (2 * label_count.max(1) - 1) * frame_bytes(cap)
 }
 
 /// Append one ST-terminated reply labelled `label` carrying `text` as Base64; the frame is

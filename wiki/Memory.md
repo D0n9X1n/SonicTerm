@@ -250,12 +250,16 @@ A Windows write armed for reassertion keeps its lease, plus its snapshot of the 
 it. A write the budget cannot cover is refused busy.
 
 OSC 52 clipboard reads reserve from their own 64 MiB reply budget before the native read starts:
-the largest raw text the read may return (8 MiB, or 4 MiB per destination for `cp`) plus every
-destination's largest reply. Once the replies are built the reservation shrinks to them, and it
+the largest raw text one destination may return (8 MiB, or 4 MiB per destination for `cp`) plus
+its largest reply, and for `cp` two more replies, because appending the second reply can move the
+first while the second destination's text is alive. Conversions to UTF-8 are built into a buffer
+reserved at the measured length, and an X11 property's value moves into the text. Once the replies are built the reservation shrinks to them, and it
 is released when the PTY writer has written them, or when they are dropped. A read the budget
-cannot cover is answered empty. An OSC 5522 read job reserves 21 MiB from the same budget (its
-12 MiB reply, one type's 8 MiB of text or other bytes and the 4 KiB listing; types are read one
-at a time), so at most three run at once and a
+cannot cover is answered empty. An OSC 5522 read job reserves 21 MiB from the same budget: the
+reply built so far plus, for the type being read, its 8 MiB of raw bytes and the larger of their
+conversion (8 MiB) and the reply regrown to at most 12 MiB. Types are read one at a time, and
+another is read only while the reply so far leaves that much of the reservation, so at most three
+jobs run at once and a
 fourth answers `EBUSY`. The retention pass adds these bytes to the same
 `ClipboardStaging` charge. At most 8 reads hold tickets at once, one per pane; a read whose
 reader is past its deadline keeps its reservation until its native call returns. On macOS the

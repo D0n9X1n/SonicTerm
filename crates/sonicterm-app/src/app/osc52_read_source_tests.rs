@@ -1,5 +1,6 @@
 use super::*;
-use crate::app::osc52_read::READ_TEXT_CAP;
+use crate::app::osc52_read::{read_reservation_bytes, READ_TEXT_CAP};
+use crate::lib_tests::CountAllocations;
 use std::sync::Mutex;
 
 /// A source with fixed outcomes per destination that records each `(location, max)` it was asked.
@@ -152,5 +153,69 @@ fn native_offer_version_where_the_platform_has_one() {
     }
     if !cfg!(target_os = "linux") {
         assert_eq!(source.offer_version(ReadLocation::Primary), None);
+    }
+}
+
+/// Raw clipboard bytes of `length` whose last byte is invalid UTF-8, so a conversion replaces it
+/// with U+FFFD and the text is two bytes longer than the input.
+fn lossy_input(length: usize) -> Vec<u8> {
+    let mut raw = vec![b'a'; length];
+    raw[length - 1] = 0xFF;
+    raw
+}
+
+/// Contract: a lossy UTF-8 conversion builds its text into one buffer reserved at the measured
+/// length, so beyond its input it allocates only the text it returns, never a growing copy.
+#[test]
+fn lossy_utf8_conversion_allocates_only_its_output() {
+    let input = lossy_input(64 * 1024);
+    let counter = CountAllocations::start();
+    let outcome = bounded_utf8(input, 64 * 1024 + 2);
+    let peak = counter.peak_bytes();
+    drop(counter);
+    assert_eq!(outcome, ReadOutcome::Text(format!("{}\u{FFFD}", "a".repeat(64 * 1024 - 1))));
+    assert!(peak <= 64 * 1024 + 2, "peak {peak}");
+}
+
+/// Contract: a Latin-1 conversion builds its text into one buffer reserved at the measured length,
+/// so it allocates only the text it returns, even when every byte takes two UTF-8 bytes.
+#[test]
+fn latin1_conversion_allocates_only_its_output() {
+    let input = vec![0xE9_u8; 64 * 1024];
+    let counter = CountAllocations::start();
+    let outcome = bounded_latin1(&input, 128 * 1024);
+    let peak = counter.peak_bytes();
+    drop(counter);
+    assert_eq!(outcome, ReadOutcome::Text("\u{E9}".repeat(64 * 1024)));
+    assert!(peak <= 128 * 1024, "peak {peak}");
+}
+
+/// A clipboard that converts a copy of `raw` through the real lossy UTF-8 conversion, as the macOS
+/// and X11 readers do with the bytes the native call returned.
+struct Converting {
+    raw: Vec<u8>,
+}
+
+impl ClipboardTextSource for Converting {
+    fn read_text_bounded(&self, _location: ReadLocation, max_bytes: usize) -> ReadOutcome {
+        bounded_utf8(self.raw.clone(), max_bytes)
+    }
+}
+
+/// Contract: an OSC 52 read's peak working set, measured through the real conversion, stays within
+/// what it reserved: for one destination its raw text and frame, and for two destinations read in
+/// turn the first frame, the second text and the frame buffer grown to hold both.
+#[test]
+fn read_replies_peak_within_reservation() {
+    for labels in [&b"c"[..], b"cc"] {
+        let cap = crate::app::osc52_read::destination_cap(labels.len());
+        let source = Converting { raw: lossy_input(cap - 2) };
+        let counter = CountAllocations::start();
+        let replies = read_replies(&source, labels);
+        let peak = counter.peak_bytes();
+        drop(counter);
+        assert!(replies.len() > cap, "{labels:?}: both destinations carry text");
+        let reserved = read_reservation_bytes(labels.len());
+        assert!(peak <= reserved, "{labels:?}: peak {peak} over the {reserved} reserved");
     }
 }

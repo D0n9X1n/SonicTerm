@@ -251,7 +251,18 @@ pub(in crate::app) fn bounded_utf8(bytes: Vec<u8>, max_bytes: usize) -> ReadOutc
     }
     match String::from_utf8(bytes) {
         Ok(text) => ReadOutcome::Text(text),
-        Err(error) => ReadOutcome::Text(String::from_utf8_lossy(error.as_bytes()).into_owned()),
+        Err(error) => {
+            // The replacement is built into one buffer reserved at the measured length, so beside
+            // its input the conversion holds only the text it returns, never a growing copy.
+            let mut text = String::with_capacity(length);
+            for chunk in error.as_bytes().utf8_chunks() {
+                text.push_str(chunk.valid());
+                if !chunk.invalid().is_empty() {
+                    text.push(char::REPLACEMENT_CHARACTER);
+                }
+            }
+            ReadOutcome::Text(text)
+        }
     }
 }
 
@@ -267,7 +278,10 @@ pub(in crate::app) fn bounded_latin1(bytes: &[u8], max_bytes: usize) -> ReadOutc
         // When: the converted length passes max_bytes, nothing is built.
         return ReadOutcome::TooLarge;
     }
-    ReadOutcome::Text(bytes.iter().map(|byte| char::from(*byte)).collect())
+    // Built into one buffer reserved at the measured length, so it never grows while converting.
+    let mut text = String::with_capacity(length);
+    text.extend(bytes.iter().map(|byte| char::from(*byte)));
+    ReadOutcome::Text(text)
 }
 
 /// The native clipboard, read on whichever reader thread calls it.

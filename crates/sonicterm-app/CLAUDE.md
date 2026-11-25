@@ -175,8 +175,11 @@ cargo build -p sonicterm-app
   OSC 5522 write answers `EPERM` while its PTY and command are unchanged; a stopped clipboard
   worker answers its unreported 5522 writes `EIO`. OSC 5522 reads (`kitty_clipboard_read.rs`)
   take the same read ticket (`admit_kitty_read`), reserve 21 MiB from the reply budget and build
-  one OK/DATA/DONE reply on the reader thread, bounded before anything grows; non-text types go
-  through `ClipboardTextSource::read_type_bounded` (8 MiB each, one alive at a time). Session grants
+  one OK/DATA/DONE reply on the reader thread, bounded before anything grows; another type is read
+  only while the frame so far plus `TYPE_HEADROOM_BYTES` (raw bytes plus the larger of their
+  conversion and a regrown frame) fits the reservation, and conversions build into buffers reserved
+  first. Non-text types go through `ClipboardTextSource::read_type_bounded` (8 MiB each, one alive
+  at a time). Session grants
   (`osc52_read_grants.rs`) are created only by the consent page's Always/Ban rows for a ticket
   whose program sent a nonempty `name` and `pw`, keyed by pane, PTY incarnation, owner and RIS
   epochs, operation, location and `pw`; the pump purges stale ones and a policy change clears all.
@@ -184,7 +187,10 @@ cargo build -p sonicterm-app
   pane with the mode (`PaneState::paste_events_mode`, lock-free), not READONLY and not under
   `osc52_read = "deny"` gets OK/listing/DONE with a one-time `pw` through `try_send_reply`; its
   `PasteGrant` exists only after that admission, binds the recipient identity, the 5522 word and
-  the offer version (`ClipboardTextSource::offer_version`), and one named read consumes it.
+  the offer version (`ClipboardTextSource::offer_version`), and one named read consumes it into a
+  `PasteApproval` its `ReadBinding` carries to delivery: revalidation checks the recipient, the
+  reader compares the offer version before and after its native read, and a changed offer or a
+  revoked approval drops the data and returns the ticket to `waiting`.
   A reply dropped after its delivery retries leaves an OSC 5522 read one `EBUSY` packet. Native reads run one at a time on a disposable reader thread that keeps the ticket and
   its reply-budget lease until the native call returns. Replies go only to the source PTY through
   `PtyHandle::try_send_reply`, never the reply spool, a broadcast receiver or a log.

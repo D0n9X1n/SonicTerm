@@ -66,8 +66,9 @@ fn decode(kind: PropertyKind, value: Vec<u8>, max_bytes: usize) -> ReadOutcome {
 }
 
 /// Classify the first reply: an `INCR` announcement is format 32 holding the lower-bound size,
-/// refused past the cap; a text reply is format 8 of a text type with nothing left unread.
-pub(in crate::app) fn classify_first(reply: &PropertyReply, max_bytes: usize) -> FirstReply {
+/// refused past the cap; a text reply is format 8 of a text type with nothing left unread. The
+/// reply is taken by value, so a text value moves into the outcome instead of being copied.
+pub(in crate::app) fn classify_first(reply: PropertyReply, max_bytes: usize) -> FirstReply {
     if reply.kind == PropertyKind::Incr {
         // When: kind is Incr, only a format-32 size announcement starts a transfer.
         let Some(size) = reply.value.get(..4).filter(|_| reply.format == 32) else {
@@ -90,7 +91,7 @@ pub(in crate::app) fn classify_first(reply: &PropertyReply, max_bytes: usize) ->
         // When: bytes remain or the value passes max_bytes, the text is too large.
         return FirstReply::Done(ReadOutcome::TooLarge);
     }
-    FirstReply::Done(decode(reply.kind, reply.value.clone(), max_bytes))
+    FirstReply::Done(decode(reply.kind, reply.value, max_bytes))
 }
 
 /// One `INCR` transfer: format-8 chunks of one text type, until a zero-length chunk.

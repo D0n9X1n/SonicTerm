@@ -19,7 +19,8 @@ use sonicterm_vt::vt::KittyClipboardStatus;
 
 use super::kitty_clipboard_read::build_read_reply;
 use super::osc52_read_grants::{
-    GrantDecision, GrantKey, PasteBinding, PasteGrant, SessionGrants, PASTE_GRANT_LIFETIME,
+    GrantDecision, GrantKey, PasteApproval, PasteBinding, PasteGrant, SessionGrants,
+    PASTE_GRANT_LIFETIME,
 };
 use super::osc52_read_source::{read_replies, ClipboardTextSource, NativeSource, ReadLocation};
 use super::osc52_read_ticket::{CancelReason, ClipboardTicketHandle, ConsentTicket, ReadBinding};
@@ -59,7 +60,9 @@ struct Retry {
 
 /// What a reader thread hands back once its native calls return.
 struct ReaderDone {
-    replies: Vec<u8>,
+    /// The replies, or `None` when a paste-approved read found its offer changed before or after
+    /// reading, so whatever it read was dropped on the reader thread.
+    replies: Option<Vec<u8>>,
     ticket: ConsentTicket,
     lease: ClipLease,
 }
@@ -168,9 +171,9 @@ impl super::App {
         // A paste event's one-time grant is consumed by the first named read that carries its
         // password, whatever answers the read, so a replay never finds it.
         let pasted = self.consume_paste_grant(&ticket);
-        match grant {
+        match (grant, pasted) {
             _ if ticket.readable() => self.clip_state.reads.queued.push_back(ticket),
-            Some(GrantDecision::Always) => {
+            (Some(GrantDecision::Always), _) => {
                 // An Always grant approves a waiting ticket without a page.
                 let mut ticket = ticket;
                 ticket.approve();
@@ -181,17 +184,18 @@ impl super::App {
                     self.clip_state.reads.queued.push_back(ticket);
                 }
             }
-            Some(GrantDecision::Ban) => {
+            (Some(GrantDecision::Ban), _) => {
                 // A Ban grant refuses the request `EPERM` without a page.
                 self.refuse_ticket(ticket, Instant::now());
             }
-            None if pasted => {
-                // A live paste grant approves this one read without a page.
+            (None, Some(approval)) => {
+                // A live paste grant approves this one read without a page, bound to its recipient
+                // and offer until delivery.
                 let mut ticket = ticket;
-                ticket.approve();
+                ticket.approve_by_paste(approval);
                 self.clip_state.reads.queued.push_back(ticket);
             }
-            None => {
+            (None, None) => {
                 // With no grant, the ticket waits for an answer or its expiry.
                 self.clip_state.reads.waiting.push(ticket);
             }
@@ -199,39 +203,38 @@ impl super::App {
         self.pump_clipboard_reads();
     }
 
-    /// Take the paste grant `ticket`'s read names by its pane, location and password, and say
-    /// whether it still holds: its recipient's identity and DECSET 5522 word unchanged since the
-    /// event, the ticket admitted under that same reset count, within its lifetime, and a fresh
-    /// read of the offer version equal to the one the event was bound to. Taken either way.
-    fn consume_paste_grant(&mut self, ticket: &ConsentTicket) -> bool {
+    /// Take the paste grant `ticket`'s read names by its pane, location and password, and return
+    /// the approval it gives while it still holds: its recipient's identity and DECSET 5522 word
+    /// unchanged since the event, the ticket admitted under that same reset count, and within its
+    /// lifetime. Taken either way. The offer is not read here: the reader compares the approval's
+    /// offer version before and after its native read, off the event loop.
+    fn consume_paste_grant(&mut self, ticket: &ConsentTicket) -> Option<PasteApproval> {
         let Some(request) = ticket.kitty_read() else {
             // When: the ticket is no OSC 5522 read, no paste grant can answer it.
-            return false;
+            return None;
         };
         let Some(credential) = request.credential.as_ref() else {
             // When: request.credential is None (no nonempty name and pw), nothing is consumed.
-            return false;
+            return None;
         };
         let pane_id = ticket.binding().pane_id;
         let grants = &mut self.clip_state.reads.paste_grants;
         let Some(grant) = grants.take_for(pane_id, request.location, credential) else {
             // When: take_for finds no grant for this pane, location and password, none applies.
-            return false;
+            return None;
         };
         let now = Instant::now();
         if !self.paste_grant_live(&grant, now)
             || grant.binding.reset_epoch != ticket.binding().reset_epoch
         {
             // When: the recipient changed or the grant expired, the read takes normal consent.
-            return false;
+            return None;
         }
         let location = match request.location {
             sonicterm_vt::vt::KittyClipboardLocation::Standard => ReadLocation::Clipboard,
             sonicterm_vt::vt::KittyClipboardLocation::Primary => ReadLocation::Primary,
         };
-        // The offer is read again now: a clipboard changed since the event ends the grant.
-        // shortcut: this read runs on the event loop; on X11 it can take the 2 s selection wait.
-        self.clip_state.reads.source.offer_version(location) == Some(grant.offer_version)
+        Some(PasteApproval { binding: grant.binding, location, offer_version: grant.offer_version })
     }
 
     /// Whether `grant`'s recipient still has the identity it was issued to and it is young enough.
@@ -325,6 +328,14 @@ impl super::App {
             // When: admits_new_user_input refuses, the window is READONLY.
             return Err(CancelReason::ReadOnly);
         }
+        let live_paste = |paste: &PasteApproval| {
+            self.paste_binding(binding.pane_id).as_ref() == Some(&paste.binding)
+        };
+        if binding.paste.as_deref().is_some_and(|paste| !live_paste(paste)) {
+            // When: a paste-approved read's recipient reset DECSET 5522, RIS or moved, the paste
+            // approval ended; the read itself may still ask.
+            return Err(CancelReason::PasteRevoked);
+        }
         if check_age && now.saturating_duration_since(binding.created_at) > TICKET_LIFETIME {
             // When: check_age is set and the binding outlived TICKET_LIFETIME, it expired.
             return Err(CancelReason::Expired);
@@ -392,7 +403,18 @@ impl super::App {
                 tracing::debug!(pane_id = in_flight.binding.pane_id, "late OSC 52 read dropped");
                 continue;
             }
-            let ReaderDone { replies, ticket, lease } = done;
+            let ReaderDone { replies, mut ticket, lease } = done;
+            let revoked = self.revalidate_ticket(ticket.binding(), now, true)
+                == Err(CancelReason::PasteRevoked);
+            let Some(replies) = replies.filter(|_| !revoked) else {
+                // When: replies is None (the offer changed across the read) or revoked (its paste
+                // approval ended while it ran), the data is dropped; the read waits to be answered.
+                drop(lease);
+                tracing::debug!(pane_id = in_flight.binding.pane_id, "paste approval withdrawn");
+                ticket.withdraw_paste();
+                self.clip_state.reads.waiting.push(ticket);
+                continue;
+            };
             let reply = SensitiveReply::new(replies, Box::new((ticket, lease)));
             self.deliver_read_reply(in_flight.binding, reply, now, true, 0, in_flight.busy);
         }
@@ -434,13 +456,19 @@ impl super::App {
             }
             self.clip_state.reads.waiting.push(ticket);
         }
-        for ticket in std::mem::take(&mut self.clip_state.reads.queued) {
-            if let Err(reason) = self.revalidate_ticket(ticket.binding(), now, true) {
-                // When: revalidate_ticket refuses a queued ticket before its read starts, it ends.
-                self.cancel_ticket(ticket, reason);
-                continue;
+        for mut ticket in std::mem::take(&mut self.clip_state.reads.queued) {
+            match self.revalidate_ticket(ticket.binding(), now, true) {
+                Ok(()) => self.clip_state.reads.queued.push_back(ticket),
+                Err(CancelReason::PasteRevoked) => {
+                    // Only its paste approval ended, so the read waits for an ordinary answer.
+                    ticket.withdraw_paste();
+                    self.clip_state.reads.waiting.push(ticket);
+                }
+                Err(reason) => {
+                    // Any other refusal before the read starts ends the ticket.
+                    self.cancel_ticket(ticket, reason);
+                }
             }
-            self.clip_state.reads.queued.push_back(ticket);
         }
     }
 
@@ -534,18 +562,34 @@ impl super::App {
         let done_tx = reads.done_tx.clone();
         let proxy = self.event_loop_proxy.clone();
         let thread_failure = failure.clone();
+        // A paste-approved read is bound to the offer its event announced.
+        let paste = ticket.paste_approval().map(|paste| (paste.location, paste.offer_version));
         let spawned =
             std::thread::Builder::new().name("sonicterm-clipboard-read".into()).spawn(move || {
                 let mut lease = lease;
-                let read = || match ticket.kitty_read() {
-                    Some(request) => build_read_reply(source.as_ref(), request),
-                    None => read_replies(source.as_ref(), ticket.labels()),
+                let read = || {
+                    let offer_holds = || {
+                        paste.is_none_or(|(location, version)| {
+                            source.offer_version(location) == Some(version)
+                        })
+                    };
+                    if !offer_holds() {
+                        // When: offer_holds is false, the offer already changed: nothing is read.
+                        return None;
+                    }
+                    let replies = match ticket.kitty_read() {
+                        Some(request) => build_read_reply(source.as_ref(), request),
+                        None => read_replies(source.as_ref(), ticket.labels()),
+                    };
+                    // Sampled again after the read: data read across an offer change is dropped
+                    // here, so it never leaves this thread.
+                    offer_holds().then_some(replies)
                 };
                 // A panicking native read still returns its ticket, so the slot is not lost.
                 let replies = std::panic::catch_unwind(std::panic::AssertUnwindSafe(read))
-                    .unwrap_or(thread_failure);
+                    .unwrap_or(Some(thread_failure));
                 // The raw text is gone, so only the frames stay reserved.
-                lease.shrink_to(replies.capacity());
+                lease.shrink_to(replies.as_ref().map_or(0, Vec::capacity));
                 let _ = done_tx.send(ReaderDone { replies, ticket, lease });
                 if let Some(proxy) = proxy {
                     // When: proxy is Some, the loop is woken; a closed loop has nothing to wake.

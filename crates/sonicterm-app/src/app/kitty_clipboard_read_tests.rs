@@ -1,4 +1,5 @@
 use super::*;
+use crate::lib_tests::CountAllocations;
 use base64::engine::general_purpose::STANDARD;
 use sonicterm_vt::vt::parse_kitty_clipboard_metadata;
 use std::sync::Mutex;
@@ -241,15 +242,58 @@ fn oversize_type_omitted_before_copy() {
     assert_eq!(source.caps(), [KITTY_READ_TYPE_CAP_BYTES]);
 }
 
-/// Contract: one job's peak working set (the 12 MiB frame, one 8 MiB raw type and the 4 KiB
-/// listing) fits its 21 MiB reservation, and three jobs fit the 64 MiB reply budget, a fourth not.
+/// A clipboard that converts a copy of `raw` through the real lossy UTF-8 conversion for every text
+/// read, as the macOS and X11 readers do with the bytes the native call returned.
+struct Converting {
+    raw: Vec<u8>,
+}
+
+impl ClipboardTextSource for Converting {
+    fn read_text_bounded(&self, _location: ReadLocation, max_bytes: usize) -> ReadOutcome {
+        super::super::osc52_read_source::bounded_utf8(self.raw.clone(), max_bytes)
+    }
+}
+
+/// Contract: one job's measured peak, through the real conversion of two near-cap text types,
+/// stays within its 21 MiB reservation: the second type is omitted before it is read, because the
+/// frame already built leaves too little of the reservation for another type's raw bytes and
+/// scratch. Three jobs fit the 64 MiB reply budget, a fourth not.
 #[test]
 fn peak_working_set_within_21_mib_reservation() {
-    let peak = KITTY_READ_FRAME_CAP_BYTES + KITTY_READ_TYPE_CAP_BYTES + KITTY_LISTING_CAP_BYTES;
-    assert!(peak <= KITTY_READ_RESERVATION_BYTES);
+    let mut raw = vec![b'a'; KITTY_READ_TYPE_CAP_BYTES - 2];
+    *raw.last_mut().unwrap() = 0xFF;
+    let source = Converting { raw };
+    let two = request("type=read", "text/plain text/plain;charset=utf-8");
+    let counter = CountAllocations::start();
+    let reply = build_read_reply(&source, &two);
+    let peak = counter.peak_bytes();
+    drop(counter);
+    let served = data_packets(&String::from_utf8(reply).unwrap());
+    assert!(served.iter().all(|(metadata, _)| metadata.ends_with("mime=dGV4dC9wbGFpbg==")));
+    assert!(!served.is_empty(), "the first type is served");
+    assert!(peak <= KITTY_READ_RESERVATION_BYTES, "peak {peak}");
     let budget = super::super::osc52_read::READ_REPLY_BUDGET_BYTES;
     assert!(3 * KITTY_READ_RESERVATION_BYTES <= budget);
     assert!(4 * KITTY_READ_RESERVATION_BYTES > budget);
+}
+
+/// Contract: a type whose packets would pass the 12 MiB frame is omitted before the frame grows:
+/// the reply's peak is the type's raw text and the fixed OK/DONE packets, never a 12 MiB frame.
+#[test]
+fn frame_bound_checked_before_allocation() {
+    let id = "i".repeat(512);
+    let mime = format!("text/plain;{:x<245}", 0);
+    let source = FakeTypes::holding(&"a".repeat(7 * 1024 * 1024 + 800 * 1024));
+    let wide = request(&format!("type=read:id={id}"), &mime);
+    let counter = CountAllocations::start();
+    let reply = build_read_reply(&source, &wide);
+    let peak = counter.peak_bytes();
+    drop(counter);
+    assert_eq!(
+        String::from_utf8(reply).unwrap(),
+        packet(&format!("OK:id={id}")) + &packet(&format!("DONE:id={id}"))
+    );
+    assert!(peak < 8 * 1024 * 1024 + 64 * 1024, "peak {peak}: the frame never grew");
 }
 
 /// Contract: a paste event is OK, one listing `DATA` packet and DONE, each with no `id` and the

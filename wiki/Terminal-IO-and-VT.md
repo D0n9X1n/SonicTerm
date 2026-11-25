@@ -451,7 +451,10 @@ native layer (see [Platform Integration](Platform-Integration)): HTML stripped t
 Windows, PNG and custom types byte for byte, `text/uri-list` from file and URL items. A type the
 clipboard does not hold is omitted, which the protocol reads as unavailable. Each type is read
 with an 8 MiB cap and served only while the whole reply stays within 12 MiB, checked before
-anything grows; otherwise it is omitted. An unavailable location
+anything grows; otherwise it is omitted. Another type is read only while the reply built so far
+leaves the job's 21 MiB reservation room for that type's worst case (8 MiB of raw bytes plus
+their conversion or the reply regrown to 12 MiB), so once the reply passes about 1 MiB every
+later type is omitted unread. An unavailable location
 (`loc=primary` off Linux) or a platform that cannot list types answers `ENOSYS`; a failed or
 overdue native read, or a listing whose enumeration failed, answers `EIO`; an empty clipboard is
 `OK` then `DONE`. When a reply's writer admission stays contended through every retry, or the
@@ -503,12 +506,17 @@ clipboard offer version, read before and after the listing:
 
 With no version, a version that moved during the listing, or no password, the event is still sent
 but issues no grant. The first OSC 5522 read from that pane at that location carrying the
-password and a nonempty `name` consumes the grant atomically on the event loop. It is served
-without a page only while the recipient is unchanged, within 60 s, and a fresh read of the offer
-version still matches; otherwise it takes normal consent. A session grant's Always or Ban still
-decides first. A replay, a read without a `name`, and a read from another pane find no grant.
+password and a nonempty `name` consumes the grant atomically on the event loop. It is approved
+without a page only while the recipient is unchanged and within 60 s; otherwise it takes normal
+consent. The approval stays bound to the recipient and the offer until delivery: the reader
+thread compares the offer version before its native read and again after it, and the recipient
+is checked before the read starts and before delivery. A changed offer, DECRST 5522 or RIS after
+the read was accepted, or any other change to the recipient drops whatever was read, so nothing
+from a later offer is delivered on the grant; while the pane and its command are unchanged, the
+read then waits for an ordinary answer (a consent page under `ask`). A session grant's Always or
+Ban still decides first. A replay, a read without a `name`, and a read from another pane find no grant.
 DECRST 5522, RIS, a move to another window, a new PTY, any `osc52`/`osc52_read` change and 60 s
-revoke it. The listing and version reads run on the event loop, as a paste's text read does, so
+revoke it. The event's listing and version reads run on the event loop, as a paste's text read does, so
 on X11 an owner that never answers holds the paste for the 2 s selection wait per read. One-time
 passwords never reach logs or `Debug` output.
 

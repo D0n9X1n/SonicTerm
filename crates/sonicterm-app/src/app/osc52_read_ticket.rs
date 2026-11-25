@@ -18,7 +18,7 @@ use sonicterm_vt::vt::{KittyClipboardLocation, KittyClipboardStatus};
 
 use super::kitty_clipboard_read::{KittyReadRequest, KITTY_READ_RESERVATION_BYTES};
 use super::osc52_read::{empty_frames, read_reservation_bytes, reply_labels};
-use super::osc52_read_grants::GrantCredential;
+use super::osc52_read_grants::{GrantCredential, PasteApproval};
 use super::osc52_stream::{ClipboardJob, ClipboardStaging};
 
 /// One pane's read identity, shared by the pane, its VT worker and its intake.
@@ -212,6 +212,9 @@ pub(in crate::app) struct ReadBinding {
     pub(in crate::app) policy_generation: u64,
     /// When the VT worker admitted it.
     pub(in crate::app) created_at: Instant,
+    /// The paste grant that approved it, boxed so an ordinary binding stays small; revalidation
+    /// requires its recipient unchanged, and the reader its offer.
+    pub(in crate::app) paste: Option<Box<PasteApproval>>,
 }
 
 /// A ticket's pane and process slots, freed when dropped.
@@ -301,6 +304,8 @@ pub(in crate::app) enum CancelReason {
     Expired,
     /// Its consent page closed elsewhere, was replaced, or moved to another window.
     PageLost,
+    /// The paste grant that approved it no longer holds: its recipient reset DECSET 5522 or moved.
+    PasteRevoked,
 }
 
 /// One admitted read or asked write: its binding, reply labels (none for a write), the write's
@@ -402,6 +407,29 @@ impl ConsentTicket {
         }
     }
 
+    /// Approve a waiting ticket by a consumed paste grant: the approval lasts only while
+    /// `approval`'s recipient and offer do, which revalidation and the reader check up to delivery.
+    pub(in crate::app) fn approve_by_paste(&mut self, approval: PasteApproval) {
+        // Only a waiting ticket can be approved; an auto-allowed one reads under `allow` anyway.
+        if self.state == TicketState::Waiting {
+            self.binding.paste = Some(Box::new(approval));
+            self.state = TicketState::Approved;
+        }
+    }
+
+    /// The paste approval the ticket holds, if a paste grant approved it.
+    pub(in crate::app) fn paste_approval(&self) -> Option<&PasteApproval> {
+        self.binding.paste.as_deref()
+    }
+
+    /// Withdraw a paste approval that no longer holds: the ticket waits again for an ordinary
+    /// answer, as if no grant had applied.
+    pub(in crate::app) fn withdraw_paste(&mut self) {
+        if self.binding.paste.take().is_some() && self.state == TicketState::Approved {
+            self.state = TicketState::Waiting;
+        }
+    }
+
     /// Revoke the ticket for `reason`; it can no longer read.
     pub(in crate::app) fn cancel(&mut self, reason: CancelReason) {
         self.state = TicketState::Cancelled(reason);
@@ -489,6 +517,7 @@ pub(in crate::app) fn admit_write(
         command_epoch,
         policy_generation,
         created_at: now,
+        paste: None,
     };
     WriteAdmission::Ticket(ConsentTicket {
         binding,
@@ -542,6 +571,7 @@ pub(in crate::app) fn admit_read(
         command_epoch,
         policy_generation,
         created_at: now,
+        paste: None,
     };
     let labels = reply_labels(kinds);
     let ticket =
@@ -588,6 +618,7 @@ pub(in crate::app) fn admit_kitty_read(
         command_epoch,
         policy_generation,
         created_at: now,
+        paste: None,
     };
     let kitty_read = Some(Box::new(request));
     Ok(ConsentTicket { binding, labels: Vec::new(), write: None, kitty_read, state, _slot: slot })

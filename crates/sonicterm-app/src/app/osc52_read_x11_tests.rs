@@ -1,4 +1,5 @@
 use super::*;
+use crate::lib_tests::CountAllocations;
 
 /// One `GetProperty` reply of `kind`.
 fn reply(kind: PropertyKind, format: u8, bytes_after: u32, value: &[u8]) -> PropertyReply {
@@ -15,20 +16,17 @@ fn x11_text_reply_one_unit_over_cap_too_large() {
     assert!(fetch_length_units(max) as usize * 4 > max);
     let done = |outcome| FirstReply::Done(outcome);
     let text = |value: &str| done(ReadOutcome::Text(value.into()));
-    assert_eq!(
-        classify_first(&reply(PropertyKind::Utf8, 8, 0, b"12345678"), max),
-        text("12345678")
-    );
-    let over = classify_first(&reply(PropertyKind::Utf8, 8, 0, b"123456789"), max);
+    assert_eq!(classify_first(reply(PropertyKind::Utf8, 8, 0, b"12345678"), max), text("12345678"));
+    let over = classify_first(reply(PropertyKind::Utf8, 8, 0, b"123456789"), max);
     assert_eq!(over, done(ReadOutcome::TooLarge));
-    let after = classify_first(&reply(PropertyKind::Utf8, 8, 4, b"12345678"), max);
+    let after = classify_first(reply(PropertyKind::Utf8, 8, 4, b"12345678"), max);
     assert_eq!(after, done(ReadOutcome::TooLarge));
-    let wide = classify_first(&reply(PropertyKind::Utf8, 32, 0, b"1234"), max);
+    let wide = classify_first(reply(PropertyKind::Utf8, 32, 0, b"1234"), max);
     assert_eq!(wide, done(ReadOutcome::Failed));
-    let other = classify_first(&reply(PropertyKind::Other, 8, 0, b"1234"), max);
+    let other = classify_first(reply(PropertyKind::Other, 8, 0, b"1234"), max);
     assert_eq!(other, done(ReadOutcome::Failed));
-    assert_eq!(classify_first(&reply(PropertyKind::Latin1, 8, 0, &[0xE9]), max), text("é"));
-    let empty = classify_first(&reply(PropertyKind::Utf8, 8, 0, b""), max);
+    assert_eq!(classify_first(reply(PropertyKind::Latin1, 8, 0, &[0xE9]), max), text("é"));
+    let empty = classify_first(reply(PropertyKind::Utf8, 8, 0, b""), max);
     assert_eq!(empty, done(ReadOutcome::Empty));
 }
 
@@ -37,7 +35,7 @@ fn x11_text_reply_one_unit_over_cap_too_large() {
 #[test]
 fn x11_incr_format32_announcement_accepted() {
     let announce =
-        |format, value: &[u8]| classify_first(&reply(PropertyKind::Incr, format, 0, value), 8);
+        |format, value: &[u8]| classify_first(reply(PropertyKind::Incr, format, 0, value), 8);
     assert_eq!(announce(32, &8u32.to_ne_bytes()), FirstReply::Incr);
     assert_eq!(announce(32, &9u32.to_ne_bytes()), FirstReply::Done(ReadOutcome::TooLarge));
     assert_eq!(announce(8, &8u32.to_ne_bytes()), FirstReply::Done(ReadOutcome::Failed));
@@ -75,4 +73,52 @@ fn incr_per_chunk_deadline() {
     let transfer = IncrTransfer::new(8, start);
     assert_eq!(transfer.chunk_deadline(start), start + CHUNK_WAIT);
     assert_eq!(transfer.chunk_deadline(start + Duration::from_secs(4)), start + INCR_TOTAL_WAIT);
+}
+
+/// Contract: a UTF-8 first reply is classified by moving its property value into the text: no
+/// second copy of a value that may be 8 MiB is made while the original is alive.
+#[test]
+fn first_reply_moves_its_value() {
+    let first = reply(PropertyKind::Utf8, 8, 0, &[b'a'; 4096]);
+    let counter = CountAllocations::start();
+    let outcome = classify_first(first, 4096);
+    let allocations = counter.count();
+    drop(counter);
+    assert_eq!(outcome, FirstReply::Done(ReadOutcome::Text("a".repeat(4096))));
+    assert_eq!(allocations, 0, "the value is moved, not copied");
+}
+
+/// Contract: an `INCR` transfer counts the accumulated bytes and the incoming chunk together
+/// against the cap, and its final conversion is built into a buffer reserved first, so the whole
+/// transfer holds at most twice the cap (raw bytes plus conversion scratch) at any moment.
+#[test]
+fn incr_transfer_peak_within_raw_and_scratch() {
+    let cap = 64 * 1024;
+    let chunk_len = 16 * 1024;
+    let counter = CountAllocations::start();
+    let mut transfer = IncrTransfer::new(cap, Instant::now());
+    let mut outcome = None;
+    for index in 0..4 {
+        // The last chunk ends in an invalid byte, so the converted text is exactly the cap.
+        let mut value = vec![b'a'; if index == 3 { chunk_len - 2 } else { chunk_len }];
+        if index == 3 {
+            *value.last_mut().unwrap() = 0xFF;
+        }
+        assert!(value.len() <= transfer.remaining(), "the next chunk fits what is left");
+        outcome = transfer.push(PropertyReply {
+            kind: PropertyKind::Utf8,
+            format: 8,
+            bytes_after: 0,
+            value,
+        });
+        assert_eq!(outcome, None);
+    }
+    let end =
+        PropertyReply { kind: PropertyKind::Utf8, format: 8, bytes_after: 0, value: Vec::new() };
+    outcome = outcome.or_else(|| transfer.push(end));
+    let peak = counter.peak_bytes();
+    drop(counter);
+    let Some(ReadOutcome::Text(text)) = outcome else { panic!("a text outcome") };
+    assert_eq!(text.len(), cap);
+    assert!(peak <= 2 * cap, "peak {peak} over twice the cap");
 }
