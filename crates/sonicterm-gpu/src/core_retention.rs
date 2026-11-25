@@ -213,7 +213,7 @@ impl GpuRenderer {
     /// gate. A refused admission changes nothing; once admitted, the releases are not rolled back.
     ///
     /// A glyph atlas grown past the start for the current scale shrinks back to it
-    /// ([`Self::shrink_glyph_atlas_to_start`]), unless an atlas retry or growth timing is pending.
+    /// (`shrink_glyph_atlas_to_start`), unless an atlas retry or growth timing is pending.
     /// The retry and eviction state, the software frame and the preedit composition are kept. The
     /// next frame is a full first frame.
     pub fn trim_for_occlusion(&mut self) -> TrimReport {
