@@ -825,13 +825,18 @@ impl KittyClipboardTx {
                 return KittyStep::Reply(reply.status(KittyClipboardStatus::Eio));
             }
         };
-        if clock + entered.elapsed() >= absolute {
-            // When: clock plus entered.elapsed() (the time planning took) reaches absolute, the
-            // planned job is not handed off past the write's 10 min deadline: `EBUSY`.
+        // The handoff's admission clock: the commit's clock plus the time it has taken.
+        let admitted = clock + entered.elapsed();
+        if admitted >= absolute {
+            // When: admitted (the commit's clock plus the time planning took) reaches absolute,
+            // the planned job is not handed off past the write's 10 min deadline: `EBUSY`.
             return KittyStep::Reply(reply.status(KittyClipboardStatus::Ebusy));
         }
         let (staging, identity, epoch) = (&self.staging, &self.identity, command_epoch);
-        match admit_write(staging, identity, self.pane_id, epoch, policy_generation, job, now) {
+        // An asked write's consent ticket counts its lifetime from this admission, not from the
+        // section's older stamp.
+        let generation = policy_generation;
+        match admit_write(staging, identity, self.pane_id, epoch, generation, job, admitted) {
             WriteAdmission::Post(job) => KittyStep::Post(job),
             WriteAdmission::Ticket(ticket) => KittyStep::Ticket(ticket),
             WriteAdmission::Busy => KittyStep::Reply(reply.status(KittyClipboardStatus::Ebusy)),

@@ -506,6 +506,21 @@ fn lease_through_worker_custody() {
     assert_eq!(rig.staging.reserved_bytes(), 0);
 }
 
+/// Contract: an asked commit's consent ticket is stamped with the admission clock, not its
+/// section's older stamp, so the ticket's 120 s lifetime counts from when it was admitted.
+#[test]
+fn ask_commit_ticket_is_stamped_with_the_admission_clock() {
+    let mut rig = rig_with(1 << 20, 1 << 16, Osc52Policy::Ask);
+    rig.send("type=write");
+    rig.data("text/plain", &b64("asked"));
+    let stale = Instant::now().checked_sub(Duration::from_secs(25)).expect("a past instant");
+    let before = Instant::now();
+    let Some(KittyStep::Ticket(ticket)) = rig.send_at("type=wdata", stale).pop() else {
+        panic!("an asked commit takes a ticket");
+    };
+    assert!(ticket.binding().created_at >= before, "stamped when admitted");
+}
+
 /// Contract: under `ask` a commit takes a consent ticket holding its job; nothing is posted.
 #[test]
 fn ask_commit_takes_a_ticket() {

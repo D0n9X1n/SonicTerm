@@ -177,7 +177,7 @@ cargo build -p sonicterm-app
   `last_packet`, `begin` and `step` check and stamp with one admission clock
   (`now.max(Instant::now())`), and an overflow or invalid-value packet on an expired write answers
   `EBUSY` (`error_status`), and a commit rechecks the absolute deadline after planning, adding the time it
-  took. Each ready
+  took, and stamps an asked write's consent ticket with that admission clock. Each ready
   chunk first settles the intake (`PaneVtHandles::take_ready_output`): an OSC 52 stream or OSC 5522
   write past its deadline, or whose recorded policy generation moved, ends before the chunk is
   parsed, so a queued terminator or commit never lands on it. The terminator or commit then reads

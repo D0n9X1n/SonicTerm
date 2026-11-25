@@ -396,6 +396,12 @@ impl ConsentTicket {
         }
     }
 
+    /// Test-only: stamp the ticket as admitted at `admitted_at`, as an older admission would be.
+    #[cfg(test)]
+    pub(in crate::app) fn admitted_at_for_test(&mut self, admitted_at: Instant) {
+        self.binding.created_at = admitted_at;
+    }
+
     /// Take an approved write's job, to hand it to the clipboard ordering domain.
     pub(in crate::app) fn take_write(&mut self) -> Option<ClipboardJob> {
         self.write.take().map(|job| *job)

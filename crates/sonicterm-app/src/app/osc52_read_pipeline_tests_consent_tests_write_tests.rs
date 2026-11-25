@@ -141,8 +141,8 @@ fn kitty_write_as(harness: &mut Harness, text: &str, extra: &str) {
     kitty_write_admitted(harness, text, extra, Instant::now());
 }
 
-/// [`kitty_write_as`] whose committing packet, and so its ticket, is stamped `admitted_at`; the
-/// packets before it arrive now, so the open write is never idle.
+/// [`kitty_write_as`] whose consent ticket is aged to `admitted_at`, as if it had been admitted
+/// then; every packet arrives now, so the open write is never idle.
 fn kitty_write_admitted(harness: &mut Harness, text: &str, extra: &str, admitted_at: Instant) {
     use crate::app::kitty_clipboard_tx::{KittyClipboardTx, KittyStep};
     use base64::Engine as _;
@@ -161,11 +161,12 @@ fn kitty_write_admitted(harness: &mut Harness, text: &str, extra: &str, admitted
     );
     let events = parser.advance(wire.as_bytes());
     let inbox = parser.kitty_clipboard_inbox().clone();
-    let last = events.len().saturating_sub(1);
-    for (index, event) in events.into_iter().enumerate() {
+    for event in events {
         if let VtEvent::KittyClipboard { stream, request, bel } = event {
-            let at = if index == last { admitted_at } else { Instant::now() };
-            if let KittyStep::Ticket(ticket) = tx.handle(&inbox, stream, request, bel, 0, at) {
+            let step = tx.handle(&inbox, stream, request, bel, 0, Instant::now());
+            if let KittyStep::Ticket(mut ticket) = step {
+                // The commit stamps its ticket when admitted; the test ages it to `admitted_at`.
+                ticket.admitted_at_for_test(admitted_at);
                 harness.app.admit_clipboard_ticket(ClipboardTicketHandle::new(ticket));
             }
         }
