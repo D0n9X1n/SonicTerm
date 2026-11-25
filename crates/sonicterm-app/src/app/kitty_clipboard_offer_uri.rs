@@ -96,17 +96,21 @@ pub(super) fn file_parts(uri: &str) -> Option<(&str, &str)> {
     .then_some((host, path))
 }
 
+/// Whether a validated file authority denotes the local machine, after percent decoding.
+pub(super) fn local_authority(host: &str) -> bool {
+    host.is_empty()
+        || Decoded(host.as_bytes())
+            .flatten()
+            .map(|scalar| scalar.to_ascii_lowercase())
+            .eq("localhost".chars())
+}
+
 /// Emit a validated absolute drive or UNC path without allocating during preflight.
 #[cfg(any(test, target_os = "windows"))]
 pub(super) fn windows_path(uri: &str, mut emit: impl FnMut(char)) -> Option<()> {
     let (host, path) = file_parts(uri)?;
     let chars = Decoded(path.as_bytes()).flatten();
-    if host.is_empty()
-        || Decoded(host.as_bytes())
-            .flatten()
-            .map(|scalar| scalar.to_ascii_lowercase())
-            .eq("localhost".chars())
-    {
+    if local_authority(host) {
         // When: host is empty or localhost, require a rooted drive path.
         let mut drive = chars.clone();
         if !drive.next()?.is_ascii_alphabetic() || drive.next()? != ':' || drive.next()? != '/' {

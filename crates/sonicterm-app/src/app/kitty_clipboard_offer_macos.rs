@@ -101,7 +101,10 @@ fn uri_layout(bytes: &[u8]) -> Option<UriLayout<'_>> {
         // When: first is a file URI, every remaining item must name an absolute file too.
         return std::iter::once(first)
             .chain(items)
-            .all(|line| super::uri::file_parts(line).is_some())
+            .all(|line| {
+                super::uri::file_parts(line)
+                    .is_some_and(|(host, _)| super::uri::local_authority(host))
+            })
             .then_some(UriLayout::Files);
     }
     (items.next().is_none() && is_absolute_uri(first)).then_some(UriLayout::Url(first))

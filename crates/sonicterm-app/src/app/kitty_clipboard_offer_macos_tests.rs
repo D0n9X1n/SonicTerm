@@ -318,3 +318,14 @@ fn macos_writeobjects_no_answers_eio() {
         assert!(board.data("public.utf8-plain-text").is_none());
     });
 }
+
+/// macOS file items represent local paths only. A remote authority, even in the second item,
+/// omits the entire representation. A percent-encoded localhost is still the local authority.
+#[test]
+fn macos_file_items_refuse_nonlocal_authorities() {
+    assert!(!holds(&NativeFormat::UriList, b"file:///ok\nfile://remote.example/share/path"));
+    assert!(!holds(&NativeFormat::UriList, b"file://%72emote/path"));
+    for uri in ["file:///x", "file:/x", "file://LOCALHOST/x", "file://%6cocalhost/x"] {
+        assert!(holds(&NativeFormat::UriList, uri.as_bytes()), "{uri}");
+    }
+}
