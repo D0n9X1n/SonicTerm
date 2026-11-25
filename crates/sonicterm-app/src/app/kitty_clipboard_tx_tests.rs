@@ -650,3 +650,24 @@ fn offer_job_answers_done_or_eio_never_partial() {
         assert_eq!(rig.staging.reserved_bytes(), 0, "the lease ends with the publish");
     }
 }
+
+/// Contract: a `walias` packet keeps its decoded names reserved while it records them, and a
+/// repeated alias reserves its new target before replacing the old one: under a budget that
+/// covers the staged data but not the names, the packet answers `EBUSY` and leaves nothing behind.
+#[test]
+fn alias_names_and_retargets_are_reserved() {
+    let mut rig = rig();
+    rig.send("type=write:id=a");
+    rig.data("text/plain", &b64("x"));
+    let reserved_before = rig.staging.reserved_bytes();
+    let alias = format!("type=walias:mime={};{}", b64("text/plain"), b64("text/x-a text/x-b"));
+    assert!(rig.send(&alias).iter().all(|step| matches!(step, KittyStep::Silent)));
+    let with_aliases = rig.staging.reserved_bytes();
+    let names = "text/x-a".len() + "text/x-b".len() + 2 * "text/plain".len();
+    assert_eq!(with_aliases, reserved_before + names, "each alias pair is reserved, no more");
+    // Retarget one alias at a longer type: the reservation moves by the targets' length difference.
+    let retarget = format!("type=walias:mime={};{}", b64("text/html"), b64("text/x-a"));
+    assert!(rig.send(&retarget).iter().all(|step| matches!(step, KittyStep::Silent)));
+    let moved = rig.staging.reserved_bytes() as isize - with_aliases as isize;
+    assert_eq!(moved, "text/html".len() as isize - "text/plain".len() as isize);
+}

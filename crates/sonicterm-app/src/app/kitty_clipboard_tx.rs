@@ -273,16 +273,35 @@ impl OpenWrite {
         }
         let decoded = base64::engine::general_purpose::STANDARD.decode(chunk);
         let names = decoded.ok().and_then(|bytes| String::from_utf8(bytes).ok());
-        self.lease.shrink_to(base);
+        // The decoded names stay reserved while they are read below; the scope releases them.
+        let result = self.record_aliases(target, names.as_deref());
+        self.lease.shrink_to(self.lease.bytes() - chunk.len());
+        result
+    }
+
+    /// Record each alias `names` lists for `target`, every copy reserved before it is made.
+    fn record_aliases(
+        &mut self,
+        target: &str,
+        names: Option<&str>,
+    ) -> Result<(), KittyClipboardStatus> {
         let names = names.ok_or(KittyClipboardStatus::Einval)?;
         for name in names.split_ascii_whitespace() {
             if name.len() > MAX_KITTY_CLIPBOARD_MIME_BYTES {
                 // When: name is over the MIME bound, it is skipped.
                 continue;
             }
-            if let Some(alias) = self.aliases.iter_mut().find(|(alias, _)| alias == name) {
-                // When: aliases already holds name, it points at the newer target, keeping its place.
-                alias.1 = target.to_owned();
+            if let Some(index) = self.aliases.iter().position(|(alias, _)| alias == name) {
+                // When: aliases already holds name, it points at the newer target, keeping its
+                // place; the new target is reserved, by length, before it replaces the old one.
+                let old_target = self.aliases[index].1.len();
+                let bytes = self.lease.bytes();
+                if !self.lease.grow_to(bytes + target.len()) {
+                    // When: lease.grow_to cannot cover the new target, the write is busy.
+                    return Err(KittyClipboardStatus::Ebusy);
+                }
+                self.aliases[index].1 = target.to_owned();
+                self.lease.shrink_to(self.lease.bytes() - old_target);
                 continue;
             }
             if self.aliases.len() == MAX_KITTY_WRITE_ALIASES {
