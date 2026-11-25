@@ -34,10 +34,10 @@ In the "Also in" column, W is WezTerm, G is Ghostty and K is kitty.
 | `777 ; notify ; title [; body]` | Notification | W G K | With no body, the text is shown as the body. |
 | `99 ; …` | kitty notification protocol | K | |
 | `9 ; 4 ; state [; percent]` | Progress (Dock, taskbar, launcher) | W G K | Clears after 60 s without an update, or 5 s after 100 %. |
-| `52 ; kinds ; base64` / `?` | Clipboard write or read | W G K (W: writes only) | `p` is the primary selection on Linux. `52;c` with no data, or with an empty one, clears. Writes follow `osc52`, reads follow `osc52_read` (`ask` by default, which opens a consent page). |
+| `52 ; kinds ; base64` / `?` | Clipboard write or read | W G K (W: writes only) | `c`, `s`, the digits `0`–`9` and an empty kinds field name the clipboard; `p` is the primary selection on Linux. `52;c` with no data, or with an empty one, clears. Writes follow `osc52`, reads follow `osc52_read` (`ask` by default, which opens a consent page). The label each read reply carries is under [Terminal IO and VT](Terminal-IO-and-VT). |
 | `1337 ; Copy=:base64` | Clipboard write (iTerm2) | G | Same policy as OSC 52 writes; an empty or `?` value writes nothing. |
 | `5522 ; …` | kitty clipboard protocol | G K | `write`, `wdata`, `walias` and `read`, type listing (`.`), and session grants. D-6d: omit unmappable or over-cap names; only Windows replaces invalid UTF-8 and uses registered PNG without DIB conversion. X11 program offers expire after one hour; native Wayland needs XWayland. Per-platform writes, reads and listings are under [Terminal IO and VT](Terminal-IO-and-VT). |
-| `133 ; A/B/C/D/L/N/P/I` | Shell prompt marks | W G K | A click in the prompt moves the cursor: as an SGR press when the prompt sets `click_events`, else as arrow keys (`special_key=1` sends kitty's keys) under `[terminal] click_to_move`, never on the alternate screen. `redraw=0` turns off keeping the cursor row on a rows shrink, which is not done on Windows. `C;cmdline_url=` feeds the long-command notification when that is enabled. |
+| `133 ; A/B/C/D/L/N/P/I` | Shell prompt marks | W G K | A click in the prompt moves the cursor: as an SGR press when the prompt sets `click_events`, else as arrow keys (`special_key=1` sends kitty's keys) under `[terminal] click_to_move`, never on the alternate screen. On a rows shrink the cursor row is kept unless the prompt sets `redraw=0` (`redraw=1` and `redraw=last` act alike); Windows keeps the plain clip. `C;cmdline_url=` feeds the long-command notification when that is enabled. |
 | `9 ; 12` | Prompt start (ConEmu) | G | |
 | `1337 ; File=…` | Inline images | W | |
 | `1337 ; SetUserVar=name=base64` | User variable | W K | Shown to agents in `list_panes`. |
@@ -66,17 +66,28 @@ The installed SonicTerm (MSI) ships its own packaged ConPTY runtime and always u
 checks stops pane startup rather than falling back. Only a source build with no `conpty` folder uses the system ConPTY
 ([Terminal IO and VT](Terminal-IO-and-VT) describes the selection).
 
-A real-ConPTY test on Windows CI ([Local Gate](Local-Gate)) prints sample forms through both runtimes and records, for
-each direction, whether the bytes arrive unchanged. It checks transport only: what SonicTerm then does is covered by
-the unit tests.
+A real-ConPTY test on Windows CI ([Local Gate](Local-Gate)) runs fixed samples through both runtimes. An output row
+checks that what a program prints reaches SonicTerm unchanged; an input row checks that fixed reply bytes, written
+where SonicTerm would write them, reach the program unchanged. It checks transport only: what SonicTerm does with a
+sequence is covered by the unit tests, and the forms below are the samples, not every spelling.
 
-| Forms tested | Packaged ConPTY | System ConPTY |
-|---|---|---|
-| OSC 4, 10–12, 17, 19, 21, 22, 104, 110–119 set, reset and query; 7501; OSC 52 and 5522 writes and reads; DECSET 5522 paste events; 9;9, 7 (`file://`, `kitty-shell-cwd://`), 9;4, 777, OSC 1 | arrive unchanged, replies too | dropped |
-| OSC 133 marks and options, OSC 9;12, `1337 ; SetUserVar`, `CurrentDir` and `Copy=:` | arrive unchanged | arrive unchanged |
-| DECSET 1005, 1006, 1015, 1016 | arrive unchanged; reports too | the mode request is dropped, so the program never gets these reports |
-| DECRQM 5522 | arrives unchanged, reply too | request dropped |
-| Prompt click events | arrive unchanged | arrive unchanged |
-| Rows shrink at a prompt | ConPTY repaints the screen itself, so SonicTerm receives the console's repaint, not the rows the program printed | same as packaged |
+| Samples | Direction | Packaged ConPTY | System ConPTY |
+|---|---|---|---|
+| Control text | output and input | unchanged | unchanged |
+| OSC 4 set and query, 10/11 query chain, 11/12 set, 104 (all and listed), 110 with an argument, 110 query, 111/112/117/119, 17/19 set, 17 query, OSC 21 palette and query, OSC 22 set and query, OSC 1, 7501 report, clear and query | output | unchanged | dropped |
+| Replies to OSC 4, 10, 21, 22 and 7501 queries | input | unchanged | dropped |
+| OSC 52 `c`, `cp`, bare `c` and a ~4 MiB `c` write; OSC 52 read; OSC 5522 `write`, `wdata`, commit and read; DECSET 5522 | output | unchanged | dropped |
+| Replies to the OSC 52 read and the OSC 5522 read; a paste event and its read | input | unchanged | dropped |
+| `1337 ; Copy=:`, `1337 ; SetUserVar`, `1337 ; CurrentDir` | output | unchanged | unchanged |
+| OSC 9;9 (quoted), OSC 7 (`localhost` with backslashes, another host, `kitty-shell-cwd://`), 9;4, 777 | output | unchanged | dropped |
+| OSC 133 marks with options and 9;12 | output | unchanged | unchanged |
+| OSC 133 `click_events=1` and the arrow keys a click sends | output and input | unchanged | unchanged |
+| DECSET 1005, 1006, 1015, 1016 | output | unchanged | dropped |
+| A 1005, 1015 and 1016 mouse report | input | unchanged | unchanged |
+| DECRQM 5522 | output | unchanged | dropped |
+| The DECRQM 5522 reply | input | unchanged | changed on the way |
+| Rows shrink at a prompt (`redraw=last`) | input | the console's own repaint, not the program's rows | the same |
 
-Forms not in the test, such as OSC 0, 2, 8, 9, 99 and `1337 ; File=`, have no recorded Windows result.
+So with the system ConPTY a program cannot turn on these mouse modes, set colors or reach the clipboard, though the
+few forms in the unchanged rows still work. Forms not sampled, such as OSC 0, 2, 8, 9, 99 and `1337 ; File=`, have
+no recorded Windows result.
