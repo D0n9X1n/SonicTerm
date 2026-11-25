@@ -43,8 +43,9 @@ use windows::{
 };
 
 use super::clock::{
-    abandon, collect_input, confirmed, reap, scan_status, settle_input, wait_until, Arrival,
-    CaseClock, Input, Launch, RunClock, ScanEnd, Teardown, Unjobbed, HOST_BUDGET, REPORT_MARGIN,
+    abandon, collect_input, confirmed, expiry_end, reap, scan_status, settle_input, wait_until,
+    Arrival, CaseClock, Input, Launch, RunClock, ScanEnd, Teardown, Unjobbed, HOST_BUDGET,
+    REPORT_MARGIN,
 };
 use super::{
     classify, classify_repaint, find, hex, json_field, row_line, Case, Evidence, Expected,
@@ -217,7 +218,7 @@ fn drive<E: Engine>(
         else {
             // When: checked_duration_since finds the deadline in force passed, open sections read
             // inconclusive.
-            return (closed, ScanEnd::Expired(clock.open_case().map(str::to_owned)));
+            return (closed, expiry_end(&pty.out_rx, clock.open_case(), false));
         };
         // The wait never runs past the deadline in force, so a chunk is stamped when it arrived.
         let chunk = match pty.out_rx.recv_timeout(left.min(Duration::from_millis(50))) {
@@ -235,7 +236,7 @@ fn drive<E: Engine>(
         if clock.admits(received_at) == Arrival::Late {
             // When: admits says Arrival::Late, the chunk is refused whole: none of its sentinels
             // may end the expired section, open another or finish the run.
-            return (closed, ScanEnd::Expired(clock.open_case().map(str::to_owned)));
+            return (closed, expiry_end(&pty.out_rx, clock.open_case(), true));
         }
         let reply = engine.output(&chunk);
         if !reply.is_empty() {
@@ -248,7 +249,7 @@ fn drive<E: Engine>(
                     // When: a section `Opened`, an `/in` section may need injected bytes or a resize.
                     if clock.opened(&name, received_at) == Arrival::Late {
                         // When: clock.opened says Arrival::Late, nothing after it is evidence.
-                        return (closed, ScanEnd::Expired(clock.open_case().map(str::to_owned)));
+                        return (closed, expiry_end(&pty.out_rx, clock.open_case(), true));
                     }
                     let phase = name
                         .strip_suffix("/in")
@@ -271,7 +272,7 @@ fn drive<E: Engine>(
                     // When: a section `Closed`, its evidence counts only inside its case's deadline.
                     if clock.closed(received_at) == Arrival::Late {
                         // When: clock.closed says Arrival::Late, the late row is refused.
-                        return (closed, ScanEnd::Expired(clock.open_case().map(str::to_owned)));
+                        return (closed, expiry_end(&pty.out_rx, clock.open_case(), true));
                     }
                     closed.insert(name, evidence);
                 }
@@ -280,7 +281,7 @@ fn drive<E: Engine>(
                     // inconclusive; silence is measured from it.
                     if clock.abandoned(received_at) == Arrival::Late {
                         // When: clock.abandoned says Arrival::Late, nothing after it is evidence.
-                        return (closed, ScanEnd::Expired(clock.open_case().map(str::to_owned)));
+                        return (closed, expiry_end(&pty.out_rx, clock.open_case(), true));
                     }
                 }
                 ScanEvent::Done => {

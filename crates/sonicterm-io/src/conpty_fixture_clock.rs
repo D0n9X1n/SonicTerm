@@ -156,6 +156,28 @@ pub(crate) enum ScanEnd {
     Disconnected,
 }
 
+/// Why a scan that reached a deadline ended, given the PTY output channel at that moment and
+/// whether the driver already holds a late chunk it refused (`holding_late`). A late chunk, held or
+/// still queued, is never scanned and might have held `DONE`, so the scan stays `Expired` with
+/// `open_case`, the case whose section was open, wherever that chunk was when the deadline came.
+/// Only a channel already closed with nothing held or queued means the child's output ended
+/// before `DONE`, even if the scanner noticed only after the deadline, so that is `Disconnected`.
+pub(crate) fn expiry_end<T>(
+    output: &crossbeam_channel::Receiver<T>,
+    open_case: Option<&str>,
+    holding_late: bool,
+) -> ScanEnd {
+    let expired = || ScanEnd::Expired(open_case.map(str::to_owned));
+    if holding_late {
+        // When: holding_late, the refused chunk might have held DONE, so the end is a timeout.
+        return expired();
+    }
+    match output.try_recv() {
+        Err(crossbeam_channel::TryRecvError::Disconnected) => ScanEnd::Disconnected,
+        Ok(_) | Err(crossbeam_channel::TryRecvError::Empty) => expired(),
+    }
+}
+
 /// The `scan` field of a host's end line: `done` for a timely `DONE`; `required` only when the
 /// deadline passed inside the last case, that case is scan-optional, and every other case's
 /// sections closed (`others_closed`); `expired` for anything else, a disconnect included.

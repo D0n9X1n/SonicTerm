@@ -438,3 +438,35 @@ fn only_a_deadline_inside_the_optional_tail_passes_without_done() {
     assert_eq!(scan_status(&elsewhere, tail, true), "expired", "expired in another case");
     assert_eq!(scan_status(&ScanEnd::Expired(None), tail, true), "expired", "between cases");
 }
+
+/// A deadline reached after the child's output already ended is a premature EOF, not a timeout:
+/// with the channel closed and nothing held or queued the scan is `Disconnected`, so even an open
+/// optional tail fails the run. A sender still alive stays `Expired`. A final late chunk is never
+/// scanned and might have held `DONE`, so it is `Expired` in both places it can be: still queued,
+/// or already dequeued and refused by the driver, with the sender closed either way.
+#[test]
+fn an_eof_seen_only_after_the_deadline_is_still_a_disconnect() {
+    let tail = Some("osc52-c-4mib");
+    let expired = ScanEnd::Expired(tail.map(str::to_owned));
+    // The reader is still running: a plain timeout.
+    let (live_sender, live) = crossbeam_channel::unbounded::<Vec<u8>>();
+    assert_eq!(expiry_end(&live, tail, false), expired, "sender alive");
+    drop(live_sender);
+    // The final late chunk still queued when the deadline came, sender closed.
+    let (queued_sender, queued) = crossbeam_channel::unbounded::<Vec<u8>>();
+    queued_sender.send(b"late".to_vec()).expect("queue a late chunk");
+    drop(queued_sender);
+    assert_eq!(expiry_end(&queued, tail, false), expired, "a late chunk queued");
+    // The same chunk already dequeued and refused as late, sender closed: the same result.
+    let (held_sender, held) = crossbeam_channel::unbounded::<Vec<u8>>();
+    held_sender.send(b"late".to_vec()).expect("queue a late chunk");
+    drop(held_sender);
+    let _refused = held.try_recv().expect("the driver dequeued it");
+    assert_eq!(expiry_end(&held, tail, true), expired, "a late chunk held");
+    // The reader ended and everything it sent was scanned: the output ended before DONE.
+    let (gone_sender, gone) = crossbeam_channel::unbounded::<Vec<u8>>();
+    drop(gone_sender);
+    let end = expiry_end(&gone, tail, false);
+    assert_eq!(end, ScanEnd::Disconnected, "closed and drained");
+    assert_eq!(scan_status(&end, tail, true), "expired", "a premature EOF fails the run");
+}
