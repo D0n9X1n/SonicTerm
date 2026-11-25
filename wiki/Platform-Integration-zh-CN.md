@@ -610,7 +610,7 @@ OSC 5522 读取文本以外的类型时经过同一系统层，每个类型上�
 | 系统 | 系统调用 | 上限 |
 | --- | --- | --- |
 | macOS | 对列表中首个匹配 MIME 名称的系统类型或该 MIME 映射到的类型（`public.html`、`public.png` 或自定义名称的统一类型）调用 `dataForType`；`text/uri-list` 以 CRLF 连接每项的 `public.file-url`（否则 `public.url`），最多 256 个剪贴板项，超出则拒绝整个列表 | 长度超过上限的值在复制进 Rust 之前按长度拒绝 |
-| Windows | 经 `EnumClipboardFormats`（至多检查 64 个）按注册名称或列出的别名找到的格式（`text/rtf` 对应 `Rich Text Format`，`image/jpeg` 对应 `JFIF`），因此读取从不注册名称；`text/uri-list` 读取 `CF_HDROP` | `GlobalSize` 在 `GlobalLock` 之前决定：超过上限的数据块被拒绝（`CF_HDROP` 为上限的两倍）。CF_HTML 以其片段提供；`CF_HDROP` 最多提供 256 个 `file:` URI；先校验整个列表、双 NUL 终止符和转义后的字节数，再分配回复缓冲区。若首选 Windows 格式不存在，OSC 5522 以原始 MIME 字节读取注册名为 `text/html`、`image/png`、`text/uri-list` 或 `text/plain` 的数据块，不做系统格式转换。以 MIME 名称注册的数据块、`PNG` 或自定义数据块按其 `GlobalSize` 提供，可能包含数据之后的分配余量。 |
+| Windows | 经 `EnumClipboardFormats`（至多检查 64 个）按注册名称或列出的别名找到的格式（`text/rtf` 对应 `Rich Text Format`，`image/jpeg` 对应 `JFIF`），因此读取从不注册名称；`text/uri-list` 读取 `CF_HDROP` | `GlobalSize` 在 `GlobalLock` 之前决定：超过上限的数据块被拒绝（`CF_HDROP` 为上限的两倍）。CF_HTML 以其片段提供；`CF_HDROP` 最多提供 256 个 `file:` URI；先校验整个列表、双 NUL 终止符和转义后的字节数，再分配回复缓冲区。MIME 类型及子类型查找不区分 ASCII 大小写，原生转换也遵循此规则。`CF_HDROP` 等标准格式即使不在枚举上限内也可直接请求，仍需通过原生大小检查。若首选 Windows 格式不存在，OSC 5522 以原始 MIME 字节读取注册名为 `text/html`、`image/png`、`text/uri-list` 或 `text/plain` 的数据块，不做系统格式转换。以 MIME 名称注册的数据块、`PNG` 或自定义数据块按其 `GlobalSize` 提供，可能包含数据之后的分配余量。 |
 | Linux（X11） | 以已有的区分大小写的 MIME 原子为目标调用 `ConvertSelection`，不为未知名称创建原子 | 仅接受所请求类型的格式 8 字节，直接读取或通过 `INCR` 传输，大小和时限检查与文本相同 |
 
 ## 平台矩阵

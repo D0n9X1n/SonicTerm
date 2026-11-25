@@ -493,7 +493,22 @@ pub(super) fn read_type_with<C: Win32Clipboard>(
     mime: &str,
     max_bytes: usize,
 ) -> TypeRead {
-    let Some(format) = super::native_format(mime) else {
+    // Text aliases (including parameter lists) are already classified on the read path. The
+    // remaining Windows MIME names are bounded ASCII; folding them here leaves X11 atoms alone.
+    let mut buffer = [0; super::MAX_MIME_NAME_BYTES];
+    let name = if super::super::kitty_clipboard_tx::is_text(mime) {
+        "text/plain"
+    } else {
+        // When: is_text did not recognize the request, fold the MIME spelling before native_format.
+        let Some(lower) = buffer.get_mut(..mime.len()) else {
+            // When: mime exceeds the maximum name length, never open or scan the clipboard.
+            return TypeRead::Absent;
+        };
+        lower.copy_from_slice(mime.as_bytes());
+        lower.make_ascii_lowercase();
+        std::str::from_utf8(lower).expect("ASCII folding preserves UTF-8")
+    };
+    let Some(format) = super::native_format(name) else {
         // When: native_format rejects mime, an invalid request cannot name a clipboard format.
         return TypeRead::Absent;
     };
@@ -501,7 +516,7 @@ pub(super) fn read_type_with<C: Win32Clipboard>(
         // When: open fails, no stable format can be selected or read.
         return TypeRead::Failed;
     }
-    let result = read_open_type(clipboard, &format, mime, max_bytes);
+    let result = read_open_type(clipboard, &format, name, max_bytes);
     clipboard.close();
     result
 }

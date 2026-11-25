@@ -746,3 +746,43 @@ fn windows_text_reader_uses_literal_only_without_unicode() {
     assert_eq!(read_text_with(&mut fake, 3), ReadOutcome::TooLarge);
     assert_eq!(read_text_with(&mut fake, 6), ReadOutcome::Text("native".into()));
 }
+
+/// A Windows format name compares without ASCII case. A MIME request must still choose the
+/// native decoder before its literal alias, even when the alias occurs first or is smaller.
+#[test]
+fn windows_mixed_case_reads_prefer_native_over_literal_or_refuse_its_cap() {
+    for (mime, format, expected) in [
+        ("TEXT/HTML", NativeFormat::Html, b"<i>native</i>".as_slice()),
+        ("IMAGE/PNG", NativeFormat::Png, &[0x89, 0xff]),
+        ("TEXT/URI-LIST", NativeFormat::UriList, b"file:///C:/x\r\n"),
+        ("TEXT/PLAIN", NativeFormat::Text, b"native"),
+    ] {
+        let mut fake = FakeWin32::default();
+        let literal = fake.register(&mime.to_ascii_lowercase()).unwrap();
+        let native = match format {
+            NativeFormat::Html => fake.register(HTML_FORMAT_NAME).unwrap(),
+            NativeFormat::Png => fake.register(PNG_FORMAT_NAME).unwrap(),
+            NativeFormat::UriList => CF_HDROP,
+            NativeFormat::Text => CF_UNICODETEXT,
+            _ => unreachable!(),
+        };
+        fake.clipboard.push((literal, vec![1]));
+        fake.clipboard.push((native, block(&format, expected)));
+        assert_eq!(
+            read_type_with(&mut fake, mime, 4096),
+            TypeRead::Bytes(expected.to_vec()),
+            "{mime}"
+        );
+        assert_eq!(
+            read_type_with(&mut fake, mime, 1),
+            TypeRead::TooLarge,
+            "never bypass {mime}'s native bound"
+        );
+        fake.clipboard.remove(0);
+        assert_eq!(
+            read_type_with(&mut fake, mime, 4096),
+            TypeRead::Bytes(expected.to_vec()),
+            "{mime} native alone"
+        );
+    }
+}

@@ -348,3 +348,30 @@ fn native_custom_clipboard_round_trips_and_empties_while_writer_is_parked() {
     assert_eq!(remaining.expect("empty did not wait for the parked writer"), 0);
     station.leave();
 }
+
+/// Seed only a literal text/plain registration in a private station. Use the real NativeSource:
+/// routing through its text-only default would replace the invalid UTF-8 byte before delivery.
+#[test]
+fn native_source_plain_bytes_preserve_registered_text() {
+    use crate::app::kitty_clipboard_offer::{plan, publish_native, OfferPlan, Published};
+    use crate::app::osc52_read_source::{
+        ClipboardTextSource, NativeSource, ReadLocation, TypeRead,
+    };
+    if isolated() {
+        return;
+    }
+    let station = PrivateStation::enter();
+    // The write planner keeps the original custom spelling; Windows registration is case-insensitive.
+    let payload = vec![0xff; 32];
+    let OfferPlan::Offer(offer) =
+        plan(vec![("TEXT/PLAIN".into(), payload.clone())], &[], &|_, _| true)
+    else {
+        panic!("literal MIME")
+    };
+    assert_eq!(publish_native(&offer, &|| true), Published::Written);
+    let TypeRead::Bytes(bytes) = NativeSource.read_plain_bytes(ReadLocation::Clipboard, 128) else {
+        panic!("literal bytes")
+    };
+    assert!(bytes.starts_with(&payload));
+    station.leave();
+}
