@@ -317,6 +317,26 @@ fn refresh_label(app: &mut App, tab_index: usize) {
     crate::app::refresh_active_tab_title(tabs, source, &panes[&source], &parser, tab_index);
 }
 
+/// Split tab 0's active pane to the right with a seeded pane that runs no program, and focus it as
+/// a split does; the new pane's id. A real split starts a shell whose own title sequences (an OSC 0
+/// from ConPTY or the shell's prompt) would race the test's writes into the parser.
+fn split_quiet(app: &mut App) -> u64 {
+    let pane_id = crate::app::next_pane_id();
+    let parser =
+        Arc::new(parking_lot::Mutex::new(sonicterm_vt::vt::Parser::new_with_staging_pool(
+            sonicterm_grid::grid::Grid::new(80, 24),
+            None,
+            Arc::clone(&app.capture_staging_pool),
+        )));
+    let pane = crate::app::PaneState::new_with_media_pool(parser, None, &app.inline_media_pool);
+    let window = app.main_mut().unwrap();
+    let tab = &mut window.tab_states[0];
+    assert!(tab.tree.split(tab.active_pane, sonicterm_cfg::keymap::Direction::Right, pane_id));
+    tab.active_pane = pane_id;
+    window.panes.attach_new(pane_id, pane);
+    pane_id
+}
+
 /// The listed pane with `pane_id` in a `list_panes` result.
 fn listed(result: &Value, pane_id: u64) -> Value {
     let wanted = pane_id.to_string();
@@ -331,14 +351,10 @@ fn listed(result: &Value, pane_id: u64) -> Value {
 fn list_panes_withholds_a_tab_label_from_an_unreadable_pane() {
     let mut app = app();
     let user = app.__test_seed_tab("user");
-    app.__test_set_main_pane_viewport(
-        sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
-        10.0,
-        10.0,
-    );
-    app.__test_split_active_right();
+    let agent = split_quiet(&mut app);
     let window = app.main_mut().unwrap();
-    let agent = window.tab_states[0].active_pane;
+    // No pane runs a program, so only this test writes either parser and no title can race it.
+    assert!(window.panes.values().all(|pane| pane.pty.is_none()), "a pane has a live shell");
     window.panes.get_mut(&agent).unwrap().creator =
         crate::app::mcp::agents::PaneOwner::agent_if(true);
     window.panes[&user].parser.lock().advance(b"\x1b]1;user-secret\x07");
