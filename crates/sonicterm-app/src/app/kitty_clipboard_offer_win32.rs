@@ -13,18 +13,17 @@ use windows::Win32::{
     System::{
         DataExchange::{
             CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
-            GetClipboardFormatNameW, GetClipboardSequenceNumber, OpenClipboard,
-            RegisterClipboardFormatW, SetClipboardData,
+            GetClipboardFormatNameW, GetClipboardSequenceNumber, IsClipboardFormatAvailable,
+            OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
         },
         Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT},
     },
 };
 
 use super::windows_formats::{
-    hdrop_uri_list, html_fragment, read_text_with, Win32Clipboard, WindowsOffer, CF_HDROP,
-    CF_UNICODETEXT, HTML_FORMAT_NAME, PNG_FORMAT_NAME,
+    read_text_with, read_type_with, Win32Clipboard, WindowsOffer, CF_UNICODETEXT,
 };
-use super::{native_format, publish_offer, CommitGate, NativeFormat, NativeOffer, Published};
+use super::{publish_offer, CommitGate, NativeOffer, Published};
 use crate::app::clipboard_worker::Snapshot;
 use crate::app::osc52_read_source::{ReadOutcome, TypeRead, MAX_NATIVE_TYPES_SCANNED};
 
@@ -158,6 +157,22 @@ impl Win32Clipboard for Win32 {
             unsafe { CloseClipboard() };
     }
 
+    fn registered(&self, matches: impl Fn(&str) -> bool) -> Option<u32> {
+        find_registered(matches)
+    }
+    fn available(&self, id: u32) -> bool {
+        // SAFETY: this only queries availability of a standard format on the open clipboard.
+        unsafe { IsClipboardFormatAvailable(id) }.is_ok()
+    }
+    fn read_block(
+        &mut self,
+        id: u32,
+        cap_bytes: usize,
+        decode: impl FnOnce(&[u8]) -> TypeRead,
+    ) -> TypeRead {
+        read_block(id, cap_bytes, decode)
+    }
+
     fn sequence(&mut self) -> u32 {
         // SAFETY: GetClipboardSequenceNumber takes no arguments and only reads a session counter.
         unsafe { GetClipboardSequenceNumber() }
@@ -210,8 +225,7 @@ fn text_block() -> Option<HGLOBAL> {
     Some(HGLOBAL(handle.0))
 }
 
-/// The clipboard's `CF_UNICODETEXT` for an OSC 52 read within `max_bytes` of UTF-8, sized with
-/// `GlobalSize` before it is locked.
+/// Bounded Windows text for OSC 52, including UTF-8 conversion of a literal text/plain fallback.
 pub(super) fn read_text(max_bytes: usize) -> ReadOutcome {
     read_text_with(&mut Win32, max_bytes)
 }
@@ -238,59 +252,9 @@ pub(super) fn reassert_text(text: &str, previous: &Snapshot, gate: CommitGate<'_
     WindowsOffer::new(Win32).reassert_text(text, previous, gate)
 }
 
-/// The clipboard, open on this thread for one read until dropped.
-struct ReadGuard;
-
-// Lifecycle: ReadGuard drop calls CloseClipboard once; another thread may then open it.
-impl Drop for ReadGuard {
-    fn drop(&mut self) {
-        let _ =
-            // SAFETY: this thread opened the clipboard for the guard; it is closed once here.
-            unsafe { CloseClipboard() };
-    }
-}
-
-/// The bytes the clipboard holds under the non-text MIME name `mime`, within `max_bytes`: CF_HTML
-/// stripped to its fragment, `PNG` and custom formats (found by enumeration, so a read registers
-/// nothing) as held, `CF_HDROP` as `file:` URIs. `Failed` when the clipboard stays held.
+/// The bounded native representation, or a literal MIME registration if its native format is absent.
 pub(super) fn read_type(mime: &str, max_bytes: usize) -> TypeRead {
-    let Some(format) = native_format(mime).filter(|format| *format != NativeFormat::Text) else {
-        // When: mime is no MIME name or names text, the typed read holds nothing for it.
-        return TypeRead::Absent;
-    };
-    if !open_clipboard(None) {
-        // When: open_clipboard gives up, another process held the clipboard throughout.
-        return TypeRead::Failed;
-    }
-    let _open = ReadGuard;
-    let raw = |bytes: &[u8]| TypeRead::Bytes(bytes.to_vec());
-    match format {
-        NativeFormat::UriList => match find_format(|id| id == CF_HDROP) {
-            // A URI is at least as many bytes as its path's UTF-16 units, so a block past twice
-            // the cap and its header cannot fit.
-            Some(id) => read_block(id, max_bytes.saturating_mul(2).saturating_add(64), |bytes| {
-                hdrop_uri_list(bytes, max_bytes)
-            }),
-            None => TypeRead::Absent,
-        },
-        NativeFormat::Html => match find_named(HTML_FORMAT_NAME) {
-            Some(id) => read_block(id, max_bytes, |bytes| {
-                html_fragment(bytes).map_or(TypeRead::Absent, raw)
-            }),
-            None => TypeRead::Absent,
-        },
-        NativeFormat::Png => match find_named(PNG_FORMAT_NAME) {
-            Some(id) => read_block(id, max_bytes, raw),
-            None => TypeRead::Absent,
-        },
-        NativeFormat::Custom(name) => match find_registered(|registered| {
-            super::windows_formats::registered_mime_matches(registered, &name)
-        }) {
-            Some(id) => read_block(id, max_bytes, raw),
-            None => TypeRead::Absent,
-        },
-        NativeFormat::Text => TypeRead::Absent,
-    }
+    read_type_with(&mut Win32, mime, max_bytes)
 }
 
 /// The first of the open clipboard's formats `wanted` accepts, among at most
@@ -311,11 +275,6 @@ fn find_format(wanted: impl Fn(u32) -> bool) -> Option<u32> {
         }
     }
     None
-}
-
-/// The open clipboard's format registered under `name`, compared as Windows compares names.
-fn find_named(name: &str) -> Option<u32> {
-    find_registered(|registered| registered.eq_ignore_ascii_case(name))
 }
 
 /// Find a registered format by its actual name in the open clipboard.

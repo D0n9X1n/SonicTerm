@@ -62,6 +62,18 @@ pub(in crate::app) enum TypeRead {
     Failed,
 }
 
+impl From<ReadOutcome> for TypeRead {
+    fn from(outcome: ReadOutcome) -> Self {
+        match outcome {
+            ReadOutcome::Text(text) => TypeRead::Bytes(text.into_bytes()),
+            ReadOutcome::Empty => TypeRead::Absent,
+            ReadOutcome::TooLarge => TypeRead::TooLarge,
+            ReadOutcome::Unsupported => TypeRead::Unsupported,
+            ReadOutcome::Failed => TypeRead::Failed,
+        }
+    }
+}
+
 impl std::fmt::Debug for TypeRead {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -151,6 +163,12 @@ pub(in crate::app) fn list_native_types(names: impl IntoIterator<Item = String>)
 pub(in crate::app) trait ClipboardTextSource: Send + Sync {
     /// The text at `location`, refused as [`ReadOutcome::TooLarge`] past `max_bytes` of UTF-8.
     fn read_text_bounded(&self, location: ReadLocation, max_bytes: usize) -> ReadOutcome;
+
+    /// Plain text for a MIME read. Most backends use their bounded text conversion; Windows
+    /// can also read the original bytes of an explicitly registered text/plain block.
+    fn read_plain_bytes(&self, location: ReadLocation, max_bytes: usize) -> TypeRead {
+        self.read_text_bounded(location, max_bytes).into()
+    }
 
     /// The MIME types `location` offers, found without reading any content; a source that cannot
     /// enumerate types answers `Unsupported`.
@@ -259,7 +277,7 @@ pub(in crate::app) fn bounded_utf16(units: &[u16], max_bytes: usize) -> ReadOutc
 }
 
 /// `bytes` as text, invalid sequences as U+FFFD, refused when the result passes `max_bytes`.
-#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(in crate::app) fn bounded_utf8(bytes: Vec<u8>, max_bytes: usize) -> ReadOutcome {
     if bytes.is_empty() {
         // When: bytes is empty, the selection holds no text.
@@ -315,6 +333,11 @@ pub(in crate::app) struct NativeSource;
 impl ClipboardTextSource for NativeSource {
     fn read_text_bounded(&self, location: ReadLocation, max_bytes: usize) -> ReadOutcome {
         native_read(location, max_bytes)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn read_plain_bytes(&self, location: ReadLocation, max_bytes: usize) -> TypeRead {
+        native_read_type(location, "text/plain", max_bytes)
     }
 
     fn list_types(&self, location: ReadLocation) -> TypeListing {
@@ -458,7 +481,7 @@ fn native_list(_location: ReadLocation) -> TypeListing {
     TypeListing::Unsupported
 }
 
-/// Windows: `CF_UNICODETEXT`, sized before it is locked; there is no PRIMARY.
+/// Windows: prefer CF_UNICODETEXT, otherwise decode registered text/plain within the same cap.
 #[cfg(target_os = "windows")]
 fn native_read(location: ReadLocation, max_bytes: usize) -> ReadOutcome {
     match location {

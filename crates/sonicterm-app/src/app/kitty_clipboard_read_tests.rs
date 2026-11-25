@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::osc52_read_source::ReadOutcome;
 use crate::lib_tests::CountAllocations;
 use base64::engine::general_purpose::STANDARD;
 use sonicterm_vt::vt::parse_kitty_clipboard_metadata;

@@ -17,7 +17,7 @@ use sonicterm_vt::vt::{
 
 use super::osc52_read_grants::GrantCredential;
 pub(in crate::app) use super::osc52_read_source::{
-    ClipboardTextSource, ReadLocation, ReadOutcome, TypeListing, TypeRead,
+    ClipboardTextSource, ReadLocation, TypeListing, TypeRead,
 };
 
 /// Raw bytes one `DATA` packet carries at most.
@@ -318,16 +318,13 @@ fn read_one(
     location: ReadLocation,
     mime: &str,
 ) -> Result<Option<Vec<u8>>, KittyClipboardStatus> {
-    if super::kitty_clipboard_tx::is_text(mime) {
-        // When: is_text accepts mime, it is read as text, converted as an OSC 52 read is.
-        return match source.read_text_bounded(location, KITTY_READ_TYPE_CAP_BYTES) {
-            ReadOutcome::Text(text) => Ok(Some(text.into_bytes())),
-            ReadOutcome::Empty | ReadOutcome::TooLarge => Ok(None),
-            ReadOutcome::Unsupported => Err(KittyClipboardStatus::Enosys),
-            ReadOutcome::Failed => Err(KittyClipboardStatus::Eio),
-        };
-    }
-    match source.read_type_bounded(location, mime, KITTY_READ_TYPE_CAP_BYTES) {
+    let read = if super::kitty_clipboard_tx::is_text(mime) {
+        source.read_plain_bytes(location, KITTY_READ_TYPE_CAP_BYTES)
+    } else {
+        // When: is_text rejects mime, use the named native representation and its own decoder.
+        source.read_type_bounded(location, mime, KITTY_READ_TYPE_CAP_BYTES)
+    };
+    match read {
         TypeRead::Bytes(bytes) => Ok(Some(bytes)),
         TypeRead::Absent | TypeRead::TooLarge => Ok(None),
         TypeRead::Unsupported => Err(KittyClipboardStatus::Enosys),

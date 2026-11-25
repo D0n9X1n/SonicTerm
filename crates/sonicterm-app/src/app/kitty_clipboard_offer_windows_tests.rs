@@ -126,6 +126,31 @@ impl Win32Clipboard for FakeWin32 {
         }
     }
 
+    fn registered(&self, matches: impl Fn(&str) -> bool) -> Option<u32> {
+        assert!(self.is_open);
+        self.clipboard.iter().find_map(|(id, _)| {
+            let name = self.registered.get(id.checked_sub(0xc000)? as usize)?;
+            matches(name).then_some(*id)
+        })
+    }
+    fn available(&self, id: u32) -> bool {
+        assert!(self.is_open);
+        self.clipboard.iter().any(|(known, _)| *known == id)
+    }
+    fn read_block(
+        &mut self,
+        id: u32,
+        cap_bytes: usize,
+        decode: impl FnOnce(&[u8]) -> TypeRead,
+    ) -> TypeRead {
+        assert!(self.is_open);
+        let (_, bytes) = self.clipboard.iter().find(|(known, _)| *known == id).unwrap();
+        if bytes.len() > cap_bytes {
+            return TypeRead::TooLarge;
+        }
+        self.locks += 1;
+        decode(bytes)
+    }
     fn sequence(&mut self) -> u32 {
         self.sequence
     }
@@ -638,4 +663,86 @@ fn listed_windows_legacy_names_read_back() {
         assert!(registered_mime_matches(registered, &names[0]));
         assert!(!registered_mime_matches(registered, "application/x-absent"));
     }
+}
+
+/// Other applications may register MIME names directly. Read the listed format as raw bytes,
+/// not as a CF_HTML envelope, DROPFILES list, UTF-16 string, or PNG registration. Refuse over-cap
+/// data before locking, even when a native conversion of the same MIME has a larger input bound.
+#[test]
+fn listed_literal_windows_builtin_mimes_read_back_bounded() {
+    use crate::app::osc52_read_source::{list_native_types, TypeListing};
+    for (mime, payload) in [
+        ("text/html", b"<p/>".as_slice()),
+        ("image/png", &[0x89, 0, 0xff]),
+        ("text/uri-list", b"file:///C:/x\r\n"),
+        ("text/plain", &[b'a', 0xff, 0, b'b']),
+    ] {
+        let mut clipboard = FakeWin32::default();
+        let id = clipboard.register(mime).unwrap();
+        clipboard.clipboard.push((id, payload.to_vec()));
+        let TypeListing::Types(names) = list_native_types(clipboard.registered.clone()) else {
+            panic!("listing")
+        };
+        assert_eq!(names, [mime]);
+        assert_eq!(
+            read_type_with(&mut clipboard, &names[0], payload.len() - 1),
+            TypeRead::TooLarge,
+            "{mime}"
+        );
+        assert_eq!(clipboard.locks, 0, "oversize refused before locking {mime}");
+        assert_eq!(
+            read_type_with(&mut clipboard, &names[0], payload.len()),
+            TypeRead::Bytes(payload.to_vec()),
+            "{mime}"
+        );
+        assert_eq!(clipboard.registered, [mime], "read did not register another format");
+    }
+}
+
+/// OSC 5522 must use the format-aware text reader for bare and aliased requests, not treat a
+/// missing CF_UNICODETEXT as an empty clipboard. The literal registration can contain non-UTF-8.
+#[test]
+fn windows_literal_plain_text_in_kitty_data_packet() {
+    use crate::app::kitty_clipboard_read::{build_read_reply, parse_read_request};
+    use crate::app::osc52_read_source::{ClipboardTextSource, ReadLocation};
+    use base64::Engine as _;
+    struct Source([u8; 3]);
+    impl ClipboardTextSource for Source {
+        fn read_text_bounded(&self, _: ReadLocation, _: usize) -> ReadOutcome {
+            ReadOutcome::Empty
+        }
+        fn read_plain_bytes(&self, _: ReadLocation, max_bytes: usize) -> TypeRead {
+            let mut fake = FakeWin32::default();
+            let id = fake.register("text/plain").unwrap();
+            fake.clipboard.push((id, self.0.to_vec()));
+            read_type_with(&mut fake, "text/plain", max_bytes)
+        }
+    }
+    let payload = [0xff, 0, b'q'];
+    let source = Source(payload);
+    let codec = base64::engine::general_purpose::STANDARD;
+    for mime in ["text/plain", "UTF8_STRING"] {
+        let metadata = sonicterm_vt::vt::parse_kitty_clipboard_metadata(b"type=read").unwrap();
+        let request = parse_read_request(&metadata, codec.encode(mime).as_bytes(), false).unwrap();
+        let reply = String::from_utf8(build_read_reply(&source, &request)).unwrap();
+        assert!(reply.contains(&format!(
+            "status=DATA:mime={};{}",
+            codec.encode(mime),
+            codec.encode(payload)
+        )));
+    }
+}
+
+/// A text-only consumer decodes a literal registration as bounded UTF-8. CF_UNICODETEXT still
+/// wins when present, including when its conversion exceeds the cap but the literal would fit.
+#[test]
+fn windows_text_reader_uses_literal_only_without_unicode() {
+    let mut fake = FakeWin32::default();
+    let id = fake.register("text/plain").unwrap();
+    fake.clipboard.push((id, vec![0xff]));
+    assert_eq!(read_text_with(&mut fake, 3), ReadOutcome::Text("\u{fffd}".into()));
+    assert_eq!(read_text_with(&mut fake, 2), ReadOutcome::TooLarge);
+    fake.clipboard.push((CF_UNICODETEXT, utf16_block("native")));
+    assert_eq!(read_text_with(&mut fake, 3), ReadOutcome::TooLarge);
+    assert_eq!(read_text_with(&mut fake, 6), ReadOutcome::Text("native".into()));
 }

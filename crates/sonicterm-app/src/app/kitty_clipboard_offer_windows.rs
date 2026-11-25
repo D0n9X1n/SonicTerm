@@ -383,6 +383,17 @@ pub(super) trait Win32Clipboard {
     fn set(&mut self, format: u32, block: Self::Block) -> Result<(), Self::Block>;
     /// Close the clipboard this thread opened.
     fn close(&mut self);
+    /// Find a registered name among the open clipboard's bounded enumeration, without registering one.
+    fn registered(&self, matches: impl Fn(&str) -> bool) -> Option<u32>;
+    /// Whether this standard format can be read, including formats synthesized by Windows.
+    fn available(&self, id: u32) -> bool;
+    /// Read a block only when its native size fits the cap; decode the borrowed bytes while locked.
+    fn read_block(
+        &mut self,
+        id: u32,
+        cap_bytes: usize,
+        decode: impl FnOnce(&[u8]) -> TypeRead,
+    ) -> TypeRead;
     /// The clipboard's change counter, which every change to its contents advances.
     fn sequence(&mut self) -> u32;
     /// The `GlobalSize` of the open clipboard's `CF_UNICODETEXT` block, read without locking it
@@ -428,7 +439,7 @@ fn holds_snapshot<C: Win32Clipboard>(clipboard: &mut C, previous: &Snapshot) -> 
     same
 }
 
-/// The clipboard's `CF_UNICODETEXT` for an OSC 52 read, within `max_bytes` of UTF-8, in one
+/// The clipboard's `CF_UNICODETEXT`, or its literal text/plain, within `max_bytes` of UTF-8 in one
 /// acquisition. The block's `GlobalSize` decides `TooLarge` before it is locked, so an oversized
 /// block is never locked or copied; conversion is measured before it allocates. Delayed rendering
 /// runs inside `GetClipboardData`, which the reader's deadline bounds for the caller.
@@ -440,7 +451,17 @@ pub(super) fn read_text_with<C: Win32Clipboard>(
         // When: open gives up, another process held the clipboard throughout.
         return ReadOutcome::Failed;
     }
-    let outcome = read_open_text(clipboard, max_bytes);
+    let outcome = if clipboard.available(CF_UNICODETEXT) {
+        read_open_text(clipboard, max_bytes)
+    } else {
+        // When: CF_UNICODETEXT is unavailable, check the raw and decoded sizes of literal text/plain.
+        match read_registered(clipboard, "text/plain", max_bytes) {
+            TypeRead::Bytes(bytes) => crate::app::osc52_read_source::bounded_utf8(bytes, max_bytes),
+            TypeRead::Absent => ReadOutcome::Empty,
+            TypeRead::TooLarge => ReadOutcome::TooLarge,
+            TypeRead::Failed | TypeRead::Unsupported => ReadOutcome::Failed,
+        }
+    };
     clipboard.close();
     outcome
 }
@@ -463,6 +484,82 @@ fn read_open_text<C: Win32Clipboard>(clipboard: &mut C, max_bytes: usize) -> Rea
     let mut outcome = ReadOutcome::Failed;
     clipboard.lock_text(block_bytes, &mut |units| outcome = bounded_utf16(units, max_bytes));
     outcome
+}
+
+/// Read a listed MIME in one acquisition. Prefer its Windows encoding; a literal registration
+/// is already MIME data and must not be interpreted as CF_HTML, DROPFILES or UTF-16.
+pub(super) fn read_type_with<C: Win32Clipboard>(
+    clipboard: &mut C,
+    mime: &str,
+    max_bytes: usize,
+) -> TypeRead {
+    let Some(format) = super::native_format(mime) else {
+        // When: native_format rejects mime, an invalid request cannot name a clipboard format.
+        return TypeRead::Absent;
+    };
+    if !clipboard.open() {
+        // When: open fails, no stable format can be selected or read.
+        return TypeRead::Failed;
+    }
+    let result = read_open_type(clipboard, &format, mime, max_bytes);
+    clipboard.close();
+    result
+}
+
+fn read_open_type<C: Win32Clipboard>(
+    clipboard: &mut C,
+    format: &NativeFormat,
+    mime: &str,
+    max_bytes: usize,
+) -> TypeRead {
+    let raw = |bytes: &[u8]| TypeRead::Bytes(bytes.to_vec());
+    match format {
+        NativeFormat::Text if clipboard.available(CF_UNICODETEXT) => {
+            // When: CF_UNICODETEXT is available, its bounded conversion wins even if it returns no bytes.
+            return read_open_text(clipboard, max_bytes).into();
+        }
+        NativeFormat::UriList if clipboard.available(CF_HDROP) => {
+            // When: CF_HDROP exists, measure its UTF-16 paths before creating any URI output.
+            return clipboard.read_block(
+                CF_HDROP,
+                max_bytes.saturating_mul(2).saturating_add(64),
+                |bytes| hdrop_uri_list(bytes, max_bytes),
+            );
+        }
+        NativeFormat::Html | NativeFormat::Png => {
+            // When: format is Html or Png, prefer the Windows registration over any MIME alias.
+            let html = *format == NativeFormat::Html;
+            let preferred = if html { HTML_FORMAT_NAME } else { PNG_FORMAT_NAME };
+            if let Some(id) = clipboard.registered(|name| name.eq_ignore_ascii_case(preferred)) {
+                // When: registered returns the preferred ID, finish this read without probing other formats.
+                return clipboard.read_block(id, max_bytes, |bytes| {
+                    if html {
+                        html_fragment(bytes).map_or(TypeRead::Absent, raw)
+                    } else {
+                        // When: html is false, PNG has no Windows envelope to strip.
+                        raw(bytes)
+                    }
+                });
+            }
+        }
+        _ => {
+            // When: format is custom or its standard ID is unavailable, look up the advertised MIME below.
+        }
+    }
+    let requested = if *format == NativeFormat::Text { "text/plain" } else { mime };
+    read_registered(clipboard, requested, max_bytes)
+}
+
+/// A registered MIME block already contains the representation. Limit its raw size before locking.
+fn read_registered(
+    clipboard: &mut impl Win32Clipboard,
+    requested: &str,
+    max_bytes: usize,
+) -> TypeRead {
+    match clipboard.registered(|name| registered_mime_matches(name, requested)) {
+        Some(id) => clipboard.read_block(id, max_bytes, |bytes| TypeRead::Bytes(bytes.to_vec())),
+        None => TypeRead::Absent,
+    }
 }
 
 /// One Windows publish: every representation staged as a filled global block before the
