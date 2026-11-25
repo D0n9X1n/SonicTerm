@@ -139,9 +139,10 @@ cargo build -p sonicterm-app
   allocating it and take a program slot before posting. On Linux and Windows they reach the
   native clipboard only on the one clipboard worker (`clipboard_worker.rs`), which runs program
   writes and user copies strictly in the event loop's posting order (at most 4 user copies wait).
-  Each job carries its `WriteBinding` (`osc52_read_ticket.rs`: the policy generation; for an
-  approved write also the pane, PTY incarnation, owner and command epochs and the READONLY epoch at
-  Apply), checked at the commit point: on Windows inside one `OpenClipboard` acquisition, after the
+  Each job carries its `WriteBinding` (`osc52_read_ticket.rs`: the policy generation its OSC 52
+  stream or OSC 5522 transaction opened under, passed to `admit_write`; for an approved write also
+  the pane, PTY incarnation, owner and command epochs, and `WriteApproval`: the READONLY epoch at
+  Apply and the ticket's 120 s lifetime end), checked at the commit point: on Windows inside one `OpenClipboard` acquisition, after the
   snapshot or comparison and before `EmptyClipboard` (`WindowsOffer::write_text`/`reassert_text`
   over the `Win32Clipboard` seam), elsewhere immediately before the native call. A stale binding
   drops the write with no status, and an OSC 5522 status goes out only while the PTY and command
@@ -174,7 +175,11 @@ cargo build -p sonicterm-app
   the staging's policy wakeup and the write's 30 s idle / 10 min absolute deadline. Each ready
   chunk first settles the intake (`PaneVtHandles::take_ready_output`): an OSC 52 stream or OSC 5522
   write past its deadline, or whose recorded policy generation moved, ends before the chunk is
-  parsed, so a queued terminator or commit never lands on it. An `ask` ticket is approved only by Apply on its own palette confirm session
+  parsed, so a queued terminator or commit never lands on it. The terminator or commit then reads
+  the clock itself (`now.max(Instant::now())`) and the OSC 5522 commit rechecks the generation, so
+  one section timestamp never carries a write past its deadline. `publish_clipboard_policies`
+  bumps the generation before `wake_policy_workers`, whose wake carries the generation it
+  announces. An `ask` ticket is approved only by Apply on its own palette confirm session
   (`osc52_read_consent.rs`), opened in the source window while it is frontmost and the palette is
   closed, never raising, focusing, reusing or replacing a palette; the title names the tab and
   pane by position only. Apply also requires the palette still hosted by that window; Deny,

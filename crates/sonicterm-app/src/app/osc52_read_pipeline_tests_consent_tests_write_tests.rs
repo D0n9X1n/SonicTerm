@@ -138,6 +138,12 @@ fn kitty_write(harness: &mut Harness, text: &str) {
 /// [`kitty_write`] whose opening `type=write` packet carries `extra` metadata, such as
 /// `:name=…:pw=…`.
 fn kitty_write_as(harness: &mut Harness, text: &str, extra: &str) {
+    kitty_write_admitted(harness, text, extra, Instant::now());
+}
+
+/// [`kitty_write_as`] whose committing packet, and so its ticket, is stamped `admitted_at`; the
+/// packets before it arrive now, so the open write is never idle.
+fn kitty_write_admitted(harness: &mut Harness, text: &str, extra: &str, admitted_at: Instant) {
     use crate::app::kitty_clipboard_tx::{KittyClipboardTx, KittyStep};
     use base64::Engine as _;
     use sonicterm_vt::vt::CaptureStagingPool;
@@ -155,11 +161,11 @@ fn kitty_write_as(harness: &mut Harness, text: &str, extra: &str) {
     );
     let events = parser.advance(wire.as_bytes());
     let inbox = parser.kitty_clipboard_inbox().clone();
-    for event in events {
+    let last = events.len().saturating_sub(1);
+    for (index, event) in events.into_iter().enumerate() {
         if let VtEvent::KittyClipboard { stream, request, bel } = event {
-            if let KittyStep::Ticket(ticket) =
-                tx.handle(&inbox, stream, request, bel, 0, Instant::now())
-            {
+            let at = if index == last { admitted_at } else { Instant::now() };
+            if let KittyStep::Ticket(ticket) = tx.handle(&inbox, stream, request, bel, 0, at) {
                 harness.app.admit_clipboard_ticket(ClipboardTicketHandle::new(ticket));
             }
         }
@@ -322,6 +328,40 @@ fn approved_write_rebound_while_worker_busy_is_dropped_silently() {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Contract: an approved write keeps its ticket's 120 s deadline through the clipboard worker's
+/// commit. Applied just inside the deadline while the worker is busy, it is dropped at the commit
+/// point once the deadline passes: nothing reaches the clipboard and the program hears no status.
+#[test]
+fn approved_write_past_its_ticket_deadline_is_dropped_silently() {
+    let mut harness = asking();
+    let sink = BlockingSink::default();
+    let domain = &mut harness.app.clip_state.domain;
+    assert!(domain.start_worker(Box::new(sink.clone()), None, Box::new(|| {})));
+    let held = sink.gate.lock().unwrap();
+    // A user copy past the inline limit goes to the worker and holds it in its native call.
+    let blocker = "b".repeat(crate::app::clipboard_worker::INLINE_WRITE_LIMIT_BYTES + 1);
+    assert!(harness.app.set_clipboard_text(blocker));
+    // The ticket was admitted 1.5 s before its lifetime ends, so Apply below is still in time.
+    let margin = Duration::from_millis(1500);
+    let admitted_at = Instant::now().checked_sub(TICKET_LIFETIME - margin).expect("a past instant");
+    kitty_write_admitted(&mut harness, "hi", "", admitted_at);
+    assert!(page_open(&harness));
+    harness.app.interaction.command_palette.move_selection_up();
+    press(&mut harness, NamedKey::Enter);
+    assert_eq!(harness.app.clip_state.domain.in_flight(), 2, "Apply posted the write");
+    // The worker stays busy until the ticket's deadline has passed.
+    std::thread::sleep(margin + Duration::from_millis(200));
+    drop(held);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while harness.app.clip_state.domain.in_flight() > 0 {
+        assert!(Instant::now() < deadline, "the clipboard worker did not settle");
+        harness.app.drain_clipboard_completions();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(sink.writes.lock().unwrap().len(), 1, "only the blocking copy landed");
+    assert_eq!(delivered_bytes(&harness), Vec::<Vec<u8>>::new(), "no status");
 }
 
 /// Contract: a write's status goes only to the program that asked for it. A write the worker

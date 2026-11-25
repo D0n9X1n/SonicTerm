@@ -105,20 +105,29 @@ pub(in crate::app) struct WriteSource {
     pub(in crate::app) owner_epoch: u64,
     /// The command epoch at the write's position in the output.
     pub(in crate::app) command_epoch: u64,
-    /// The READONLY epoch at Apply; `None` until the write is approved.
-    pub(in crate::app) approved_readonly_epoch: Option<u64>,
+    /// What Apply recorded; `None` until the write is approved.
+    pub(in crate::app) approval: Option<WriteApproval>,
+}
+
+/// What Apply recorded for a write: the READONLY epoch then, and when its ticket's lifetime ends.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::app) struct WriteApproval {
+    pub(in crate::app) readonly_epoch: u64,
+    /// The approving ticket's 120 s lifetime end; the write may not commit at or after it.
+    pub(in crate::app) until: Instant,
 }
 
 /// What a program write was admitted under, carried with its job to the native commit point.
 ///
-/// Every write is refused there once `osc52` or `osc52_read` changed since admission. An approved
-/// write is also refused once its pane closed or moved, its PTY or command changed, or its window
-/// entered READONLY after Apply. A write's status goes only to the program that asked.
+/// Every write is refused there once `osc52` or `osc52_read` changed since its stream or
+/// transaction opened. An approved write is also refused once its pane closed or moved, its PTY or
+/// command changed, its window entered READONLY after Apply, or its ticket's lifetime ended. A
+/// write's status goes only to the program that asked.
 #[derive(Debug, Clone)]
 pub(in crate::app) struct WriteBinding {
-    /// The staging whose policy generation the write was admitted under.
+    /// The staging whose policy generation the write opened under.
     staging: Arc<ClipboardStaging>,
-    /// The policy generation, sampled before the policy itself.
+    /// The policy generation its stream or transaction opened under.
     policy_generation: u64,
     /// The pane that asked, boxed so every job and status route stays small; `None` for a write
     /// a test built without one.
@@ -135,7 +144,7 @@ impl WriteBinding {
         }
     }
 
-    /// A write from `pane_id`'s `identity` at `command_epoch`, admitted under `policy_generation`.
+    /// A write from `pane_id`'s `identity` at `command_epoch`, opened under `policy_generation`.
     fn admitted(
         staging: &Arc<ClipboardStaging>,
         identity: &Arc<ReadIdentity>,
@@ -147,16 +156,17 @@ impl WriteBinding {
             incarnation: identity.incarnation(),
             owner_epoch: identity.owner_epoch(),
             command_epoch,
-            approved_readonly_epoch: None,
+            approval: None,
         };
         Self { staging: staging.clone(), policy_generation, source: Some(Box::new(source)) }
     }
 
-    /// Record Apply: from now on the write also needs its pane, PTY and command unchanged and its
-    /// window never to have entered READONLY since this moment.
-    pub(in crate::app) fn approve(&mut self) {
+    /// Record Apply: from now on the write also needs its pane, PTY and command unchanged, its
+    /// window never to have entered READONLY since this moment, and to commit before `until`.
+    pub(in crate::app) fn approve(&mut self, until: Instant) {
         if let Some(source) = self.source.as_mut() {
-            source.approved_readonly_epoch = Some(source.identity.readonly_epoch());
+            let readonly_epoch = source.identity.readonly_epoch();
+            source.approval = Some(WriteApproval { readonly_epoch, until });
         }
     }
 
@@ -168,23 +178,24 @@ impl WriteBinding {
     /// Whether the write may still change the clipboard; read on any thread, at the commit point.
     pub(in crate::app) fn may_commit(&self) -> bool {
         if self.staging.policy_generation() != self.policy_generation {
-            // When: policy_generation moved, osc52 or osc52_read changed since admission.
+            // When: policy_generation moved, osc52 or osc52_read changed since the write opened.
             return false;
         }
         let Some(source) = self.source.as_deref() else {
             // When: source is None, the write has no pane whose identity could change.
             return true;
         };
-        let Some(readonly_epoch) = source.approved_readonly_epoch else {
-            // When: approved_readonly_epoch is None, the write was auto-allowed: only the policy
-            // binds it, so a prompt printed after it does not cancel it.
+        let Some(approval) = source.approval else {
+            // When: approval is None, the write was auto-allowed: only the policy binds it, so a
+            // prompt printed after it does not cancel it.
             return true;
         };
         let identity = &source.identity;
-        identity.incarnation() == source.incarnation
+        Instant::now() < approval.until
+            && identity.incarnation() == source.incarnation
             && identity.owner_epoch() == source.owner_epoch
             && identity.command_epoch() == source.command_epoch
-            && identity.readonly_epoch() == readonly_epoch
+            && identity.readonly_epoch() == approval.readonly_epoch
     }
 
     /// Whether the pane's identity still names the program that asked: the same PTY incarnation
@@ -489,19 +500,20 @@ pub(in crate::app) enum WriteAdmission {
     Ticket(ConsentTicket),
 }
 
-/// Admit one complete `job` from `pane_id` at `command_epoch`: under `ask` it takes the pane's one
-/// write slot and a process slot and waits for consent; otherwise it is posted. The generation is
-/// sampled before the policy, as a read's is.
+/// Admit one complete `job` from `pane_id` at `command_epoch`, whose stream or transaction opened
+/// under `policy_generation`: under `ask` it takes the pane's one write slot and a process slot
+/// and waits for consent; otherwise it is posted. The job and any ticket keep that opening
+/// generation, so a policy change while the closing chunk was parsed still refuses the commit.
 pub(in crate::app) fn admit_write(
     staging: &Arc<ClipboardStaging>,
     identity: &Arc<ReadIdentity>,
     pane_id: u64,
     command_epoch: u64,
+    policy_generation: u64,
     mut job: ClipboardJob,
     now: Instant,
 ) -> WriteAdmission {
-    let policy_generation = staging.policy_generation();
-    // The job carries what it was admitted under to the commit point and its status.
+    // The job carries what it was opened under to the commit point and its status.
     job.binding = WriteBinding::admitted(staging, identity, command_epoch, policy_generation);
     if staging.write_policy() != Osc52Policy::Ask {
         // When: write_policy is allow or deny, no consent is asked for.

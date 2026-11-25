@@ -319,6 +319,28 @@ fn silent_child_idle_and_absolute_deadlines_ebusy() {
     assert_eq!(rig.tx.service(absolute).expect("expired"), status("EBUSY", "j").into_bytes());
 }
 
+/// Contract: a commit reads the clock itself. A write whose section was stamped before its idle
+/// deadline but is committed after it answers `EBUSY` and posts nothing, so one timestamp for a
+/// whole section cannot carry a write past its deadline.
+#[test]
+fn commit_checks_the_deadline_against_the_clock() {
+    let mut rig = rig();
+    let stale = Instant::now().checked_sub(Duration::from_secs(31)).expect("a past instant");
+    rig.send_at("type=write:id=c", stale);
+    rig.send_at(&format!("type=wdata:mime={};{}", b64("text/plain"), b64("x")), stale);
+    let steps = rig.send_at("type=wdata", stale);
+    let replies: Vec<String> = steps
+        .iter()
+        .filter_map(|step| match step {
+            KittyStep::Reply(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
+            _ => None,
+        })
+        .collect();
+    assert!(!steps.iter().any(|step| matches!(step, KittyStep::Post(_))), "nothing is posted");
+    assert_eq!(replies, [status("EBUSY", "c")]);
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+}
+
 /// Contract: a policy now `deny` finishes an open write with `EPERM` and releases its staging,
 /// even while the child prints nothing; the policy wakeup reaches the worker's receiver.
 #[test]

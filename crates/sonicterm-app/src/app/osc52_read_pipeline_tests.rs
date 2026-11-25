@@ -285,6 +285,22 @@ fn policy_change_between_worker_read_and_retry_sends_nothing() {
     }
 }
 
+/// Contract: a reload publishes the new policy generation before it wakes the VT workers, so a
+/// worker woken by a change to `osc52_read` alone already sees the generation that ends its open
+/// write; a wake that came first could be consumed under the old one and leave the write open.
+#[test]
+fn policy_reload_publishes_its_generation_before_waking_workers() {
+    let mut harness = harness(Osc52ReadPolicy::Ask, FakeSource::new("unused"));
+    let wakeups = harness.staging.register_policy_waker();
+    // Registration may leave one wake pending; only the reload's wake is read below.
+    while wakeups.try_recv().is_ok() {}
+    let before = harness.staging.policy_generation();
+    set_policy(&mut harness.app, Osc52ReadPolicy::Allow);
+    assert_eq!(harness.staging.policy_generation(), before + 1, "a read-policy change");
+    let announced = wakeups.try_recv().expect("the reload wakes the worker");
+    assert_eq!(announced, before + 1, "the wake carries the published generation");
+}
+
 /// Contract: a reader past its deadline is answered empty, but its ticket slot and budget lease
 /// stay held until the native call returns; meanwhile other reads fail fast without a native call.
 #[test]

@@ -360,6 +360,44 @@ fn open_stream_expires_after_60s() {
     assert_eq!(staging.reserved_bytes(), 0);
 }
 
+/// Contract: a terminator reads the clock itself. A stream whose section was stamped before its
+/// 60 s expiry but ends after it writes nothing and releases its lease, so one timestamp for a
+/// whole section cannot carry a stream past its expiry.
+#[test]
+fn terminator_checks_the_expiry_against_the_clock() {
+    let staging = staging(1 << 20, 1 << 20);
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut intake = Osc52Intake::new(staging.clone());
+    let stale = Instant::now().checked_sub(Duration::from_secs(61)).expect("a past instant");
+    let mut results = Vec::new();
+    for event in parser.advance(&osc52("c", &encode(b"hi"))) {
+        if let VtEvent::ClipboardStream { stream, phase } = event {
+            results.extend(intake.handle(parser.clipboard_inbox(), stream, phase, stale));
+        }
+    }
+    let written = results.iter().filter(|result| matches!(result, Ok(Accepted::Write(_))));
+    assert_eq!(written.count(), 0, "the expired stream writes nothing");
+    drop(results);
+    assert_eq!(staging.reserved_bytes(), 0);
+}
+
+/// Contract: a write keeps the policy generation its stream or transaction opened under. Admitted
+/// after the generation moved, its binding refuses the commit, though the policy admits writes.
+#[test]
+fn admitted_write_keeps_its_opening_generation() {
+    use crate::app::osc52_read_ticket::{admit_write, ReadIdentity, WriteAdmission};
+    let staging = staging(1 << 20, 1 << 20);
+    let identity = Arc::new(ReadIdentity::default());
+    let opened = staging.policy_generation();
+    staging.bump_policy_generation();
+    let job = ClipboardJob::for_test(&staging, "hi");
+    let admission = admit_write(&staging, &identity, 7, 0, opened, job, Instant::now());
+    let WriteAdmission::Post(job) = admission else {
+        panic!("the default policy posts the write");
+    };
+    assert!(!job.binding.may_commit(), "the opening generation binds the commit");
+}
+
 /// Windows reasserts a write only within 262,144 UTF-16 units, counting CJK as one unit and an
 /// astral character as two.
 #[test]

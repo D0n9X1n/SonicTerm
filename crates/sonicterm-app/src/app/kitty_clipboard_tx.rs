@@ -593,6 +593,8 @@ impl KittyClipboardTx {
     fn begin(&mut self, metadata: &KittyClipboardMetadata, bel: bool, now: Instant) -> KittyStep {
         self.open = None;
         let reply = KittyReply::of(metadata, bel);
+        // Sampled before the policy, so a reload racing the open leaves a generation that moves.
+        let policy_generation = self.staging.policy_generation();
         if self.staging.write_policy() == Osc52Policy::Deny {
             // When: write_policy is Deny, the write can never succeed, so nothing is staged.
             return KittyStep::Reply(reply.status(KittyClipboardStatus::Eperm));
@@ -607,7 +609,7 @@ impl KittyClipboardTx {
             lease: self.staging.lease(),
             opened_at: now,
             last_packet: now,
-            policy_generation: self.staging.policy_generation(),
+            policy_generation,
         });
         KittyStep::Silent
     }
@@ -630,18 +632,26 @@ impl KittyClipboardTx {
         }
     }
 
-    /// Commit the open write: resolve aliases, choose the text, check the policy again and route it.
+    /// Commit the open write: check its deadline against the clock, resolve aliases, choose the
+    /// text, check the policy and its opening generation again and route it.
     fn commit(&mut self, bel: bool, command_epoch: u64, now: Instant) -> KittyStep {
         let Some(mut open) = self.open.take() else {
             // When: no write is open, a commit is ignored.
             return KittyStep::Silent;
         };
         open.reply.bel = bel;
+        let deadline = (open.last_packet + KITTY_WRITE_IDLE_TIMEOUT)
+            .min(open.opened_at + KITTY_WRITE_ABSOLUTE_TIMEOUT);
+        if now.max(Instant::now()) >= deadline {
+            // When: the clock reaches deadline at the commit, the write expired while its section
+            // was parsed, so one section timestamp never carries it past its deadline: `EBUSY`.
+            return KittyStep::Reply(open.reply.status(KittyClipboardStatus::Ebusy));
+        }
         if open.current.is_some() && open.finish_current().is_err() {
             // When: finish_current fails, the last stream ended mid-group and the write is `EINVAL`.
             return KittyStep::Reply(open.reply.status(KittyClipboardStatus::Einval));
         }
-        let OpenWrite { reply, entries, aliases, mut lease, .. } = open;
+        let OpenWrite { reply, entries, aliases, mut lease, policy_generation, .. } = open;
         let primary = reply.location == KittyClipboardLocation::Primary;
         if primary && !cfg!(target_os = "linux") {
             // When: primary is set off Linux, there is no PRIMARY and the commit is `ENOSYS`.
@@ -670,8 +680,10 @@ impl KittyClipboardTx {
         if let Some(omitted) = offer.as_ref().map(NativeOffer::omitted).filter(|count| *count > 0) {
             tracing::debug!(omitted, "OSC 5522 write omits types this clipboard cannot hold");
         }
-        if self.staging.write_policy() == Osc52Policy::Deny {
-            // When: write_policy is Deny at the commit, the write is refused `EPERM`.
+        let moved = self.staging.policy_generation() != policy_generation;
+        if moved || self.staging.write_policy() == Osc52Policy::Deny {
+            // When: moved (a policy change since `write`) or write_policy is Deny at the commit,
+            // the write is refused `EPERM`, as the settle step refuses it.
             return KittyStep::Reply(reply.status(KittyClipboardStatus::Eperm));
         }
         let targets = ClipTargets { clipboard: !primary, primary };
@@ -702,7 +714,8 @@ impl KittyClipboardTx {
                 return KittyStep::Reply(reply.status(KittyClipboardStatus::Eio));
             }
         };
-        match admit_write(&self.staging, &self.identity, self.pane_id, command_epoch, job, now) {
+        let (staging, identity, epoch) = (&self.staging, &self.identity, command_epoch);
+        match admit_write(staging, identity, self.pane_id, epoch, policy_generation, job, now) {
             WriteAdmission::Post(job) => KittyStep::Post(job),
             WriteAdmission::Ticket(ticket) => KittyStep::Ticket(ticket),
             WriteAdmission::Busy => KittyStep::Reply(reply.status(KittyClipboardStatus::Ebusy)),

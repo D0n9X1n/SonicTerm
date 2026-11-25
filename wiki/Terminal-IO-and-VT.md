@@ -283,7 +283,10 @@ A write commits only after BEL or ST. CAN, SUB, an unrelated ESC, or 60 s withou
 terminator abort the stream, release its queued chunks and swallow the rest of the OSC. A stream
 also ends when `osc52` or `osc52_read` changes after it opened, even back to the same policy. The
 VT worker applies both before it parses the next ready output, so a terminator read at or after
-the expiry, or after a policy change, never commits.
+the expiry, or after a policy change, never commits. The terminator also reads the clock itself,
+so a stream that expires while its chunk is parsed writes nothing, and the write keeps the policy
+generation its stream opened under through its commit point, so a policy change that lands while
+the terminator is parsed still drops it.
 
 The pane's VT worker decodes outside the parser lock: a strict Base64 alphabet, optional final
 padding, at most 3 characters carried between chunks, and the
@@ -297,11 +300,13 @@ the read ticket's revalidation rules below, and its page is titled `Let tab N, p
 the clipboard?`. Apply hands the write to the clipboard worker's ordering domain; Deny, Escape,
 an outside click or expiry drop it, and nothing is ever sent back to the program. The event loop
 refuses a write under `"deny"`, and under `"ask"` any write that was not approved. Every write
-carries what it was admitted under to its commit point: the policy generation, and for an
-approved write also its pane, PTY, window owner, command and the window's READONLY state at
-Apply. A change to `osc52` or `osc52_read` drops every program write not yet committed; an
-approved write is also dropped when its pane closes or moves, its PTY or command changes, or its
-window enters READONLY. A dropped write changes nothing and answers nothing. On Linux and Windows
+carries what it was admitted under to its commit point: the policy generation its stream or
+transaction opened under, and for an approved write also its pane, PTY, window owner, command,
+the window's READONLY state at Apply and its ticket's 120 s lifetime. A change to `osc52` or
+`osc52_read` drops every program write not yet committed; an approved write is also dropped when
+its pane closes or moves, its PTY or command changes, its window enters READONLY, or its ticket's
+lifetime ends before the clipboard worker reaches it. A dropped write changes nothing and answers
+nothing. On Linux and Windows
 the event loop posts the write to one clipboard worker thread, which checks that binding
 immediately before the native call (on Windows inside the same clipboard acquisition, after
 reading the value it replaces and before `EmptyClipboard`); that call is the commit point, and
@@ -453,8 +458,11 @@ An open write ends `EBUSY` 30 s after its last packet or 10 min after it opened,
 when the policy becomes `deny` or `osc52`/`osc52_read` changes at all after it opened (a quick
 `deny` then `allow` still ends it). The VT worker checks both before it parses each ready output
 chunk, so a commit read at or after a deadline never commits, and it also wakes for them while
-the child prints nothing, because a config reload wakes every worker. RIS and pane retirement release it
-silently.
+the child prints nothing, because a config reload wakes every worker after it publishes the new
+policy generation. The commit checks the clock and the opening generation again, so a write
+that expires or whose policy changes while its commit is parsed answers `EBUSY` or `EPERM`, and
+the posted write keeps that opening generation through its commit point. RIS and pane retirement
+release it silently.
 
 A read's payload is a Base64 list of MIME types; `.` asks for the type listing. At most 16 data
 types are accepted. Reads follow `osc52_read` and take the same consent ticket as an OSC 52 read:

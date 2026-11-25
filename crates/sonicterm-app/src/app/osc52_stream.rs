@@ -57,9 +57,9 @@ pub(in crate::app) struct ClipboardStaging {
     ticket_slots: AtomicUsize,
     /// Bumped by every change to `osc52` or `osc52_read`; a ticket bound to another is cancelled.
     policy_generation: AtomicU64,
-    /// One capacity-1 wakeup per VT worker, so a policy change reaches an open OSC 5522 write
-    /// even while its child prints nothing.
-    policy_wakers: std::sync::Mutex<Vec<crossbeam_channel::Sender<()>>>,
+    /// One capacity-1 wakeup per VT worker, carrying the generation it announces, so a policy
+    /// change reaches an open OSC 5522 write even while its child prints nothing.
+    policy_wakers: std::sync::Mutex<Vec<crossbeam_channel::Sender<u64>>>,
 }
 
 /// The stored form of the write `policy`.
@@ -106,24 +106,29 @@ impl ClipboardStaging {
 
     /// Register one VT worker's policy wakeup; a wakeup already pending coalesces with the next.
     /// Workers that ended are pruned here and at every wake, so the list tracks live panes.
-    pub(in crate::app) fn register_policy_waker(&self) -> crossbeam_channel::Receiver<()> {
+    pub(in crate::app) fn register_policy_waker(&self) -> crossbeam_channel::Receiver<u64> {
         let (sender, receiver) = crossbeam_channel::bounded(1);
+        let generation = self.policy_generation();
         let mut wakers =
             self.policy_wakers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // A live worker woken here only rechecks its open write, which the policy still admits.
         wakers.retain(|waker| {
-            !matches!(waker.try_send(()), Err(crossbeam_channel::TrySendError::Disconnected(_)))
+            let sent = waker.try_send(generation);
+            !matches!(sent, Err(crossbeam_channel::TrySendError::Disconnected(_)))
         });
         wakers.push(sender);
         receiver
     }
 
-    /// Wake every VT worker to recheck its open OSC 5522 write against the current policy.
+    /// Wake every VT worker to recheck its open OSC 5522 write against the current policy; each
+    /// wake carries the generation published when it was sent.
     pub(in crate::app) fn wake_policy_workers(&self) {
+        let generation = self.policy_generation();
         let mut wakers =
             self.policy_wakers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         wakers.retain(|waker| {
-            !matches!(waker.try_send(()), Err(crossbeam_channel::TrySendError::Disconnected(_)))
+            let sent = waker.try_send(generation);
+            !matches!(sent, Err(crossbeam_channel::TrySendError::Disconnected(_)))
         });
     }
 
@@ -700,11 +705,17 @@ impl Osc52Intake {
         }
     }
 
-    /// Route one complete `job`: posted under `allow` and `deny`, held on a ticket under `ask`, or
-    /// refused busy when no ticket slot is free.
-    fn route_write(&mut self, job: ClipboardJob, now: Instant) -> Result<Accepted, Osc52Refusal> {
+    /// Route one complete `job` whose stream opened under `generation`: posted under `allow` and
+    /// `deny`, held on a ticket under `ask`, or refused busy when no ticket slot is free.
+    fn route_write(
+        &mut self,
+        job: ClipboardJob,
+        generation: u64,
+        now: Instant,
+    ) -> Result<Accepted, Osc52Refusal> {
         let epoch = self.request_epoch.unwrap_or_else(|| self.identity.command_epoch());
-        match admit_write(&self.staging, &self.identity, self.pane_id, epoch, job, now) {
+        match admit_write(&self.staging, &self.identity, self.pane_id, epoch, generation, job, now)
+        {
             WriteAdmission::Post(job) => {
                 Ok(Accepted::Write(ClipboardJobHandle(Arc::new(std::sync::Mutex::new(Some(job))))))
             }
@@ -834,15 +845,21 @@ impl Osc52Intake {
             }
             ClipboardPhase::End { kinds, query } => {
                 // When: ClipboardPhase::End arrives, the decoder becomes a job or a refusal.
-                let decoder = self.track(stream, now);
-                let decoder = std::mem::replace(&mut decoder.decoder, Err(Osc52Refusal::Invalid));
+                let open = self.track(stream, now);
+                let decoder = std::mem::replace(&mut open.decoder, Err(Osc52Refusal::Invalid));
+                let (opened_at, generation) = (open.opened_at, open.policy_generation);
                 self.open = None;
+                if now.max(Instant::now()) >= opened_at + OSC52_STREAM_EXPIRY {
+                    // When: the clock reaches opened_at + OSC52_STREAM_EXPIRY at the terminator, the
+                    // stream ends unwritten and unanswered, as the settle step would have aborted it.
+                    return None;
+                }
                 if query {
                     // When: query is set, the payload was `?`, a read; it writes nothing.
                     return Some(self.answer_read(kinds.as_bytes(), now));
                 }
                 let job = self.finish(decoder, kinds.as_bytes());
-                Some(job.and_then(|job| self.route_write(job, now)))
+                Some(job.and_then(|job| self.route_write(job, generation, now)))
             }
             ClipboardPhase::Abort => {
                 self.open = None;

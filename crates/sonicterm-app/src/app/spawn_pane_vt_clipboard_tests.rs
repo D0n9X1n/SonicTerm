@@ -102,6 +102,56 @@ fn deny_then_allow_cancels_an_open_stream_and_write() {
     assert!(replies.contains("status=EPERM"), "{replies:?}");
 }
 
+/// Take `bytes` as one ready chunk through the worker's ready-output step, running `between` after
+/// the intake settles and before the chunk is parsed; returns the jobs it posted and its replies.
+fn ready_after(
+    handles: &PaneVtHandles,
+    bytes: &[u8],
+    between: impl FnOnce(),
+) -> (Vec<crate::app::osc52_stream::ClipboardJob>, String) {
+    let mut jobs = Vec::new();
+    let mut replies = Vec::new();
+    let mut send_reply = |reply: Vec<u8>| replies.extend(reply);
+    handles.take_ready_output(Instant::now(), &mut send_reply, |send_reply| {
+        between();
+        process_pane_vt_batch_with(
+            handles,
+            bytes,
+            None,
+            &mut None,
+            &mut SyncLatch::default(),
+            |_| None,
+            |event| {
+                if let UserEvent::ClipboardWrite { job, .. } = event {
+                    jobs.extend(job.take());
+                }
+            },
+            Instant::now,
+            send_reply,
+        );
+    });
+    drop(send_reply);
+    (jobs, String::from_utf8_lossy(&replies).into_owned())
+}
+
+/// Contract: an OSC 52 stream and an OSC 5522 write keep the policy generation they opened under
+/// through their commit. A policy change landing after the ready chunk's settle step, while its
+/// terminator or commit is parsed, never leaves a posted write that may commit; OSC 5522 answers
+/// `EPERM`, as the settle step would have.
+#[test]
+fn policy_change_while_the_closing_chunk_parses_never_commits() {
+    let (_pane, handles, staging) = clipboard_worker();
+    assert!(!ready(&handles, Instant::now(), b"\x1b]52;c;aGk=").0);
+    let (jobs, _) = ready_after(&handles, b"\x07", || staging.bump_policy_generation());
+    assert!(jobs.iter().all(|job| !job.binding.may_commit()), "OSC 52: a posted write commits");
+
+    let (_pane, handles, staging) = clipboard_worker();
+    assert!(!ready(&handles, Instant::now(), OPEN_WRITE).0);
+    let (jobs, replies) = ready_after(&handles, COMMIT, || staging.bump_policy_generation());
+    assert!(jobs.iter().all(|job| !job.binding.may_commit()), "OSC 5522: a posted write commits");
+    assert!(replies.contains("status=EPERM"), "{replies:?}");
+}
+
 /// The text of every clipboard write `bytes` posts as one ready chunk, in posting order.
 fn posted_texts(handles: &PaneVtHandles, bytes: &[u8]) -> Vec<String> {
     let mut texts = Vec::new();

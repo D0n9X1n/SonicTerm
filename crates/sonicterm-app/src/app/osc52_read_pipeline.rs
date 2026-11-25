@@ -763,9 +763,11 @@ impl super::App {
             // When: take_write is None, the ticket holds no write.
             return;
         };
+        // The ticket's lifetime still bounds the write once the ticket itself is gone.
+        let until = ticket.binding().created_at + TICKET_LIFETIME;
         drop(ticket);
         // Apply (or an Always grant) just revalidated the ticket, READONLY included.
-        job.binding.approve();
+        job.binding.approve(until);
         let bytes = job.text.len();
         match self.submit_program_clipboard(pane_id, job, true) {
             Some(outcome) => self.show_clip_outcome(pane_id, outcome, bytes, Instant::now()),
@@ -778,16 +780,22 @@ impl super::App {
     }
 
     /// Publish a reloaded `osc52_read` and `osc52` to the VT workers; any change to either starts a
-    /// new policy generation, after the policies are stored, and revokes every ticket now.
+    /// new policy generation, after the policies are stored and before the workers are woken, and
+    /// revokes every ticket now.
     pub(in crate::app) fn publish_clipboard_policies(&mut self, new_cfg: &Config) {
+        let old = &self.config.terminal;
+        let changed =
+            new_cfg.terminal.osc52 != old.osc52 || new_cfg.terminal.osc52_read != old.osc52_read;
         let staging = &self.clip_state.staging;
         staging.set_read_policy(new_cfg.terminal.osc52_read);
         staging.set_write_policy(new_cfg.terminal.osc52);
-        // Every VT worker rechecks an open OSC 5522 write now, even while its child is silent.
-        staging.wake_policy_workers();
-        let old = &self.config.terminal;
-        if new_cfg.terminal.osc52 != old.osc52 || new_cfg.terminal.osc52_read != old.osc52_read {
+        if changed {
             staging.bump_policy_generation();
+        }
+        // Every VT worker rechecks an open write now, even while its child is silent; the new
+        // generation is already published, so no worker spends this wake under the old one.
+        staging.wake_policy_workers();
+        if changed {
             // Any policy transition revokes every session grant and every paste grant.
             self.clip_state.reads.grants.clear();
             self.clip_state.reads.paste_grants.clear();
