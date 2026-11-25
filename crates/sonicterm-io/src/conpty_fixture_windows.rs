@@ -44,7 +44,7 @@ use windows::{
 
 use super::clock::{
     abandon, collect_input, confirmed, reap, settle_input, wait_until, Arrival, CaseClock, Input,
-    Launch, RunClock, Teardown, Unjobbed, HOST_BUDGET, REPORT_MARGIN, TEARDOWN_BUDGET,
+    Launch, RunClock, Teardown, Unjobbed, HOST_BUDGET, REPORT_MARGIN,
 };
 use super::{
     classify, classify_repaint, find, hex, json_field, row_line, Case, Evidence, Expected,
@@ -199,21 +199,21 @@ fn drive<E: Engine>(
     let mut closed = HashMap::new();
     let mut resize_at: Option<(Instant, u16)> = None;
     loop {
-        let now = Instant::now();
-        let Some(left) =
-            clock.deadline().checked_duration_since(now).filter(|left| !left.is_zero())
-        else {
-            // When: checked_duration_since finds the deadline in force passed, open sections read
-            // inconclusive.
-            return closed;
-        };
-        if let Some((_, rows)) = resize_at.filter(|(due, _)| now >= *due) {
+        if let Some((_, rows)) = resize_at.filter(|(due, _)| Instant::now() >= *due) {
             resize_at = None;
             if (pty.resize)(COLS, rows).is_err() {
                 // The native resize failed; the repaint row records whatever came.
                 println!("{LINE_PREFIX}{{\"kind\":\"resize-error\",\"rows\":{rows}}}");
             }
         }
+        // Measured after the resize call, so a slow native resize cannot stretch the wait.
+        let Some(left) =
+            clock.deadline().checked_duration_since(Instant::now()).filter(|left| !left.is_zero())
+        else {
+            // When: checked_duration_since finds the deadline in force passed, open sections read
+            // inconclusive.
+            return closed;
+        };
         // The wait never runs past the deadline in force, so a chunk is stamped when it arrived.
         let chunk = match pty.out_rx.recv_timeout(left.min(Duration::from_millis(50))) {
             Ok(chunk) => chunk,
@@ -227,6 +227,11 @@ fn drive<E: Engine>(
             }
         };
         let received_at = Instant::now();
+        if clock.admits(received_at) == Arrival::Late {
+            // When: admits says Arrival::Late, the chunk is refused whole: none of its sentinels
+            // may end the expired section, open another or finish the run.
+            return closed;
+        }
         let reply = engine.output(&chunk);
         if !reply.is_empty() {
             // When: the engine produced a `reply`; a refused one shows as a mismatch in the report.
@@ -266,9 +271,12 @@ fn drive<E: Engine>(
                     closed.insert(name, evidence);
                 }
                 ScanEvent::Abandoned(_) => {
-                    // An abandoned section's row stays missing and reads inconclusive; silence is
-                    // measured from it.
-                    clock.abandoned(received_at);
+                    // When: a section was `Abandoned`, its row stays missing and reads
+                    // inconclusive; silence is measured from it.
+                    if clock.abandoned(received_at) == Arrival::Late {
+                        // When: clock.abandoned says Arrival::Late, nothing after it is evidence.
+                        return closed;
+                    }
                 }
                 ScanEvent::Done => {
                     // When: the child printed `Done`, every section it will print has arrived.
@@ -360,6 +368,7 @@ fn run_child(cases: &[Case]) {
                 let report = match input {
                     Input::Bytes(received) => hex(&received),
                     Input::Overflow => "OVERFLOW".to_owned(),
+                    Input::Unsettled => "UNSETTLED".to_owned(),
                 };
                 write_flushed(
                     &mut stdout,
@@ -444,14 +453,24 @@ fn run_outer(test_name: &str, manifest_dir: &Path, cases: &[Case]) {
         .join(format!("conpty-fixture-{}", std::process::id()));
     // One total deadline covers staging, both hosts and their teardowns; nothing restarts it.
     let run = RunClock::new(Instant::now());
-    // A leftover directory from an earlier process with the same id is replaced.
-    let _ = std::fs::remove_dir_all(&base);
-    std::fs::create_dir_all(&base).expect("create fixture directory");
+    // A leftover directory from an earlier process with the same id is replaced; the filesystem
+    // work runs under the work deadline like every copy.
+    let fresh = base.clone();
+    let prepared = within(run.work_deadline(), move || {
+        let _ = std::fs::remove_dir_all(&fresh);
+        std::fs::create_dir_all(&fresh)
+    });
+    if let Err(problem) = prepared {
+        // The fixture directory could not be made before the deadline.
+        panic!("F-ConPTY fixture failed: preparing the fixture directory failed: {problem}");
+    }
     let runtime = match std::env::var_os(RUNTIME_DIR_ENV) {
         Some(staged) => PathBuf::from(staged),
-        None => stage_runtime(manifest_dir, &base.join("staged"), run.work_deadline()),
+        None => stage_runtime(manifest_dir, &base.join("staged"), &run),
     };
     let mut problems = Vec::new();
+    // A copy abandoned at the deadline may still be writing, so its directory is left alone.
+    let mut abandoned_copy = false;
     for role in ["packaged", "system"] {
         let role_dir = base.join(role);
         let host = role_dir.join(&file_name);
@@ -472,21 +491,33 @@ fn run_outer(test_name: &str, manifest_dir: &Path, cases: &[Case]) {
         });
         if let Err(problem) = copied {
             // When: copied is an Err (a failed copy or a passed deadline), the host never launches.
+            abandoned_copy |= problem == LATE;
             problems.push(format!("{role}: preparing the host failed: {problem}"));
             continue;
         }
         let Some(launch) = run.launch(Instant::now()) else {
-            // When: launch finds too little time left, the host never starts.
-            problems.push(format!("{role}: the total deadline left no time to run this host"));
+            // When: launch finds too little time left for the host's rows, it never starts.
+            problems
+                .push(format!("{role}: the total deadline left too little time to run this host"));
             continue;
         };
-        let report = run_one_host(&host, role, test_name, launch);
+        let report = run_one_host(&host, role, test_name, launch, &run);
         check_report(role, cases, &report, &mut problems);
     }
-    // Copies an unreaped host still holds stay behind; that host is already a reported problem.
-    let _ = std::fs::remove_dir_all(&base);
+    if !abandoned_copy {
+        // When: abandoned_copy is false, no copy may still write, so the directory goes; an
+        // unreaped host's files stay, and that host is already a problem.
+        let doomed = base.clone();
+        let _ = within(run.total_deadline(), move || {
+            let _ = std::fs::remove_dir_all(&doomed);
+            Ok(())
+        });
+    }
     assert!(problems.is_empty(), "F-ConPTY fixture failed:\n{}", problems.join("\n"));
 }
+
+/// What [`within`] reports for work that did not finish before its deadline.
+const LATE: &str = "it did not finish before the total deadline";
 
 /// Run `work` on its own thread and wait for it until `deadline`; a late result is an error and
 /// the thread is left to finish on its own, so a stuck copy cannot hold the fixture past it.
@@ -494,6 +525,10 @@ fn within(
     deadline: Instant,
     work: impl FnOnce() -> std::io::Result<()> + Send + 'static,
 ) -> Result<(), String> {
+    if Instant::now() >= deadline {
+        // When: now is at or past the deadline, the work is never started.
+        return Err(LATE.to_owned());
+    }
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
         // A send fails only when the deadline already passed and nobody waits.
@@ -502,13 +537,14 @@ fn within(
     let left = deadline.saturating_duration_since(Instant::now());
     match receiver.recv_timeout(left) {
         Ok(result) => result.map_err(|error| error.to_string()),
-        Err(_) => Err("it did not finish before the total deadline".to_owned()),
+        Err(_) => Err(LATE.to_owned()),
     }
 }
 
 /// Stage the pinned runtime with the reviewed setup script into `destination` before `deadline`;
 /// a script still running then is killed and reaped, and the failure says whether it was.
-fn stage_runtime(manifest_dir: &Path, destination: &Path, deadline: Instant) -> PathBuf {
+fn stage_runtime(manifest_dir: &Path, destination: &Path, run: &RunClock) -> PathBuf {
+    let deadline = run.work_deadline();
     std::fs::create_dir_all(destination).expect("create staging directory");
     let script = manifest_dir.join("../../scripts/setup-windows-conpty.py");
     let mut child = Command::new("python")
@@ -524,7 +560,7 @@ fn stage_runtime(manifest_dir: &Path, destination: &Path, deadline: Instant) -> 
     });
     if !finished {
         // The script is still running at the deadline: end it within the teardown budget.
-        let (killed, reaped) = abandon(&mut child, Instant::now() + TEARDOWN_BUDGET);
+        let (killed, reaped) = abandon(&mut child, run.teardown_deadline(Instant::now()));
         panic!("staging the ConPTY runtime passed the total deadline (killed: {killed}, reaped: {reaped})");
     }
     assert!(
@@ -541,7 +577,13 @@ struct HostReport {
     reaped: bool,
 }
 
-fn run_one_host(host: &Path, role: &str, test_name: &str, launch: Launch) -> HostReport {
+fn run_one_host(
+    host: &Path,
+    role: &str,
+    test_name: &str,
+    launch: Launch,
+    run: &RunClock,
+) -> HostReport {
     let mut command = Command::new(host);
     command
         .args(test_args(test_name))
@@ -561,7 +603,7 @@ fn run_one_host(host: &Path, role: &str, test_name: &str, launch: Launch) -> Hos
     if let Err(error) = job.assign(&child) {
         // The host is outside the job: kill and reap it before the failure, so it never reads
         // `go` from a closed pipe and spawns its PTY.
-        let (killed, reaped) = abandon(&mut child, Instant::now() + TEARDOWN_BUDGET);
+        let (killed, reaped) = abandon(&mut child, run.teardown_deadline(Instant::now()));
         panic!("assign fixture host to its job: {error} (killed: {killed}, reaped: {reaped})");
     }
     if let Some(mut stdin) = child.stdin.take() {
@@ -599,9 +641,10 @@ fn run_one_host(host: &Path, role: &str, test_name: &str, launch: Launch) -> Hos
             break;
         }
     }
-    // One teardown allowance after the host's run, which the run clock held back.
-    let teardown_deadline = launch.host_deadline.max(Instant::now()) + TEARDOWN_BUDGET;
-    let reaped = reap(&mut HostTeardown { child: &mut child, job: &job }, teardown_deadline);
+    // One teardown allowance from when teardown starts, never past the run's total deadline.
+    let started = Instant::now();
+    let deadline = run.teardown_deadline(started);
+    let reaped = reap(&mut HostTeardown { child: &mut child, job: &job }, started, deadline);
     HostReport { lines, finished, reaped }
 }
 
@@ -616,8 +659,8 @@ impl Teardown for HostTeardown<'_> {
         matches!(self.child.try_wait(), Ok(Some(_)))
     }
 
-    fn terminate_job(&mut self) {
-        self.job.terminate();
+    fn terminate_job(&mut self) -> bool {
+        self.job.terminate()
     }
 
     fn job_empty(&mut self) -> bool {
@@ -706,10 +749,10 @@ impl Job {
         unsafe { AssignProcessToJobObject(self.0, process) }
     }
 
-    fn terminate(&self) {
-        let _ =
-            // SAFETY: `self.0` is this job's live handle. A failure leaves the close-time kill.
-            unsafe { TerminateJobObject(self.0, 1) };
+    /// End every process in the job; `false` when the native call failed.
+    fn terminate(&self) -> bool {
+        // SAFETY: `self.0` is this job's live handle. A failure leaves the close-time kill.
+        unsafe { TerminateJobObject(self.0, 1) }.is_ok()
     }
 
     /// Whether the job holds no live process; a failed query counts as not empty.

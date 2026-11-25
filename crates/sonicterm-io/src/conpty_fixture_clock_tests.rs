@@ -62,6 +62,21 @@ fn silence_between_cases_is_bounded_from_the_last_sentinel() {
     assert_eq!(clock.opened("two/out", start + secs(2) + IDLE_BUDGET), Arrival::Late);
 }
 
+/// A late chunk is refused whole against the deadline in force before it, so an abandonment
+/// inside it cannot clear the expired case and admit the next case's opening or a `Done`.
+#[test]
+fn a_late_chunk_cannot_abandon_its_case_and_open_another() {
+    let start = Instant::now();
+    let mut clock = CaseClock::new(start, start + secs(60));
+    assert_eq!(clock.opened("slow/out", start), Arrival::InTime);
+    let late = start + CASE_BUDGET;
+    assert_eq!(clock.admits(late), Arrival::Late);
+    // Even replayed event by event, the abandonment is refused and leaves the case open.
+    assert_eq!(clock.abandoned(late), Arrival::Late);
+    assert_eq!(clock.deadline(), start + CASE_BUDGET);
+    assert_eq!(clock.admits(late), Arrival::Late);
+}
+
 /// The host's own end caps every case: a case opened near it ends with the host, not 5 s later.
 #[test]
 fn the_host_deadline_caps_every_case() {
@@ -85,10 +100,10 @@ fn a_launch_fits_its_loop_report_and_teardown_in_the_total() {
     assert_eq!(first.host_deadline, start + HOST_BUDGET);
     assert_eq!(first.loop_budget, HOST_BUDGET - REPORT_MARGIN);
     // Late staging leaves less than a whole host budget: the host gets only what is left.
-    let late = start + TOTAL_BUDGET - TEARDOWN_BUDGET - secs(20);
-    let squeezed = run.launch(late).expect("20 s still covers a loop and its report");
+    let late = start + TOTAL_BUDGET - TEARDOWN_BUDGET - secs(40);
+    let squeezed = run.launch(late).expect("40 s still covers the least loop and its report");
     assert_eq!(squeezed.host_deadline, run.work_deadline());
-    assert_eq!(squeezed.loop_budget, secs(20) - REPORT_MARGIN);
+    assert_eq!(squeezed.loop_budget, secs(40) - REPORT_MARGIN);
 }
 
 /// No host launches once the work deadline passed, or when what is left cannot cover a loop
@@ -102,12 +117,39 @@ fn an_expired_run_refuses_to_launch() {
     assert_eq!(run.launch(run.work_deadline() - REPORT_MARGIN), None);
 }
 
+/// A host whose positive scan time is still too short for its rows is refused, not started to
+/// fail its positive control: admission needs MIN_LOOP_BUDGET after the report margin.
+#[test]
+fn a_launch_too_short_for_its_rows_is_refused() {
+    let start = Instant::now();
+    let run = RunClock::new(start);
+    let barely = run.work_deadline() - REPORT_MARGIN - Duration::from_millis(100);
+    assert_eq!(run.launch(barely), None);
+    let short = run.work_deadline() - REPORT_MARGIN - MIN_LOOP_BUDGET + Duration::from_millis(1);
+    assert_eq!(run.launch(short), None);
+    let enough = run.work_deadline() - REPORT_MARGIN - MIN_LOOP_BUDGET;
+    assert_eq!(run.launch(enough).map(|launch| launch.loop_budget), Some(MIN_LOOP_BUDGET));
+}
+
+/// A teardown is one allowance from when it starts, never the rest of a host's run, and never
+/// past the run's total deadline.
+#[test]
+fn a_teardown_runs_one_allowance_from_its_start_within_the_run() {
+    let start = Instant::now();
+    let run = RunClock::new(start);
+    // A host that ended 10 s into its 60 s run gets 5 s of teardown, not 55 s.
+    assert_eq!(run.teardown_deadline(start + secs(10)), start + secs(10) + TEARDOWN_BUDGET);
+    let near_end = start + TOTAL_BUDGET - secs(2);
+    assert_eq!(run.teardown_deadline(near_end), run.total_deadline());
+}
+
 /// A scripted host and job: whether each call succeeds, and what teardown asked of them.
 #[derive(Default)]
 struct FakeTeardown {
     host_exits: bool,
     exits_after_terminate: bool,
     job_empties: bool,
+    terminate_fails: bool,
     terminated: bool,
 }
 
@@ -116,8 +158,9 @@ impl Teardown for FakeTeardown {
         self.host_exits || self.terminated && self.exits_after_terminate
     }
 
-    fn terminate_job(&mut self) {
+    fn terminate_job(&mut self) -> bool {
         self.terminated = true;
+        !self.terminate_fails
     }
 
     fn job_empty(&mut self) -> bool {
@@ -129,29 +172,70 @@ impl Teardown for FakeTeardown {
 #[test]
 fn a_clean_host_is_reaped_without_termination() {
     let mut steps = FakeTeardown { host_exits: true, job_empties: true, ..FakeTeardown::default() };
-    assert!(reap(&mut steps, Instant::now() + Duration::from_millis(100)));
+    let now = Instant::now();
+    assert!(reap(&mut steps, now, now + Duration::from_millis(100)));
     assert!(!steps.terminated);
 }
 
-/// A host that never exits ends its job, and a job end that reaps it counts as reaped.
+/// A host that sent its end line but hangs is terminated after the natural-exit wait, with time
+/// left on the same deadline to see it exit and its job empty; the job end that reaps it counts.
 #[test]
-fn a_wedged_host_is_terminated_and_then_reaped() {
+fn a_hung_host_is_terminated_early_enough_to_be_reaped() {
     let mut steps =
         FakeTeardown { exits_after_terminate: true, job_empties: true, ..FakeTeardown::default() };
-    assert!(reap(&mut steps, Instant::now() + Duration::from_millis(100)));
+    let now = Instant::now();
+    let deadline = now + Duration::from_millis(200);
+    assert!(reap_within(&mut steps, now + Duration::from_millis(80), deadline));
     assert!(steps.terminated);
+    assert!(Instant::now() < deadline);
+}
+
+/// The natural-exit wait is only part of the teardown allowance, so the production reap always
+/// keeps time to end the job and see it empty on the same deadline.
+#[test]
+fn the_natural_exit_wait_leaves_time_to_terminate() {
+    assert!(NATURAL_EXIT + Duration::from_secs(2) <= TEARDOWN_BUDGET);
+}
+
+/// A failed job end is a failed teardown, even when the host would exit afterwards.
+#[test]
+fn a_failed_job_end_reports_unreaped() {
+    let mut steps = FakeTeardown {
+        exits_after_terminate: true,
+        job_empties: true,
+        terminate_fails: true,
+        ..FakeTeardown::default()
+    };
+    let now = Instant::now();
+    assert!(!reap_within(
+        &mut steps,
+        now + Duration::from_millis(20),
+        now + Duration::from_millis(100)
+    ));
+    assert!(steps.terminated);
+}
+
+/// A poll that begins at or past the deadline never counts, so an exit after the deadline is
+/// not a successful teardown.
+#[test]
+fn an_exit_after_the_deadline_does_not_count() {
+    let mut steps = FakeTeardown { host_exits: true, job_empties: true, ..FakeTeardown::default() };
+    let past = Instant::now();
+    assert!(!reap_within(&mut steps, past, past));
+    assert!(!wait_until(past, || true));
 }
 
 /// A failed cleanup is detected, never assumed: a host that survives the job end, or a job that
 /// still holds a process after the host exits, reports unreaped within the one deadline.
 #[test]
 fn a_failed_teardown_reports_unreaped_within_its_deadline() {
-    let deadline = Instant::now() + Duration::from_millis(100);
+    let now = Instant::now();
+    let deadline = now + Duration::from_millis(100);
     let mut survivor = FakeTeardown { job_empties: true, ..FakeTeardown::default() };
-    assert!(!reap(&mut survivor, deadline));
+    assert!(!reap_within(&mut survivor, now + Duration::from_millis(20), deadline));
     assert!(survivor.terminated);
     let mut leftover = FakeTeardown { host_exits: true, ..FakeTeardown::default() };
-    assert!(!reap(&mut leftover, deadline));
+    assert!(!reap_within(&mut leftover, now + Duration::from_millis(20), deadline));
     // Both share one deadline, so the whole teardown ends shortly after it.
     assert!(Instant::now() < deadline + Duration::from_millis(200));
 }
@@ -278,4 +362,48 @@ fn a_leftover_past_the_byte_bound_never_settles() {
     }
     drop(sender);
     assert!(!settle_input(&receiver));
+}
+
+/// A reply still arriving when the read deadline comes is unsettled, never reported as hex: its
+/// expected prefix could otherwise read as exact while the rest was pending.
+#[test]
+fn a_reply_cut_by_the_deadline_is_unsettled() {
+    let (sender, receiver) = mpsc::sync_channel(64);
+    let drip = std::thread::spawn(move || {
+        for _ in 0..20 {
+            if sender.send(b"x".to_vec()).is_err() {
+                // When: send fails, the reader is gone and the drip ends.
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let reply =
+        collect_input_within(&receiver, Duration::from_millis(80), Duration::from_millis(50));
+    assert_eq!(reply, Input::Unsettled);
+    drop(receiver);
+    drip.join().expect("drip ends");
+}
+
+/// No reply at all within the deadline is an empty reply, which a row reads as a mismatch.
+#[test]
+fn no_reply_within_the_deadline_is_empty() {
+    let (_sender, receiver) = mpsc::sync_channel::<Vec<u8>>(1);
+    let reply =
+        collect_input_within(&receiver, Duration::from_millis(40), Duration::from_millis(20));
+    assert_eq!(reply, Input::Bytes(Vec::new()));
+}
+
+/// Input delayed past an intervening no-echo case but queued before the next echo case is
+/// discarded by that case's settle, so it never reads as the echo case's reply.
+#[test]
+fn input_delayed_across_a_no_echo_case_is_settled_away() {
+    let (sender, receiver) = mpsc::sync_channel(4);
+    // The earlier case's late reply lands while a no-echo case runs; the echo case settles first.
+    sender.send(b"late".to_vec()).expect("queue the late reply");
+    assert!(settle_input_within(&receiver, Duration::from_millis(200), Duration::from_millis(30)));
+    sender.send(b"reply".to_vec()).expect("queue the echo reply");
+    let reply =
+        collect_input_within(&receiver, Duration::from_millis(200), Duration::from_millis(30));
+    assert_eq!(reply, Input::Bytes(b"reply".to_vec()));
 }
