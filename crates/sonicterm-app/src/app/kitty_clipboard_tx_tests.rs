@@ -533,8 +533,19 @@ fn utf8_string_alias_is_text() {
 #[test]
 fn native_copies_reserved_or_ebusy() {
     let payload = "y".repeat(64);
+    // The budget covers both staged types and the text path's staged text plus its native copy,
+    // which is UTF-16 and a terminator on Windows and UTF-8 elsewhere, with a little slack.
+    let staged = 2 * (payload.len() + "text/plain".len());
+    let text_alone = payload.len() + super::super::osc52_stream::native_clipboard_bytes(&payload);
+    let budget = staged.max(text_alone) + 16;
+    let both = vec![
+        ("text/plain".to_owned(), payload.clone().into_bytes()),
+        ("text/html".to_owned(), payload.clone().into_bytes()),
+    ];
+    let OfferPlan::Offer(offer) = plan(both, &[], &text_and_html) else { panic!("an offer") };
+    assert!(budget < offer.reserved_bytes(), "{budget} must not cover the offer");
     for (holds, posts) in [(text_and_html as fn(&NativeFormat) -> bool, false), (text_only, true)] {
-        let mut rig = rig_with(160, 1 << 16, Osc52Policy::Allow);
+        let mut rig = rig_with(budget, 1 << 16, Osc52Policy::Allow);
         rig.tx.set_holds(holds);
         rig.send("type=write:id=b");
         rig.data("text/plain", &b64(&payload));
