@@ -8,7 +8,8 @@
 //! back after every host. [`reap`] and [`abandon`] spend one teardown deadline across their steps:
 //! a failed step fails, and only a poll that begins before the deadline counts. [`settle_input`] and
 //! [`collect_input`] bound the child's input by time and bytes; a reply that overflows or never
-//! goes quiet is reported as such, never as a cut or half reply.
+//! goes quiet is reported as such, never as a cut or half reply. Each reads its clock through a
+//! seam ([`Teardown::now`], [`InputSource`]), so the tests run them on a scripted virtual clock.
 //!
 //! Quiet input reduces carry-over; it does not prove which case produced a reply. A reply delayed
 //! outside the child's queue for longer than [`SETTLE_QUIET`] can still be read by the next echo
@@ -249,24 +250,61 @@ pub(crate) trait Teardown {
     fn terminate_job(&mut self) -> bool;
     /// Whether the job holds no live process.
     fn job_empty(&mut self) -> bool;
+    /// The clock the teardown's waits read; a test scripts it.
+    fn now(&mut self) -> Instant {
+        Instant::now()
+    }
+    /// Pause between two polls of a wait.
+    fn pause(&mut self, length: Duration) {
+        std::thread::sleep(length);
+    }
 }
+
+/// The longest pause between two polls of a wait.
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Poll `ready` until it holds or `deadline` passes; return whether it held. The clock is read
 /// before each poll, so a poll that starts at or past `deadline` never counts.
 pub(crate) fn wait_until(deadline: Instant, mut ready: impl FnMut() -> bool) -> bool {
+    poll_until(
+        &mut (),
+        deadline,
+        |_| Instant::now(),
+        |_, length| std::thread::sleep(length),
+        |_| ready(),
+    )
+}
+
+/// [`wait_until`] over `subject`, reading its clock with `now` and pausing with `pause`.
+fn poll_until<S: ?Sized>(
+    subject: &mut S,
+    deadline: Instant,
+    now: impl Fn(&mut S) -> Instant,
+    pause: impl Fn(&mut S, Duration),
+    mut ready: impl FnMut(&mut S) -> bool,
+) -> bool {
     loop {
         let Some(left) =
-            deadline.checked_duration_since(Instant::now()).filter(|left| !left.is_zero())
+            deadline.checked_duration_since(now(subject)).filter(|left| !left.is_zero())
         else {
             // When: checked_duration_since finds the deadline reached, the wait failed.
             return false;
         };
-        if ready() {
+        if ready(subject) {
             // When: ready() holds on a poll that began before the deadline, the wait succeeded.
             return true;
         }
-        std::thread::sleep(left.min(Duration::from_millis(20)));
+        pause(subject, left.min(POLL_INTERVAL));
     }
+}
+
+/// [`wait_until`] on the teardown's own clock, polling `ready` against `steps`.
+fn wait_steps<T: Teardown + ?Sized>(
+    steps: &mut T,
+    deadline: Instant,
+    ready: impl FnMut(&mut T) -> bool,
+) -> bool {
+    poll_until(steps, deadline, |steps| steps.now(), |steps, length| steps.pause(length), ready)
 }
 
 /// Tear one host down within `deadline`: give it [`NATURAL_EXIT`] to exit, end its job if it
@@ -278,12 +316,13 @@ pub(crate) fn reap(steps: &mut impl Teardown, started: Instant, deadline: Instan
 
 /// [`reap`] with the end of the natural-exit wait given as `natural`.
 pub(crate) fn reap_within(steps: &mut impl Teardown, natural: Instant, deadline: Instant) -> bool {
-    if !wait_until(natural, || steps.host_exited()) && !steps.terminate_job() {
+    if !wait_steps(steps, natural, |steps| steps.host_exited()) && !steps.terminate_job() {
         // When: terminate_job failed for a host still running, the teardown failed.
         return false;
     }
     // Both must hold before the deadline: a surviving host or a job still holding a process fails.
-    wait_until(deadline, || steps.host_exited()) && wait_until(deadline, || steps.job_empty())
+    wait_steps(steps, deadline, |steps| steps.host_exited())
+        && wait_steps(steps, deadline, |steps| steps.job_empty())
 }
 
 /// The native steps for a host that never joined its job.
@@ -323,24 +362,54 @@ pub(crate) fn settle_input(receiver: &Receiver<Vec<u8>>) -> bool {
     settle_input_within(receiver, SETTLE_DEADLINE, SETTLE_QUIET)
 }
 
-/// Discard earlier input until `quiet` passes with none, within `limit` and
-/// [`MAX_SETTLE_BYTES`]; return whether it settled. A disconnected reader is settled.
+/// What the child's input reads need: a clock and a timed receive, so a test can script both.
+pub(crate) trait InputSource {
+    /// The current instant.
+    fn now(&mut self) -> Instant;
+    /// Wait at most `wait` for the next chunk.
+    fn recv(&mut self, wait: Duration) -> Result<Vec<u8>, RecvTimeoutError>;
+}
+
+/// The child's real input: the monotonic clock and its reader thread's channel.
+pub(crate) struct ChannelInput<'a>(pub(crate) &'a Receiver<Vec<u8>>);
+
+impl InputSource for ChannelInput<'_> {
+    fn now(&mut self) -> Instant {
+        Instant::now()
+    }
+
+    fn recv(&mut self, wait: Duration) -> Result<Vec<u8>, RecvTimeoutError> {
+        self.0.recv_timeout(wait)
+    }
+}
+
+/// [`settle_input_from`] over the real channel and clock.
 pub(crate) fn settle_input_within(
     receiver: &Receiver<Vec<u8>>,
     limit: Duration,
     quiet: Duration,
 ) -> bool {
-    let deadline = Instant::now() + limit;
+    settle_input_from(&mut ChannelInput(receiver), limit, quiet)
+}
+
+/// Discard earlier input until `quiet` passes with none, within `limit` and
+/// [`MAX_SETTLE_BYTES`]; return whether it settled. A disconnected reader is settled.
+pub(crate) fn settle_input_from(
+    source: &mut impl InputSource,
+    limit: Duration,
+    quiet: Duration,
+) -> bool {
+    let deadline = source.now() + limit;
     let mut discarded = 0usize;
     loop {
-        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+        let Some(left) = deadline.checked_duration_since(source.now()) else {
             // When: checked_duration_since finds the deadline passed, input is still arriving.
             return false;
         };
         let wait = left.min(quiet);
-        match receiver.recv_timeout(wait) {
+        match source.recv(wait) {
             Ok(bytes) => {
-                // When: recv_timeout gave Ok bytes, they are a leftover to discard and count.
+                // When: recv gave Ok bytes, they are a leftover to discard and count.
                 discarded += bytes.len();
                 if discarded > MAX_SETTLE_BYTES {
                     // When: discarded passed MAX_SETTLE_BYTES, this is a flood, not a leftover.
@@ -365,19 +434,28 @@ pub(crate) fn collect_input(receiver: &Receiver<Vec<u8>>) -> Input {
     collect_input_within(receiver, READ_DEADLINE, READ_QUIET)
 }
 
-/// The bytes received within `limit`, ended by `quiet` after the last one. The buffer is sized
-/// once; a chunk that would pass [`MAX_READ_BYTES`] is an overflow, and bytes still arriving at
-/// `limit` are unsettled, so neither reads as a whole reply.
+/// [`collect_input_from`] over the real channel and clock.
 pub(crate) fn collect_input_within(
     receiver: &Receiver<Vec<u8>>,
     limit: Duration,
     quiet: Duration,
 ) -> Input {
-    let deadline = Instant::now() + limit;
+    collect_input_from(&mut ChannelInput(receiver), limit, quiet)
+}
+
+/// The bytes received within `limit`, ended by `quiet` after the last one. The buffer is sized
+/// once; a chunk that would pass [`MAX_READ_BYTES`] is an overflow, and bytes still arriving at
+/// `limit` are unsettled, so neither reads as a whole reply.
+pub(crate) fn collect_input_from(
+    source: &mut impl InputSource,
+    limit: Duration,
+    quiet: Duration,
+) -> Input {
+    let deadline = source.now() + limit;
     let mut received = Vec::with_capacity(MAX_READ_BYTES);
     loop {
         let Some(left) =
-            deadline.checked_duration_since(Instant::now()).filter(|left| !left.is_zero())
+            deadline.checked_duration_since(source.now()).filter(|left| !left.is_zero())
         else {
             // When: checked_duration_since finds the deadline reached, any bytes are unsettled.
             if received.is_empty() {
@@ -392,9 +470,9 @@ pub(crate) fn collect_input_within(
             // When: some input was received, the reply ends after a quiet window of silence.
             left.min(quiet)
         };
-        match receiver.recv_timeout(wait) {
+        match source.recv(wait) {
             Ok(bytes) => {
-                // When: recv_timeout gave Ok bytes, they join the reply within MAX_READ_BYTES.
+                // When: recv gave Ok bytes, they join the reply within MAX_READ_BYTES.
                 if received.len() + bytes.len() > MAX_READ_BYTES {
                     // When: this chunk would pass MAX_READ_BYTES, the reply is not kept at all.
                     return Input::Overflow;
