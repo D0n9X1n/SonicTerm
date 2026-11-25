@@ -816,3 +816,36 @@ fn round_trip_offer_never_grants() {
     harness.follow_up(pane, "Paste event", &password);
     assert_eq!(harness.waiting(), 1, "the follow-up read asks");
 }
+
+/// Contract: a consumed one-time grant keeps its 60 s deadline through the read it approved. A read
+/// approved just before the grant ends is not served once that deadline passes, whether it was
+/// already reading (reply admission) or still queued behind the busy reader (native-read
+/// admission); both wait for an ordinary answer, and the queued one never reads the clipboard.
+#[test]
+fn consumed_grant_expiring_before_its_read_is_not_served() {
+    let mut harness = harness();
+    let (_, receiver, _peer) = broadcast(&mut harness);
+    let source = harness.pane;
+    feed(&harness.app, source, b"\x1b[?5522h");
+    feed(&harness.app, receiver, b"\x1b[?5522h");
+    harness.paste();
+    let events = harness.events();
+    let (_, source_password) = password_of(&events[0].1);
+    let (_, receiver_password) = password_of(&events[1].1);
+    // Both grants end 600 ms from now, so both are still live when the reads consume them.
+    let margin = Duration::from_millis(600);
+    harness.app.clip_state.reads.paste_grants.age(PASTE_GRANT_LIFETIME - margin);
+    let release = harness.gate_reads();
+    harness.follow_up(receiver, "Paste event", &receiver_password);
+    harness.pump_until(|harness| harness.reads() == 1);
+    harness.follow_up(source, "Paste event", &source_password);
+    assert_eq!(harness.app.clip_state.reads.queued.len(), 1, "queued behind the busy reader");
+    std::thread::sleep(margin + Duration::from_millis(200));
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    harness.pump_until_reader_idle();
+    assert!(!harness.served(receiver), "the read in progress is not delivered past the grant");
+    assert!(!harness.served(source), "nor is the queued one");
+    assert_eq!(harness.waiting(), 2, "both ask instead");
+    assert_eq!(harness.reads(), 1, "the queued read never reached the clipboard");
+}

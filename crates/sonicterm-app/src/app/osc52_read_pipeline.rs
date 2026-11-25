@@ -242,7 +242,9 @@ impl super::App {
             sonicterm_vt::vt::KittyClipboardLocation::Standard => ReadLocation::Clipboard,
             sonicterm_vt::vt::KittyClipboardLocation::Primary => ReadLocation::Primary,
         };
-        Some(PasteApproval { binding: grant.binding, location, offer_version: grant.offer_version })
+        let expires_at = grant.issued_at + PASTE_GRANT_LIFETIME;
+        let (binding, offer_version) = (grant.binding, grant.offer_version);
+        Some(PasteApproval { binding, location, offer_version, expires_at })
     }
 
     /// Whether `grant`'s recipient still has the identity it was issued to and it is young enough:
@@ -338,11 +340,12 @@ impl super::App {
             return Err(CancelReason::ReadOnly);
         }
         let live_paste = |paste: &PasteApproval| {
-            self.paste_binding(binding.pane_id).as_ref() == Some(&paste.binding)
+            now < paste.expires_at
+                && self.paste_binding(binding.pane_id).as_ref() == Some(&paste.binding)
         };
         if binding.paste.as_deref().is_some_and(|paste| !live_paste(paste)) {
-            // When: a paste-approved read's recipient reset DECSET 5522, RIS or moved, the paste
-            // approval ended; the read itself may still ask.
+            // When: a paste-approved read's grant reached its expires_at, or its recipient reset
+            // DECSET 5522, RIS or moved, the paste approval ended; the read itself may still ask.
             return Err(CancelReason::PasteRevoked);
         }
         if check_age && now.saturating_duration_since(binding.created_at) > TICKET_LIFETIME {

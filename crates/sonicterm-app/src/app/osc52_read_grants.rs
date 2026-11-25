@@ -201,6 +201,9 @@ pub(in crate::app) struct PasteApproval {
     pub(in crate::app) location: ReadLocation,
     /// The offer version the event was built from; the reader compares it before and after reading.
     pub(in crate::app) offer_version: u64,
+    /// When the consumed grant's 60 s ended; the approval ends with it, before the native read
+    /// starts or before its reply is admitted.
+    pub(in crate::app) expires_at: std::time::Instant,
 }
 
 /// One pane's one-time paste grant: a named read from the same recipient, carrying `password`,
@@ -301,6 +304,14 @@ impl PasteGrants {
     #[cfg(test)]
     pub(in crate::app) fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Make every held grant `age` older, as if it had been issued that much earlier.
+    #[cfg(test)]
+    pub(in crate::app) fn age(&mut self, age: std::time::Duration) {
+        for grant in &mut self.entries {
+            grant.issued_at = grant.issued_at.checked_sub(age).expect("a past instant");
+        }
     }
 
     /// When the oldest held grant was issued, so the pipeline can wake at its expiry.

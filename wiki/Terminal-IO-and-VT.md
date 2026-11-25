@@ -461,8 +461,11 @@ chunk, so a commit read at or after a deadline never commits, and it also wakes 
 the child prints nothing, because a config reload wakes every worker after it publishes the new
 policy generation. The commit checks the clock and the opening generation again, so a write
 that expires or whose policy changes while its commit is parsed answers `EBUSY` or `EPERM`, and
-the posted write keeps that opening generation through its commit point. RIS and pane retirement
-release it silently.
+the posted write keeps that opening generation through its commit point. A `wdata` or `walias`
+packet is checked against both deadlines before it refreshes the idle time, so one that arrives
+after either ends the write `EBUSY` instead of reviving it. After planning, the commit checks the
+absolute deadline again, counting the time planning took, so a planned write is never handed
+off past it. RIS and pane retirement release it silently.
 
 A read's payload is a Base64 list of MIME types; `.` asks for the type listing. At most 16 data
 types are accepted. Reads follow `osc52_read` and take the same consent ticket as an OSC 52 read:
@@ -546,7 +549,8 @@ during the listing, an offer other than the one bound at the gesture, or no pass
 is still sent but issues no grant. The first OSC 5522 read from that pane at that location carrying the
 password and a nonempty `name` consumes the grant atomically on the event loop. It is approved
 without a page only while the recipient is unchanged and within 60 s; otherwise it takes normal
-consent. The approval stays bound to the recipient and the offer until delivery: the reader
+consent. The approval keeps the grant's 60 s end: a read that has not started its native read, or
+whose reply is not yet admitted, by then waits for an ordinary answer instead. The approval stays bound to the recipient and the offer until delivery: the reader
 thread compares the offer version before its native read and again after it, and the recipient
 is checked before the read starts and before delivery. A changed offer, DECRST 5522 or RIS after
 the read was accepted, or any other change to the recipient drops whatever was read, so nothing

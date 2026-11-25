@@ -308,15 +308,70 @@ fn silent_child_idle_and_absolute_deadlines_ebusy() {
     assert_eq!(reply, status("EBUSY", "i").into_bytes());
     assert_eq!(rig.staging.reserved_bytes(), 0);
     assert!(rig.tx.deadline().is_none());
-    // A write kept busy (a packet 5 s before its absolute deadline) still ends at that deadline.
+    // A write kept busy (a packet every 25 s, the last 25 s before its absolute deadline) still
+    // ends at that deadline.
     let start = Instant::now();
     rig.send_at("type=write:id=j", start);
-    let late = start + KITTY_WRITE_ABSOLUTE_TIMEOUT - Duration::from_secs(5);
-    rig.send_at(&format!("type=wdata:mime={};{}", b64("text/plain"), b64("x")), late);
+    keep_busy(&mut rig, start, 23);
     let absolute = start + KITTY_WRITE_ABSOLUTE_TIMEOUT;
     assert_eq!(rig.tx.deadline(), Some(absolute));
     assert!(rig.tx.service(absolute - Duration::from_millis(1)).is_none());
     assert_eq!(rig.tx.service(absolute).expect("expired"), status("EBUSY", "j").into_bytes());
+}
+
+/// Send a `text/plain` chunk every 25 s after `start`, `count` times, so the write never idles.
+fn keep_busy(rig: &mut Rig, start: Instant, count: u32) {
+    for tick in 1..=count {
+        let at = start + Duration::from_secs(25) * tick;
+        let steps = rig.send_at(&format!("type=wdata:mime={};{}", b64("text/plain"), b64("x")), at);
+        assert!(steps.iter().all(|step| matches!(step, KittyStep::Silent)), "{steps:?}");
+    }
+}
+
+/// The status replies among `steps`, as text.
+fn replies_of(steps: &[KittyStep]) -> Vec<String> {
+    steps
+        .iter()
+        .filter_map(|step| match step {
+            KittyStep::Reply(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Contract: a packet that changes an open write is checked against the write's deadlines before
+/// it refreshes them. Data arriving after the idle deadline ends the write `EBUSY` rather than
+/// reviving it, so the commit that follows finds no write and posts nothing.
+#[test]
+fn late_data_never_revives_an_expired_write() {
+    let mut rig = rig();
+    let stale = Instant::now().checked_sub(Duration::from_secs(31)).expect("a past instant");
+    rig.send_at("type=write:id=l", stale);
+    let steps = rig.send(&format!("type=wdata:mime={};{}", b64("text/plain"), b64("x")));
+    assert_eq!(replies_of(&steps), [status("EBUSY", "l")], "the late data ends the write");
+    let steps = rig.send("type=wdata");
+    assert!(!steps.iter().any(|step| matches!(step, KittyStep::Post(_))), "nothing is posted");
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+}
+
+/// Contract: a commit that enters before the absolute deadline but plans past it posts nothing: the
+/// deadline is checked again after planning, against the time the commit has taken.
+#[test]
+fn stalled_planner_crossing_the_absolute_deadline_posts_nothing() {
+    let mut rig = rig();
+    // Planning asks the clipboard which formats it holds; this one takes 600 ms to answer.
+    rig.tx.set_holds(|format, _| {
+        std::thread::sleep(Duration::from_millis(600));
+        *format == NativeFormat::Text
+    });
+    let start = Instant::now();
+    rig.send_at("type=write:id=s", start);
+    keep_busy(&mut rig, start, 23);
+    let commit_at = start + KITTY_WRITE_ABSOLUTE_TIMEOUT - Duration::from_millis(300);
+    let steps = rig.send_at("type=wdata", commit_at);
+    assert!(!steps.iter().any(|step| matches!(step, KittyStep::Post(_))), "nothing is posted");
+    assert_eq!(replies_of(&steps), [status("EBUSY", "s")]);
+    assert_eq!(rig.staging.reserved_bytes(), 0);
 }
 
 /// Contract: a commit reads the clock itself. A write whose section was stamped before its idle
@@ -325,19 +380,16 @@ fn silent_child_idle_and_absolute_deadlines_ebusy() {
 #[test]
 fn commit_checks_the_deadline_against_the_clock() {
     let mut rig = rig();
-    let stale = Instant::now().checked_sub(Duration::from_secs(31)).expect("a past instant");
+    // The section is stamped 29.2 s ago: its data still lands inside the 30 s idle deadline.
+    let stale = Instant::now().checked_sub(Duration::from_millis(29_200)).expect("a past instant");
     rig.send_at("type=write:id=c", stale);
-    rig.send_at(&format!("type=wdata:mime={};{}", b64("text/plain"), b64("x")), stale);
+    let steps = rig.send_at(&format!("type=wdata:mime={};{}", b64("text/plain"), b64("x")), stale);
+    assert!(replies_of(&steps).is_empty(), "the data is still in time");
+    // The commit, under the same section stamp, is parsed after the deadline passed.
+    std::thread::sleep(Duration::from_millis(1_000));
     let steps = rig.send_at("type=wdata", stale);
-    let replies: Vec<String> = steps
-        .iter()
-        .filter_map(|step| match step {
-            KittyStep::Reply(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
-            _ => None,
-        })
-        .collect();
     assert!(!steps.iter().any(|step| matches!(step, KittyStep::Post(_))), "nothing is posted");
-    assert_eq!(replies, [status("EBUSY", "c")]);
+    assert_eq!(replies_of(&steps), [status("EBUSY", "c")]);
     assert_eq!(rig.staging.reserved_bytes(), 0);
 }
 

@@ -172,7 +172,10 @@ cargo build -p sonicterm-app
   reports failure but keeps the window serving confirmed selections. Arboard shares stay charged until arboard replaces its buffers. Keep the lease through admitted INCRs
   after `SelectionClear`. User copies remain on arboard. `DONE` only when all published, `EIO` otherwise; the job's
   `KittyReply` is answered on the source PTY when it settles. The worker's `select!` also wakes on
-  the staging's policy wakeup and the write's 30 s idle / 10 min absolute deadline. Each ready
+  the staging's policy wakeup and the write's 30 s idle / 10 min absolute deadline. A `wdata` or
+  `walias` packet (`KittyClipboardTx::step`) checks both deadlines before it refreshes
+  `last_packet`, and a commit rechecks the absolute deadline after planning, adding the time it
+  took. Each ready
   chunk first settles the intake (`PaneVtHandles::take_ready_output`): an OSC 52 stream or OSC 5522
   write past its deadline, or whose recorded policy generation moved, ends before the chunk is
   parsed, so a queued terminator or commit never lands on it. The terminator or commit then reads
@@ -209,9 +212,10 @@ cargo build -p sonicterm-app
   progress, and each capture stamps `completed_at`, so a late result is unlisted with no grant. Its
   `PasteGrant` exists only after that admission, binds the recipient identity, the 5522 word and
   the offer version (`ClipboardTextSource::offer_version`), and one named read consumes it into a
-  `PasteApproval` its `ReadBinding` carries to delivery: revalidation checks the recipient, the
+  `PasteApproval` its `ReadBinding` carries to delivery: revalidation checks the recipient and the
+  grant's `expires_at` (its 60 s end) before the native read and before reply admission, the
   reader compares the offer version before and after its native read, and a changed offer or a
-  revoked approval drops the data and returns the ticket to `waiting`.
+  revoked or expired approval drops the data and returns the ticket to `waiting`.
   A reply dropped after its delivery retries leaves an OSC 5522 read one `EBUSY` packet. Native reads run one at a time on a disposable reader thread that keeps the ticket and
   its reply-budget lease until the native call returns; a result completed at or past its deadline
   (`ReaderDone::completed_at`) is answered as an overdue read. The X11 protocol runs over the

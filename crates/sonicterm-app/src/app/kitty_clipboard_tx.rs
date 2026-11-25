@@ -688,6 +688,14 @@ impl KittyClipboardTx {
             // When: no write is open, data and aliases are ignored, as kitty ignores them.
             return KittyStep::Silent;
         };
+        let deadline = (open.last_packet + KITTY_WRITE_IDLE_TIMEOUT)
+            .min(open.opened_at + KITTY_WRITE_ABSOLUTE_TIMEOUT);
+        if now.max(Instant::now()) >= deadline {
+            // When: the clock reaches deadline before this packet, the write already expired, so
+            // the packet ends it `EBUSY` instead of refreshing its idle time.
+            let (operation, status) = (KittyClipboardOperation::Wdata, KittyClipboardStatus::Ebusy);
+            return self.fail_open(operation, status, bel);
+        }
         open.last_packet = now;
         match change(open) {
             Ok(()) => KittyStep::Silent,
@@ -703,9 +711,12 @@ impl KittyClipboardTx {
             return KittyStep::Silent;
         };
         open.reply.bel = bel;
-        let deadline = (open.last_packet + KITTY_WRITE_IDLE_TIMEOUT)
-            .min(open.opened_at + KITTY_WRITE_ABSOLUTE_TIMEOUT);
-        if now.max(Instant::now()) >= deadline {
+        // The commit's own clock: the section time, or the real time when that is later.
+        let entered = Instant::now();
+        let clock = now.max(entered);
+        let absolute = open.opened_at + KITTY_WRITE_ABSOLUTE_TIMEOUT;
+        let deadline = (open.last_packet + KITTY_WRITE_IDLE_TIMEOUT).min(absolute);
+        if clock >= deadline {
             // When: the clock reaches deadline at the commit, the write expired while its section
             // was parsed, so one section timestamp never carries it past its deadline: `EBUSY`.
             return KittyStep::Reply(open.reply.status(KittyClipboardStatus::Ebusy));
@@ -782,6 +793,11 @@ impl KittyClipboardTx {
                 return KittyStep::Reply(reply.status(KittyClipboardStatus::Eio));
             }
         };
+        if clock + entered.elapsed() >= absolute {
+            // When: clock plus entered.elapsed() (the time planning took) reaches absolute, the
+            // planned job is not handed off past the write's 10 min deadline: `EBUSY`.
+            return KittyStep::Reply(reply.status(KittyClipboardStatus::Ebusy));
+        }
         let (staging, identity, epoch) = (&self.staging, &self.identity, command_epoch);
         match admit_write(staging, identity, self.pane_id, epoch, policy_generation, job, now) {
             WriteAdmission::Post(job) => KittyStep::Post(job),
