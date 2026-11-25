@@ -570,10 +570,13 @@ fn utf8_string_alias_is_text() {
 /// alone still fit.
 #[test]
 fn native_copies_reserved_or_ebusy() {
-    let payload = "y".repeat(64);
-    // The budget covers both staged types and the text path's staged text plus its native copy,
-    // which is UTF-16 and a terminator on Windows and UTF-8 elsewhere, with a little slack.
-    let staged = 2 * (payload.len() + "text/plain".len());
+    // Large enough that the offer's native copies, not planning's fixed workspace, decide the fit.
+    let payload = "y".repeat(1024);
+    // The budget covers both staged types and planning's workspace, then the text path's staged
+    // text plus its native copy, which is UTF-16 and a terminator on Windows and UTF-8 elsewhere,
+    // with a little slack.
+    let names = ["text/plain".len(), "text/html".len()].into_iter();
+    let staged = 2 * (payload.len() + "text/plain".len()) + super::plan_workspace_bytes(names);
     let text_alone = payload.len() + super::super::osc52_stream::native_clipboard_bytes(&payload);
     let budget = staged.max(text_alone) + 16;
     let both = vec![
@@ -670,4 +673,19 @@ fn alias_names_and_retargets_are_reserved() {
     assert!(rig.send(&retarget).iter().all(|step| matches!(step, KittyStep::Silent)));
     let moved = rig.staging.reserved_bytes() as isize - with_aliases as isize;
     assert_eq!(moved, "text/html".len() as isize - "text/plain".len() as isize);
+}
+
+/// Contract: planning a commit's offer reserves its own workspace first: a budget that covers the
+/// staged types but not planning answers `EBUSY` before any plan allocation and leaves nothing
+/// reserved.
+#[test]
+fn plan_workspace_reserved_or_ebusy() {
+    let staged = 2 * (2 + "text/plain".len());
+    let mut rig = rig_with(staged + 4, 1 << 16, Osc52Policy::Allow);
+    rig.tx.set_holds(text_and_html);
+    rig.send("type=write:id=w");
+    rig.data("text/plain", &b64("hi"));
+    rig.data("text/html", &b64("hi"));
+    assert_eq!(rig.reply("type=wdata"), status("EBUSY", "w"));
+    assert_eq!(rig.staging.reserved_bytes(), 0, "nothing stays reserved");
 }

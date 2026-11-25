@@ -323,6 +323,17 @@ pub(in crate::app) fn is_text(mime: &str) -> bool {
     mime == "text/plain" || mime.starts_with("text/plain;")
 }
 
+/// The most `plan` allocates for names of `name_lengths` (every staged type, then every alias):
+/// per name, its name-table slot, remap slot, representation slot and kept-buffer slot, and a
+/// copy of the name when it becomes a custom format.
+pub(in crate::app) fn plan_workspace_bytes(name_lengths: impl Iterator<Item = usize>) -> usize {
+    let per_name = std::mem::size_of::<(&str, usize)>()
+        + std::mem::size_of::<Option<usize>>()
+        + std::mem::size_of::<(NativeFormat, usize)>()
+        + std::mem::size_of::<Vec<u8>>();
+    name_lengths.map(|length| per_name + length).sum()
+}
+
 /// Size `lease` to exactly `total`, growing only when the budget covers it; false when it cannot.
 fn size_lease(lease: &mut ClipLease, total: usize) -> bool {
     if total <= lease.bytes() {
@@ -626,8 +637,19 @@ impl KittyClipboardTx {
             // When: primary is set off Linux, there is no PRIMARY and the commit is `ENOSYS`.
             return KittyStep::Reply(reply.status(KittyClipboardStatus::Enosys));
         }
+        // Planning's own allocations (its name table, index maps and custom format names) are
+        // reserved first at their worst case; the reservation ends once the plan is made.
+        let names = entries.iter().map(|entry| entry.mime.len());
+        let plan_bytes =
+            plan_workspace_bytes(names.chain(aliases.iter().map(|(alias, _)| alias.len())));
+        if !lease.grow_to(lease.bytes() + plan_bytes) {
+            // When: lease.grow_to cannot cover planning's workspace, the write is busy.
+            return KittyStep::Reply(reply.status(KittyClipboardStatus::Ebusy));
+        }
         let entries = entries.into_iter().map(|entry| (entry.mime, entry.data)).collect();
-        let offer = match plan(entries, &aliases, &holds) {
+        let planned = plan(entries, &aliases, &holds);
+        lease.shrink_to(lease.bytes() - plan_bytes);
+        let offer = match planned {
             OfferPlan::Offer(offer) => Some(offer),
             OfferPlan::Clear => None,
             OfferPlan::Unavailable => {
