@@ -6,7 +6,9 @@
 use super::*;
 use crate::app::kitty_clipboard_read::KittyReadRequest;
 use crate::app::osc52_read_grants::{GrantCredential, PASTE_GRANT_LIFETIME};
-use crate::app::osc52_read_source::{ClipboardTextSource, ReadLocation, ReadOutcome, TypeListing};
+use crate::app::osc52_read_source::{
+    ClipboardTextSource, GestureOffer, ReadLocation, ReadOutcome, TypeListing,
+};
 use crate::app::osc52_read_ticket::{admit_kitty_read, ClipboardTicketHandle};
 use crate::app::osc52_stream::{ClipState, ClipboardStaging};
 use crate::app::App;
@@ -35,6 +37,8 @@ struct FakeOffer {
     version_gate: Mutex<Option<crossbeam_channel::Receiver<()>>>,
     /// The thread each version read ran on.
     version_threads: Mutex<Vec<std::thread::ThreadId>>,
+    /// Whether a version needs a round trip to the owner, as on X11, so the gesture reads none.
+    round_trip: AtomicBool,
 }
 
 impl ClipboardTextSource for FakeOffer {
@@ -59,6 +63,14 @@ impl ClipboardTextSource for FakeOffer {
             let _ = gate.recv_timeout(Duration::from_millis(500));
         }
         *self.version.lock().unwrap()
+    }
+
+    fn gesture_offer(&self, _location: ReadLocation) -> GestureOffer {
+        // Read on the event loop, so it never waits on the version gate.
+        if self.round_trip.load(Ordering::SeqCst) {
+            return GestureOffer::RoundTrip;
+        }
+        self.version.lock().unwrap().map_or(GestureOffer::Unavailable, GestureOffer::Version)
     }
 }
 
@@ -87,6 +99,7 @@ fn harness() -> Harness {
         reads: AtomicUsize::new(0),
         version_gate: Mutex::new(None),
         version_threads: Mutex::new(Vec::new()),
+        round_trip: AtomicBool::new(false),
     });
     app.clip_state.reads.source = offer.clone();
     let sent = Arc::new(Mutex::new(Vec::new()));
@@ -711,4 +724,122 @@ fn recipient_reset_during_capture_gets_nothing() {
     assert!(harness.events().is_empty(), "the reset recipient gets no event");
     assert_eq!(harness.grant_count(), 0);
     assert!(harness.app.__test_drain_pty_writes().is_empty(), "nor the text");
+}
+
+/// Contract: a paste grant binds the offer the user pasted. The gesture reads the offer's version
+/// where that needs no blocking call; an offer that changes after the gesture but before the
+/// capture's first sample makes both samples agree on the new offer, and no grant is issued.
+#[test]
+fn offer_changed_before_the_first_sample_grants_nothing() {
+    let mut harness = harness();
+    feed(&harness.app, harness.pane, b"\x1b[?5522h");
+    let release = harness.gate_versions();
+    harness.app.paste_clipboard_for_kind(FrontmostKind::Main);
+    // The user copies something else before the capture's first sample reads the offer.
+    *harness.offer.version.lock().unwrap() = Some(8);
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    harness.pump_until(|harness| harness.app.clip_state.reads.paste_capture.is_idle());
+    assert_eq!(harness.events().len(), 1, "the event still goes out");
+    assert_eq!(harness.grant_count(), 0, "no grant for an offer the user did not paste");
+}
+
+/// Contract: a capture that completes at or after its deadline is late even when its result is
+/// pumped before the deadline timer: the event goes out unlisted and no grant is issued.
+#[test]
+fn late_capture_pumped_before_its_timer_grants_nothing() {
+    let mut harness = harness();
+    harness.app.clip_state.reads.reader_deadline = Duration::from_millis(50);
+    feed(&harness.app, harness.pane, b"\x1b[?5522h");
+    let release = harness.gate_versions();
+    harness.app.paste_clipboard_for_kind(FrontmostKind::Main);
+    // No pump runs while the capture outlives its deadline; then it completes.
+    std::thread::sleep(Duration::from_millis(100));
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while harness.offer.version_threads.lock().unwrap().len() < 2 {
+        assert!(Instant::now() < deadline, "the capture never sampled twice");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // The second sample has returned; the thread posts its result before the one pump below.
+    std::thread::sleep(Duration::from_millis(50));
+    harness.app.pump_clipboard_reads();
+    let events = harness.events();
+    assert_eq!(events.len(), 1, "the event goes out");
+    assert!(!contains(&events[0].1, b";dGV4dC9wbGFpbgo="), "with no listing");
+    assert_eq!(harness.grant_count(), 0, "a late capture grants nothing");
+}
+
+/// Contract: a newer paste supersedes a capture still in progress for the same pane: the earlier
+/// capture's event goes out with no grant, and only the newest event's password approves a read.
+#[test]
+fn newer_paste_supersedes_a_capture_in_progress() {
+    let mut harness = harness();
+    let pane = harness.pane;
+    feed(&harness.app, pane, b"\x1b[?5522h");
+    let release = harness.gate_versions();
+    harness.app.paste_clipboard_for_kind(FrontmostKind::Main);
+    // The second paste waits behind the first capture, which is still sampling.
+    harness.app.paste_clipboard_for_kind(FrontmostKind::Main);
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    harness.pump_until(|harness| !harness.events().is_empty());
+    assert_eq!(harness.grant_count(), 0, "the superseded capture grants nothing");
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    harness.pump_until(|harness| harness.app.clip_state.reads.paste_capture.is_idle());
+    let events = harness.events();
+    assert_eq!(events.len(), 2, "each paste sends its event");
+    assert_eq!(harness.grant_count(), 1, "the newest paste grants");
+    let (_, newest) = password_of(&events[1].1);
+    harness.follow_up(pane, "Paste event", &newest);
+    assert!(harness.pump_until_served(pane), "the newest password approves the read");
+}
+
+/// Contract: where an offer version needs a round trip to its owner (X11), the capture's first
+/// sample binds a grant only when that capture started at its gesture: a paste that waited behind
+/// another capture gets its event but no grant, since another program could have copied unseen.
+#[test]
+fn round_trip_offer_grants_only_a_capture_started_at_its_gesture() {
+    let mut harness = harness();
+    harness.offer.round_trip.store(true, Ordering::SeqCst);
+    let child = harness.app.__test_seed_child_window(&["other"]);
+    let other = harness.app.registry.windows[&child].tab_states[0].active_pane;
+    let source = harness.pane;
+    feed(&harness.app, source, b"\x1b[?5522h");
+    feed(&harness.app, other, b"\x1b[?5522h");
+    let release = harness.gate_versions();
+    harness.app.capture_paste_events(&[source]);
+    // The second paste waits while the first capture still samples the owner.
+    harness.app.capture_paste_events(&[other]);
+    for _ in 0..4 {
+        release.send(()).unwrap();
+    }
+    harness.pump_until(|harness| harness.app.clip_state.reads.paste_capture.is_idle());
+    let events = harness.events();
+    let targets: Vec<u64> = events.iter().map(|(pane, _)| *pane).collect();
+    assert_eq!(targets, vec![source, other], "both pastes send their events");
+    assert_eq!(harness.grant_count(), 1, "only the capture started at its gesture grants");
+    let (_, waited) = password_of(&events[1].1);
+    harness.follow_up(other, "Paste event", &waited);
+    assert_eq!(harness.waiting(), 1, "the waiting paste's read asks");
+}
+
+/// Contract: on a round-trip offer, a copy SonicTerm makes after the gesture voids the grant even
+/// though both samples agree, since that copy may have landed before the first sample.
+#[test]
+fn round_trip_offer_copy_after_the_gesture_grants_nothing() {
+    let mut harness = harness();
+    harness.offer.round_trip.store(true, Ordering::SeqCst);
+    feed(&harness.app, harness.pane, b"\x1b[?5522h");
+    let release = harness.gate_versions();
+    harness.app.paste_clipboard_for_kind(FrontmostKind::Main);
+    // The user copies inside SonicTerm while the capture still waits for the owner.
+    assert!(harness.app.set_clipboard_text("private".into()));
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    harness.pump_until(|harness| harness.app.clip_state.reads.paste_capture.is_idle());
+    assert_eq!(harness.events().len(), 1, "the event still goes out");
+    assert_eq!(harness.grant_count(), 0, "a copy after the gesture voids the grant");
 }

@@ -180,6 +180,25 @@ pub(in crate::app) trait ClipboardTextSource: Send + Sync {
     fn offer_version(&self, _location: ReadLocation) -> Option<u64> {
         None
     }
+
+    /// What a paste gesture learns of the offer at `location` on the event loop, without any call
+    /// that can block on another program; a source that cannot say answers `Unavailable`.
+    fn gesture_offer(&self, _location: ReadLocation) -> GestureOffer {
+        GestureOffer::Unavailable
+    }
+}
+
+/// What a paste gesture learns of the offer the user pasted, read on the event loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::app) enum GestureOffer {
+    /// The offer's version, read from a counter without opening the clipboard (macOS, Windows).
+    #[cfg_attr(not(any(test, target_os = "macos", target_os = "windows")), allow(dead_code))]
+    Version(u64),
+    /// The version needs a round trip to the owner (X11), so the gesture reads none.
+    #[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
+    RoundTrip,
+    /// The platform cannot version an offer, so no grant can bind to it.
+    Unavailable,
 }
 
 /// The selection a reply label reads: `c` and `s` the clipboard, `p` PRIMARY on Linux only.
@@ -314,6 +333,29 @@ impl ClipboardTextSource for NativeSource {
     fn offer_version(&self, location: ReadLocation) -> Option<u64> {
         native_offer_version(location)
     }
+
+    fn gesture_offer(&self, location: ReadLocation) -> GestureOffer {
+        native_gesture_offer(location)
+    }
+}
+
+/// macOS and Windows: the gesture reads the version itself, since `changeCount` and
+/// `GetClipboardSequenceNumber` read a counter without opening the clipboard or reading content.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn native_gesture_offer(location: ReadLocation) -> GestureOffer {
+    native_offer_version(location).map_or(GestureOffer::Unavailable, GestureOffer::Version)
+}
+
+/// Linux: the X11 owner's `TIMESTAMP` needs a round trip, so the gesture reads none.
+#[cfg(target_os = "linux")]
+fn native_gesture_offer(_location: ReadLocation) -> GestureOffer {
+    GestureOffer::RoundTrip
+}
+
+/// Other platforms cannot version an offer.
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn native_gesture_offer(_location: ReadLocation) -> GestureOffer {
+    GestureOffer::Unavailable
 }
 
 /// Windows: `GetClipboardSequenceNumber`, which every change to the clipboard advances; 0 means

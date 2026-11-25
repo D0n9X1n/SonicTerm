@@ -249,8 +249,7 @@ fn commit_program(
     let kept = result.replaced.as_ref().map_or(0, |snapshot| snapshot.units.capacity() * 2);
     lease.shrink_to(base + kept);
     if !result.committed {
-        // When: result.committed is false, the gate refused at the commit point; nothing changed
-        // and nothing is answered.
+        // When: result.committed is false, the gate refused at the commit point; none answers.
         return (committed.into_stale(), None);
     }
     if sink.retains_copies() {
@@ -261,8 +260,7 @@ fn commit_program(
         committed.retained = RetainedShares::split(&mut lease, copy_bytes, clipboard, primary);
     }
     if !result.written() {
-        // When: result.written() is false, a selection did not take the write; nothing is
-        // reasserted.
+        // When: result.written() is false, a selection did not take the write; none reasserts.
         committed.outcome = ClipWriteOutcome::Failed;
         return (committed, None);
     }
@@ -401,6 +399,8 @@ pub(in crate::app) struct ClipboardDomain {
     /// Each posted program write's status route, in posting order; the worker reports writes in
     /// that order, so a lost worker leaves exactly the unreported ones here.
     program_replies: VecDeque<StatusRoute>,
+    /// Writes started: each job posted here and each `write_clipboard_inline_targets` call.
+    pub(super) writes_started: u64,
 }
 
 impl std::fmt::Debug for ClipboardDomain {
@@ -481,6 +481,7 @@ impl ClipboardDomain {
             return Err(Box::new(refused.into_inner()));
         }
         self.in_flight += 1;
+        self.writes_started += 1;
         Ok(())
     }
 
@@ -815,8 +816,7 @@ impl super::App {
             || cfg!(target_os = "macos")
             || self.test_clipboard_installed()
         {
-            // When: has_worker already, target_os is macOS, or test_clipboard_installed, no
-            // native worker starts.
+            // When: has_worker, target_os is macOS or test_clipboard_installed, none starts.
             return;
         }
         let Some(proxy) = self.event_loop_proxy.clone() else {

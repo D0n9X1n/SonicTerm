@@ -528,7 +528,7 @@ drops it, and that pane's paste, with no retry.
 The event's grant is created only after the pane's writer admitted the event, and a pane holds
 the grant of its last paste. It is bound to the pane, its PTY incarnation, owner epoch and RIS
 count, its mode 5522 state and reset count, the policy generation, the location, and the
-clipboard offer version, read before and after the listing:
+version of the offer the user pasted:
 
 | Platform | Offer version |
 | --- | --- |
@@ -536,8 +536,16 @@ clipboard offer version, read before and after the listing:
 | Windows | `GetClipboardSequenceNumber`; 0 (no clipboard access) is no version |
 | Linux (X11, XWayland) | the selection owner's window and its `TIMESTAMP` answer, within the 2 s selection wait; the owner is read before the conversion and again after the answer and must not change; no owner, a changed owner, no answer, or an answer that is not one nonzero format-32 item is no version |
 
-With no version, a version that moved during the listing, or no password, the event is still sent
-but issues no grant. The first OSC 5522 read from that pane at that location carrying the
+The paste binds that offer at the gesture, on the event loop. On macOS and Windows it reads the
+version there, since both are counter reads that open nothing, and a grant needs the capture's
+version, read before and after the listing and unchanged across it, to equal it. The X11 version
+needs a round trip, so the gesture reads none: the capture's first sample stands for the pasted
+offer only when that capture started at the gesture, with no other capture running or waiting and
+no SonicTerm clipboard write in flight, and only when SonicTerm started no clipboard write before
+the capture settled. A copy another X11 program makes between the gesture and that first sample
+is not visible without a round trip. With no version, a version that moved during the listing, an
+offer other than the one bound at the gesture, or no password, the event is still sent but issues
+no grant. The first OSC 5522 read from that pane at that location carrying the
 password and a nonempty `name` consumes the grant atomically on the event loop. It is approved
 without a page only while the recipient is unchanged and within 60 s; otherwise it takes normal
 consent. The approval stays bound to the recipient and the offer until delivery: the reader
@@ -552,10 +560,13 @@ DECRST 5522, RIS, a move to another window or tab position, a new PTY, any
 event's listing and version reads run on a disposable capture thread, never on the event loop:
 the paste fixes its recipients and their identities at the gesture, and each event goes out when
 the capture settles, only to a recipient that still has that identity (the same PTY, window, tab
-position, mode 5522 state and policy) and still accepts input. One capture runs at a time within
-the reader's deadline (2 s, or 7 s on Linux) and at most 4 pastes wait; past the deadline, while a
+position, mode 5522 state and policy) and still accepts input. Each paste takes a new paste
+generation for each of its panes, so a newer paste to a pane supersedes a capture still in
+progress for it: the older event goes out with no grant. One capture runs at a time within the
+reader's deadline (2 s, or 7 s on Linux) and at most 4 pastes wait; past the deadline, while a
 capture is past its deadline, or with 4 waiting, the event goes out at once with an empty listing
-and no grant. One-time passwords never reach logs or `Debug` output.
+and no grant. Each capture records when it completed, so a result completed at or past its
+deadline is answered the same way even when it is handled before the deadline's timer. One-time passwords never reach logs or `Debug` output.
 
 Intentional differences: at most 1 MiB per packet (Ghostty 8 MiB; kitty 256 KiB unless the
 packet is complete); a commit with nothing the platform can hold answers `ENOSYS`; Ghostty's

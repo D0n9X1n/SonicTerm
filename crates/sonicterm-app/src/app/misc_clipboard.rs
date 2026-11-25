@@ -33,6 +33,8 @@ impl App {
         text: &str,
         targets: ClipTargets,
     ) -> WriteResult {
+        // Every write SonicTerm starts counts, so an X11 paste grant sees a copy since its gesture.
+        self.clip_state.domain.writes_started += 1;
         #[cfg(any(test, feature = "test-support"))]
         if self.testing.test_clipboard_write_failure {
             // When: `test_clipboard_write_failure` is true, reject at the set_text

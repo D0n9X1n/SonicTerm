@@ -201,7 +201,13 @@ cargo build -p sonicterm-app
   recipients and their `PasteBinding` are fixed at the gesture, and the offer's version and listing
   are read on a disposable capture thread (`osc52_read_paste.rs`, one at a time within the reader's
   deadline, at most 4 waiting, else unlisted with no grant), never the event loop; each event goes
-  only to a recipient whose identity is unchanged when the capture settles. Its
+  only to a recipient whose identity is unchanged when the capture settles. The gesture binds the
+  pasted offer (`OfferBinding`): `ClipboardTextSource::gesture_offer` reads macOS `changeCount` or
+  Windows `GetClipboardSequenceNumber` on the event loop, and on X11 (`RoundTrip`) the first sample
+  binds only for a capture started at the gesture with nothing in flight and
+  `ClipboardDomain::writes_started` unchanged at settle; otherwise no grant. Each gesture takes a
+  paste generation per recipient (`PasteCapture::newest`), so a newer paste supersedes a capture in
+  progress, and each capture stamps `completed_at`, so a late result is unlisted with no grant. Its
   `PasteGrant` exists only after that admission, binds the recipient identity, the 5522 word and
   the offer version (`ClipboardTextSource::offer_version`), and one named read consumes it into a
   `PasteApproval` its `ReadBinding` carries to delivery: revalidation checks the recipient, the
