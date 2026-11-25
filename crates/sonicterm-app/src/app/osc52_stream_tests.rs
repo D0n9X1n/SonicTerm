@@ -478,3 +478,25 @@ fn clipboard_job_debug_prints_no_text() {
     assert!(!printed.contains("secret"), "{printed}");
     assert!(printed.contains("text_bytes: 21"), "{printed}");
 }
+
+/// Contract: replacing invalid UTF-8 allocates only the exact text the lease reserved first: a
+/// large mostly-valid payload with one bad byte peaks at its input plus the expanded text, never a
+/// growable buffer's doubling.
+#[test]
+fn lossy_text_is_built_in_its_reserved_buffer() {
+    use crate::lib_tests::CountAllocations;
+    let staging = staging(64 << 20, 64 << 20);
+    let mut bytes = vec![b'a'; 1 << 20];
+    bytes[1 << 19] = 0xff;
+    let targets = ClipTargets { clipboard: true, primary: false };
+    let input_bytes = bytes.capacity();
+    let counter = CountAllocations::start();
+    let (text, lease) = into_text(bytes, staging.lease(), targets).expect("admitted");
+    let peak = counter.peak_bytes();
+    drop(counter);
+    let expanded = (1 << 20) + 2;
+    assert_eq!(text.len(), expanded, "one byte became the 3-byte U+FFFD");
+    assert_eq!(text.capacity(), expanded, "built at its exact length");
+    assert!(peak <= input_bytes + expanded, "peak {peak} past input plus text");
+    assert!(lease.bytes() >= text.capacity());
+}

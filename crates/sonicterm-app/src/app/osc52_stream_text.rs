@@ -42,12 +42,21 @@ pub(super) fn into_text(
     let text = if valid {
         String::from_utf8(bytes).expect("every chunk was valid UTF-8")
     } else {
-        // When: valid is false, the expanded text is reserved before it is built.
+        // When: valid is false, the expanded text is reserved, then built in a buffer of exactly
+        // that length, so no growth passes what was reserved.
         if !lease.grow_to(bytes.capacity() + lossy_len) {
             // When: lease cannot grow over the expansion, the write is refused busy.
             return Err(Osc52Refusal::Busy);
         }
-        String::from_utf8_lossy(&bytes).into_owned()
+        let mut text = String::with_capacity(lossy_len);
+        for chunk in bytes.utf8_chunks() {
+            text.push_str(chunk.valid());
+            if !chunk.invalid().is_empty() {
+                // An invalid sequence becomes one U+FFFD, as counted above.
+                text.push(char::REPLACEMENT_CHARACTER);
+            }
+        }
+        text
     };
     lease.shrink_to(text.capacity());
     let native_bytes = native_clipboard_bytes(&text).saturating_mul(copies);
