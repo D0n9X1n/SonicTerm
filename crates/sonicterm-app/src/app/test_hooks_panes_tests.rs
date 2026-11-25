@@ -123,3 +123,61 @@ fn clipboard_reply_pane_counts_only_committed_writes() {
     assert_eq!(pane.writes_committed(), 0, "a denied write commits nothing");
     assert!(!String::from_utf8_lossy(&reply).contains("DONE"), "{reply:?}");
 }
+
+/// The `text/plain` OSC 5522 write of `text` with id `w`, as one batch.
+fn kitty_text_write(text: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    let data = base64::engine::general_purpose::STANDARD.encode(text);
+    format!(
+        "\x1b]5522;type=write:id=w\x07\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;{data}\x1b\\\
+         \x1b]5522;type=wdata\x07"
+    )
+    .into_bytes()
+}
+
+/// What an OSC 5522 `text/plain` read of `pane`'s fake clipboard returns, as the DATA packet's
+/// Base64 payload.
+fn read_back(pane: &mut super::TestReplyPane) -> String {
+    let reply = pane.replies(b"\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\");
+    let text = String::from_utf8(reply).expect("an ASCII reply");
+    let marker = "mime=dGV4dC9wbGFpbg==;";
+    let start = text.find(marker).map(|at| at + marker.len()).expect("a DATA packet");
+    text[start..].chars().take_while(|character| *character != '\x1b').collect()
+}
+
+/// Contract: a write the reply pane commits reaches its fake clipboard: it answers `DONE`, and a
+/// later read returns the written text, not the text the pane started with.
+#[test]
+fn clipboard_reply_pane_write_is_visible_to_a_later_read() {
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    let reply = pane.replies(&kitty_text_write("other"));
+    assert!(String::from_utf8_lossy(&reply).contains("status=DONE"), "{reply:?}");
+    assert_eq!(read_back(&mut pane), "b3RoZXI=", "the written text reads back");
+}
+
+/// Contract: a clipboard setter that fails answers `EIO` and changes nothing: the write is not
+/// counted, and a later read still returns the text the pane started with.
+#[test]
+fn clipboard_reply_pane_failed_setter_answers_eio_without_mutation() {
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    pane.fail_clipboard_writes();
+    let reply = String::from_utf8(pane.replies(&kitty_text_write("other"))).unwrap();
+    assert_eq!(reply, "\x1b]5522;type=write:status=EIO:id=w\x07");
+    assert_eq!(pane.writes_committed(), 0, "a failed setter commits nothing");
+    assert_eq!(read_back(&mut pane), "Zml4dHVyZQ==", "the clipboard is unchanged");
+}
+
+/// Contract: a write revoked after it was posted, by a policy reload that lands before the commit
+/// point, is dropped there: no status, no count and no change to the fake clipboard. The deny test
+/// above refuses before anything is posted, so only this case exercises the commit check.
+#[test]
+fn clipboard_reply_pane_write_revoked_after_posting_never_commits() {
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    let reply = pane.replies_with(&kitty_text_write("other"), |pane| {
+        // A reload back to the same policy still moves the generation the write opened under.
+        pane.set_write_policy(sonicterm_cfg::config::Osc52Policy::Allow);
+    });
+    assert_eq!(reply, Vec::<u8>::new(), "a stale write answers nothing");
+    assert_eq!(pane.writes_committed(), 0);
+    assert_eq!(read_back(&mut pane), "Zml4dHVyZQ==", "the clipboard is unchanged");
+}

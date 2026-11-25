@@ -24,6 +24,8 @@ pub use reply_spill_pool::{SpillPool, PROCESS_SPILL_BUDGET_BYTES};
 pub use reply_spool::{
     is_budget_refusal, PtyReplySender, ReplyBudgetExceeded, ReplySpoolStats, SPILL_BUDGET_BYTES,
 };
+#[cfg(feature = "test-support")]
+pub use reply_spool::{reply_spool_for_test, ReplyDrain};
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

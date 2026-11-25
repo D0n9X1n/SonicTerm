@@ -236,6 +236,55 @@ fn status_replies_split_at_packets_within_the_spool_cap() {
     assert_eq!(statuses, 64, "every denied read answered once");
 }
 
+/// Contract: OSC 5522 statuses reach the program whole through the pane's real reply spool under
+/// spool pressure: with the resident tier full the burst spills to the file, every submission the
+/// VT worker hands `PtyReplySender::send` is admitted, and the writer's turns read each status back
+/// once, every packet whole and in order. A submission past the spool's 32 KiB cap would be
+/// refused whole, losing every status in it.
+#[test]
+fn status_replies_reach_the_program_whole_through_a_spilling_spool() {
+    let (_pane, handles, staging) = clipboard_worker();
+    staging.set_read_policy(sonicterm_cfg::config::Osc52ReadPolicy::Deny);
+    let (sender, drain) = sonicterm_io::reply_spool_for_test(1 << 20);
+    // Two 30 KiB submissions fill the 64 KiB resident tier, so the statuses spill to the file.
+    let filler = vec![b'f'; 30 * 1024];
+    for _ in 0..2 {
+        sender.send(filler.clone()).expect("a filler submission");
+    }
+    let id = "i".repeat(512);
+    let packet = format!("\x1b]5522;type=read:id={id};dGV4dC9wbGFpbg==\x1b\\");
+    let mut refused = 0;
+    let mut send_reply = |reply: Vec<u8>| {
+        if sender.send(reply).is_err() {
+            refused += 1;
+        }
+    };
+    handles.take_ready_output(Instant::now(), &mut send_reply, |send_reply| {
+        process_pane_vt_batch_with(
+            &handles,
+            packet.repeat(64).as_bytes(),
+            None,
+            &mut None,
+            &mut SyncLatch::default(),
+            |_| None,
+            |_| {},
+            Instant::now,
+            send_reply,
+        );
+    });
+    drop(send_reply);
+    assert_eq!(refused, 0, "every submission is admitted");
+    let stats = sender.stats();
+    assert!(stats.peak_live_bytes > 0, "the statuses spilled to the file");
+    assert_eq!(stats.dropped_replies, 0);
+    let status = format!("\x1b]5522;type=read:status=EPERM:id={id}\x1b\\");
+    let mut expected = filler.repeat(2);
+    expected.extend(status.repeat(64).into_bytes());
+    let drained = drain.drain().expect("the writer's turns");
+    assert_eq!(drained.len(), expected.len(), "every status read back once");
+    assert!(drained == expected, "every packet whole and in order");
+}
+
 /// Contract: a stream cancelled after it queued a full chunk leaves the next write in the same
 /// chunk whole: the cancelled stream's stale `Data` event takes none of the newer stream's data,
 /// so the write is its own text, never an empty clear.

@@ -581,6 +581,32 @@ impl Drop for ReplyReader {
     }
 }
 
+/// Test-only: the reader side of a spool from [`reply_spool_for_test`], draining submissions in
+/// the turns the PTY writer takes, so another crate's test sees what a program would read.
+#[cfg(feature = "test-support")]
+pub struct ReplyDrain(ReplyReader);
+
+#[cfg(feature = "test-support")]
+impl ReplyDrain {
+    /// Take writer turns until the spool is empty and return every byte they read, in order; a
+    /// turn reads only whole submissions, so a submission is never split across turns.
+    pub fn drain(&self) -> io::Result<Vec<u8>> {
+        let mut drained = Vec::new();
+        while let Some(turn) = self.0.pop()? {
+            drained.extend(turn);
+        }
+        Ok(drained)
+    }
+}
+
+/// Test-only: a pane's real reply spool drawing on a private pool of `spill_budget_bytes`, so a
+/// test applies spool pressure without the process pool, and the drain a writer would read.
+#[cfg(feature = "test-support")]
+pub fn reply_spool_for_test(spill_budget_bytes: u64) -> (PtyReplySender, ReplyDrain) {
+    let (sender, reader) = reply_spool_with_pool(SpillPool::new(spill_budget_bytes));
+    (sender, ReplyDrain(reader))
+}
+
 #[cfg(test)]
 #[path = "reply_spool_tests.rs"]
 mod reply_spool_tests;

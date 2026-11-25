@@ -868,7 +868,7 @@ impl App {
         staging.set_read_policy(sonicterm_cfg::config::Osc52ReadPolicy::Allow);
         pane.staging = Some(Arc::clone(&staging));
         pane.handles = pane.handles.with_clipboard_staging(staging);
-        pane.clipboard = Some(Arc::new(FixedClipboard(text.to_string())));
+        pane.clipboard = Some(Arc::new(FixedClipboard::new(text)));
         pane
     }
 }
@@ -886,8 +886,9 @@ use fixed_clipboard::FixedClipboard;
 pub struct TestReplyPane {
     handles: super::spawn_pane::PaneVtHandles,
     sync_latch: super::spawn_pane::SyncLatch,
-    /// The fake clipboard readable tickets are answered from; `None` answers every read empty.
-    clipboard: Option<Arc<dyn super::osc52_read_source::ClipboardTextSource>>,
+    /// The fake clipboard readable tickets are answered from and committed writes replace;
+    /// `None` answers every read empty.
+    clipboard: Option<Arc<FixedClipboard>>,
     /// Writes committed behind their binding so far.
     writes_committed: usize,
     /// The private staging a clipboard reply pane reserves from; `None` for a plain reply pane.
@@ -901,6 +902,13 @@ impl TestReplyPane {
     /// Parse and publish `bytes` as one output batch; return every reply byte it produced.
     #[doc(hidden)]
     pub fn replies(&mut self, bytes: &[u8]) -> Vec<u8> {
+        self.replies_with(bytes, |_| {})
+    }
+
+    /// [`Self::replies`], running `between` after the batch posted its writes and before they
+    /// reach the commit point, as a reload landing while the clipboard worker is busy does.
+    #[doc(hidden)]
+    pub fn replies_with(&mut self, bytes: &[u8], between: impl FnOnce(&Self)) -> Vec<u8> {
         let mut replies = Vec::new();
         let mut reads = Vec::new();
         let mut writes = Vec::new();
@@ -938,19 +946,8 @@ impl TestReplyPane {
                     .extend(ticket.failure_reply(sonicterm_vt::vt::KittyClipboardStatus::Eperm)),
             }
         }
-        // Each posted write commits as the worker does, behind its binding: one the binding still
-        // admits counts as written and an OSC 5522 write answers `DONE`; a stale one changes
-        // nothing and answers nothing. An OSC 52 write has no status.
-        for job in writes.iter().filter_map(|write| write.take()) {
-            if !job.binding.may_commit() {
-                // When: may_commit refuses, the write went stale after posting and is dropped.
-                continue;
-            }
-            self.writes_committed += 1;
-            if let Some(kitty) = &job.kitty {
-                replies.extend(kitty.status(sonicterm_vt::vt::KittyClipboardStatus::Done));
-            }
-        }
+        between(self);
+        self.commit_writes(writes, &mut replies);
         replies
     }
 
