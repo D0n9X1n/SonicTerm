@@ -29,9 +29,6 @@ const FILE_URL_TYPE: &str = "public.file-url";
 /// The pasteboard type of one other URL.
 const URL_TYPE: &str = "public.url";
 
-/// Pasteboard items a `text/uri-list` read inspects at most.
-const MAX_URI_ITEMS_SCANNED: usize = 4096;
-
 /// The pasteboard type `format` is published under; `None` when this build cannot hold it.
 /// `text/uri-list` is published as items, so it has no single type here.
 pub(super) fn pasteboard_type(format: &NativeFormat) -> Option<Retained<NSString>> {
@@ -73,7 +70,7 @@ fn preferred_mime(identifier: &NSString) -> Option<String> {
 /// How a `text/uri-list` is published.
 enum UriLayout<'list> {
     /// One `public.file-url` item per `file:` URI.
-    Files(Vec<&'list str>),
+    Files,
     /// One other absolute URL as `public.url`.
     Url(&'list str),
 }
@@ -98,19 +95,16 @@ fn is_file_uri(item: &str) -> bool {
 /// The layout a `text/uri-list` takes: every item a `file:` URI, or one other absolute URL;
 /// `None` for an empty list, a mix, several other URLs or a line that is not a URI.
 fn uri_layout(bytes: &[u8]) -> Option<UriLayout<'_>> {
-    let items = super::uri_list_items(bytes)?;
-    if items.is_empty() || !items.iter().all(|item| is_absolute_uri(item)) {
-        // When: items is empty or is_absolute_uri refuses a line, the list is not published.
-        return None;
+    let mut items = super::uri::items(bytes)?;
+    let first = items.next()?;
+    if is_file_uri(first) {
+        // When: first is a file URI, every remaining item must name an absolute file too.
+        return std::iter::once(first)
+            .chain(items)
+            .all(|line| super::uri::file_parts(line).is_some())
+            .then_some(UriLayout::Files);
     }
-    if items.iter().all(|item| is_file_uri(item)) {
-        // When: every item is a file URI, each becomes its own file-url item.
-        return Some(UriLayout::Files(items));
-    }
-    match items.as_slice() {
-        [url] => Some(UriLayout::Url(url)),
-        _ => None,
-    }
+    (items.next().is_none() && is_absolute_uri(first)).then_some(UriLayout::Url(first))
 }
 
 /// Whether macOS can hold `format` with `bytes`; called on the VT worker, so it drains its own pool.
@@ -144,8 +138,10 @@ impl Pasteboard {
     /// Stage a `text/uri-list`: its first file URL on the item, each further one on its own item,
     /// or its one other URL as `public.url`.
     fn stage_uri_list(&mut self, bytes: &[u8]) -> bool {
-        let files = match uri_layout(bytes) {
-            Some(UriLayout::Files(files)) => files,
+        match uri_layout(bytes) {
+            Some(UriLayout::Files) => {
+                // When: uri_layout gives Files, stage each validated URL on its own item below.
+            }
             Some(UriLayout::Url(url)) => {
                 // When: the list is one other URL, it is the item's public.url.
                 let kind = NSString::from_str(URL_TYPE);
@@ -157,7 +153,7 @@ impl Pasteboard {
             }
         };
         let kind = NSString::from_str(FILE_URL_TYPE);
-        for (index, file) in files.iter().enumerate() {
+        for (index, file) in super::uri::items(bytes).expect("validated file list").enumerate() {
             let item = if index == 0 {
                 self.item.clone()
             } else {
@@ -262,9 +258,13 @@ fn read_uri_list(board: &NSPasteboard, max_bytes: usize) -> TypeRead {
         // When: pasteboardItems is None, the board holds nothing.
         return TypeRead::Absent;
     };
+    if items.count() > super::uri::ITEM_CAP {
+        // When: items exceeds ITEM_CAP, do not expose a truncated native list.
+        return TypeRead::TooLarge;
+    }
     let (file, url) = (NSString::from_str(FILE_URL_TYPE), NSString::from_str(URL_TYPE));
     let mut out = Vec::new();
-    for index in 0..items.count().min(MAX_URI_ITEMS_SCANNED) {
+    for index in 0..items.count() {
         let item = items.objectAtIndex(index);
         let Some(uri) = item.stringForType(&file).or_else(|| item.stringForType(&url)) else {
             // When: the item holds no URL, it adds nothing.
@@ -274,6 +274,7 @@ fn read_uri_list(board: &NSPasteboard, max_bytes: usize) -> TypeRead {
             // When: the joined URLs would pass max_bytes, the list is refused before it grows.
             return TypeRead::TooLarge;
         }
+        out.reserve_exact(uri.len() + 2);
         out.extend_from_slice(uri.to_string().as_bytes());
         out.extend_from_slice(b"\r\n");
     }

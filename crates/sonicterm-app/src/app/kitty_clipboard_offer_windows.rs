@@ -3,7 +3,6 @@
 //! staged block or empties the clipboard again. The Win32 calls live in
 //! `kitty_clipboard_offer_win32.rs`; tests substitute a fake [`Win32Clipboard`].
 
-use std::fmt::Write as _;
 use std::sync::Mutex;
 
 use super::{CommitGate, NativeFormat, OfferBackend, Published};
@@ -82,7 +81,9 @@ pub(super) fn holds_with(names: &CustomNames, format: &NativeFormat, bytes: &[u8
     match format {
         NativeFormat::Text | NativeFormat::Html => true,
         NativeFormat::Png => !bytes.is_empty(),
-        NativeFormat::UriList => uri_list_windows_paths(bytes).is_some(),
+        NativeFormat::UriList => super::uri::items(bytes).is_some_and(|mut items| {
+            items.all(|uri| super::uri::windows_path(uri, |_| {}).is_some())
+        }),
         NativeFormat::Custom(name) => !bytes.is_empty() && names.admit(name),
     }
 }
@@ -96,7 +97,10 @@ pub(super) fn copy_bound(format: &NativeFormat, byte_len: usize) -> usize {
         NativeFormat::Html => byte_len
             .saturating_add(2 * HTML_HEADER_BYTES + HTML_PREFIX.len() + HTML_SUFFIX.len() + 1),
         NativeFormat::Png | NativeFormat::Custom(_) => byte_len,
-        NativeFormat::UriList => byte_len.saturating_mul(4).saturating_add(DROPFILES_BYTES + 2),
+        NativeFormat::UriList => byte_len
+            .saturating_mul(3)
+            .saturating_add(DROPFILES_BYTES + 2)
+            .saturating_add((byte_len / 9).min(super::uri::ITEM_CAP) * size_of::<String>()),
     }
 }
 
@@ -221,127 +225,133 @@ pub(super) fn hdrop_uri_list(block: &[u8], max_bytes: usize) -> TypeRead {
         // When: the list is ANSI or pFiles points outside the block, it is not decoded.
         return TypeRead::Absent;
     }
-    let mut out = Vec::new();
-    let mut path: Vec<u16> = Vec::new();
-    for pair in block[list_at..].as_chunks::<2>().0 {
-        let unit = u16::from_le_bytes(*pair);
-        if unit != 0 {
-            // When: unit is not 0, it extends the current path.
-            path.push(unit);
-            continue;
+    let data = &block[list_at..];
+    // First validate and measure directly from the locked UTF-16LE bytes; then allocate only
+    // the exact output. Neither pass builds path, Unicode, or escaped-URI scratch buffers.
+    let walk = |emit: &mut dyn FnMut(&[u8]) -> Result<(), TypeRead>| -> Result<(), TypeRead> {
+        let mut start = 0;
+        let mut count = 0;
+        for (index, pair) in data.as_chunks::<2>().0.iter().enumerate() {
+            if *pair != [0, 0] {
+                // When: pair is nonzero, it still belongs to the current UTF-16 path.
+                continue;
+            }
+            let end = index * 2;
+            if start == end {
+                // When: start equals end, this empty path is the list terminator.
+                return (count > 0).then_some(()).ok_or(TypeRead::Absent);
+            }
+            count += 1;
+            if count > super::uri::ITEM_CAP {
+                // When: count exceeds ITEM_CAP, omit the entire list, never its tail.
+                return Err(TypeRead::TooLarge);
+            }
+            let units = data[start..end].as_chunks::<2>().0.iter().copied().map(u16::from_le_bytes);
+            emit_file_uri(char::decode_utf16(units).map(Result::ok), emit)?;
+            emit(b"\r\n")?;
+            start = end + 2;
         }
-        if path.is_empty() {
-            // When: path is empty at a NUL, the list's final NUL ended it.
-            break;
+        Err(TypeRead::Absent)
+    };
+    let mut length = 0;
+    if let Err(refusal) = walk(&mut |part| {
+        if part.len() > max_bytes - length {
+            // When: part cannot fit within max_bytes, refuse before allocating any URI buffer.
+            return Err(TypeRead::TooLarge);
         }
-        let uri = String::from_utf16(&path).ok().and_then(|path| windows_path_file_uri(&path));
-        path.clear();
-        let Some(uri) = uri else {
-            // When: uri is None, the path is not UTF-16 or is relative, so it is skipped.
-            continue;
-        };
-        if out.len() + uri.len() + 2 > max_bytes {
-            // When: the URIs pass max_bytes, the list is refused before it grows further.
-            return TypeRead::TooLarge;
-        }
-        out.extend_from_slice(uri.as_bytes());
-        out.extend_from_slice(b"\r\n");
+        length += part.len();
+        Ok(())
+    }) {
+        // When: walk reports refusal, measurement did not admit an entire list.
+        return refusal;
     }
-    if out.is_empty() {
-        TypeRead::Absent
-    } else {
-        // When: out holds at least one URI, the list is served.
-        TypeRead::Bytes(out)
+    let mut out = Vec::with_capacity(length);
+    match walk(&mut |part| {
+        out.extend_from_slice(part);
+        Ok(())
+    }) {
+        Ok(()) => TypeRead::Bytes(out),
+        Err(refusal) => refusal,
     }
 }
 
 /// The Windows path of every item of a `text/uri-list`; `None` unless it has an item and every
 /// item is a `file:` URI with a Windows path, so a list is never published in part.
 pub(super) fn uri_list_windows_paths(bytes: &[u8]) -> Option<Vec<String>> {
-    let items = super::uri_list_items(bytes)?;
-    let paths: Option<Vec<String>> = items.into_iter().map(file_uri_windows_path).collect();
-    paths.filter(|paths| !paths.is_empty())
+    let items = super::uri::items(bytes)?;
+    let mut paths = Vec::with_capacity(items.clone().count());
+    for item in items {
+        paths.push(file_uri_windows_path(item)?);
+    }
+    Some(paths)
 }
 
-/// Whether `path` starts with a drive letter and a colon.
-fn has_drive(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
-}
-
-/// The Windows path a `file:` URI names: a drive path for an empty or `localhost` host, a UNC path
-/// (`\\host\share\…`) otherwise; percent-decoded to UTF-8 without control characters. `None` for
-/// any other scheme, a query or fragment, or a path that is neither.
+/// Decode one validated absolute path into a single pre-sized buffer during staging only.
 pub(super) fn file_uri_windows_path(uri: &str) -> Option<String> {
-    let rest = uri.get(..7).filter(|scheme| scheme.eq_ignore_ascii_case("file://"))?;
-    let rest = &uri[rest.len()..];
-    if rest.contains(['?', '#']) {
-        // When: rest contains a query or fragment mark, it names no plain file.
-        return None;
-    }
-    let (host, path) = rest.split_once('/')?;
-    let decoded = percent_decode(path)?;
-    if host.is_empty() || host.eq_ignore_ascii_case("localhost") {
-        // When: host is empty or localhost, the path must start with a drive.
-        let drive =
-            has_drive(&decoded) && decoded.as_bytes().get(2).is_none_or(|byte| *byte == b'/');
-        return drive.then(|| decoded.replace('/', "\\"));
-    }
-    if host.contains(':') || decoded.is_empty() {
-        // When: host holds a colon (`file://C:/…`) or no share follows it, it is no UNC path.
-        return None;
-    }
-    let host = percent_decode(host)?;
-    Some(format!("\\\\{host}\\{}", decoded.replace('/', "\\")))
+    let mut path = String::with_capacity(uri.len());
+    super::uri::windows_path(uri, |scalar| path.push(scalar))?;
+    Some(path)
 }
 
-/// `text` with every `%XX` escape decoded; `None` for a bad escape, invalid UTF-8 or a control.
-fn percent_decode(text: &str) -> Option<String> {
-    let mut bytes = Vec::with_capacity(text.len());
-    let mut rest = text.as_bytes();
-    while let Some((&byte, tail)) = rest.split_first() {
-        if byte != b'%' {
-            // When: byte is not an escape's %, it is copied as it is.
-            bytes.push(byte);
-            rest = tail;
-            continue;
+/// Emit one absolute drive or UNC URI without materializing either a path or an escaped string.
+fn emit_file_uri(
+    mut chars: impl Iterator<Item = Option<char>> + Clone,
+    emit: &mut dyn FnMut(&[u8]) -> Result<(), TypeRead>,
+) -> Result<(), TypeRead> {
+    let mut head = chars.clone();
+    let pair = (head.next().flatten(), head.next().flatten());
+    match pair {
+        (Some('\\'), Some('\\')) => {
+            // When: pair is the UNC prefix, validate the host and share before emitting its URI.
+            chars = head.clone();
+            let mut host_len = 0;
+            let mut dots = true;
+            loop {
+                let scalar = head.next().flatten().ok_or(TypeRead::Absent)?;
+                if scalar == '/' || scalar == '\\' {
+                    // When: scalar separates the host from its share, end authority validation.
+                    break;
+                }
+                if !(scalar.is_alphanumeric() || matches!(scalar, '.' | '-' | '_')) {
+                    // When: scalar cannot belong to a host, do not emit an invalid authority.
+                    return Err(TypeRead::Absent);
+                }
+                host_len += 1;
+                dots &= scalar == '.';
+            }
+            if host_len == 0
+                || (dots && host_len <= 2)
+                || head.next().flatten().is_none_or(|scalar| matches!(scalar, '/' | '\\'))
+            {
+                // When: host_len or the share is invalid, reject the whole file list.
+                return Err(TypeRead::Absent);
+            }
+            emit(b"file://")?;
         }
-        let high = char::from(*tail.first()?).to_digit(16)?;
-        let low = char::from(*tail.get(1)?).to_digit(16)?;
-        bytes.push(u8::try_from(high * 16 + low).ok()?);
-        rest = &tail[2..];
+        (Some(drive), Some(':'))
+            if drive.is_ascii_alphabetic() && matches!(head.next(), Some(Some('/' | '\\'))) =>
+        {
+            emit(b"file:///")?
+        }
+        _ => {
+            // When: pair starts neither a UNC nor an absolute drive path, no file URI can represent it.
+            return Err(TypeRead::Absent);
+        }
     }
-    let decoded = String::from_utf8(bytes).ok()?;
-    (!decoded.chars().any(char::is_control)).then_some(decoded)
-}
-
-/// The `file:` URI for a Windows drive or UNC `path`, percent-encoding every byte outside the
-/// unreserved and path characters; `None` for a relative path.
-pub(super) fn windows_path_file_uri(path: &str) -> Option<String> {
-    let (prefix, rest) = match path.strip_prefix("\\\\") {
-        Some(unc) => ("file://", unc),
-        None if has_drive(path) => ("file:///", path),
-        None => {
-            // When: path has neither a UNC prefix nor a drive, it is relative and has no URI.
-            return None;
-        }
-    };
-    let mut uri = String::with_capacity(prefix.len() + rest.len());
-    uri.push_str(prefix);
-    for byte in rest.bytes() {
-        match byte {
-            b'\\' => uri.push('/'),
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' => uri.push(char::from(byte)),
-            b'-' | b'.' | b'_' | b'~' | b'/' | b':' | b'!' | b'$' | b'&' | b'\'' | b'(' | b')'
-            | b'*' | b'+' | b',' | b';' | b'=' | b'@' => uri.push(char::from(byte)),
-            _ => {
-                // When: byte is outside the unreserved and path characters, it is escaped;
-                // writing into a String cannot fail.
-                let _ = write!(uri, "%{byte:02X}");
+    const HEX: &[u8] = b"0123456789ABCDEF";
+    for scalar in chars {
+        let scalar = scalar.filter(|scalar| !scalar.is_control()).ok_or(TypeRead::Absent)?;
+        for byte in scalar.encode_utf8(&mut [0; 4]).bytes() {
+            match byte {
+                b'\\' => emit(b"/")?,
+                byte if byte.is_ascii_alphanumeric() || b"-._~/:!$&'()*+,;=@".contains(&byte) => {
+                    emit(&[byte])?
+                }
+                byte => emit(&[b'%', HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 15)]])?,
             }
         }
     }
-    Some(uri)
+    Ok(())
 }
 
 /// The Win32 calls one publish makes; tests substitute a fake.

@@ -234,8 +234,7 @@ reserves two, because CLIPBOARD and PRIMARY keep separate copies). An OSC 5522 c
 reserves, before its job is posted, every kept buffer plus one native copy of each type: on
 Windows the `CF_UNICODETEXT` block (two bytes per UTF-8 byte and a terminator), the CF_HTML block
 with its header and wrapper (and the transient header string), `PNG` and custom blocks at their
-size, and a `CF_HDROP` list at up to four bytes per URI byte (its UTF-16 paths and their decoded
-strings); on macOS each type's `NSData` or URL string at its size. X11 reserves the
+size, and a `CF_HDROP` list with space for the decoded strings, their descriptors and the final UTF-16 block. URI preflight scans borrowed lines without allocation, with a limit of 256 items. On macOS each URI list reserves four times its byte length plus 4 KiB per item for pasteboard staging; this is an allowance for native objects, not a measurement of AppKit heap usage. X11 reserves the
 atom and buffer-index tables, the format-32 property buffer and eight INCR cursors before staging.
 Text targets and aliases share the staged bytes, except that a non-ASCII `STRING` uses the reserved text copy for Latin-1; INCR sends slices rather than allocating chunk
 buffers. The owner keeps the lease after publication. Losing a selection stops admission there;

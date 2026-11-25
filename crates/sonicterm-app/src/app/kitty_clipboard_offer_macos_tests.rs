@@ -244,3 +244,58 @@ fn clipboard_name_macos_reads_the_actual_listed_type() {
         assert_eq!(read_type(&board.0, name, 8), TypeRead::Bytes(vec![0xa5]));
     });
 }
+
+/// File URI preflight is allocation-free regardless of the number of short lines and reserves
+/// native item workspace, not just the short path bytes, before staging the offer.
+#[test]
+fn uri_batch_macos_preflight_and_item_reservation() {
+    let list = "file:///x\n".repeat(256);
+    let count = crate::lib_tests::CountAllocations::start();
+    let admitted = holds(&NativeFormat::UriList, list.as_bytes());
+    let peak = count.peak_bytes();
+    drop(count);
+    assert!(admitted);
+    assert_eq!(peak, 0);
+    let offer = offer(&[("text/uri-list", list.as_bytes())]);
+    assert!(
+        offer.reserved_bytes() > 2 * list.len() + 256 * size_of::<Retained<NSPasteboardItem>>()
+    );
+}
+
+/// Reject the entire write if any file URI lacks an absolute path or contains malformed escapes,
+/// or if there would be too many pasteboard items.
+#[test]
+fn uri_batch_macos_refuses_invalid_or_excess_items() {
+    for uri in [
+        "file:relative",
+        "file://",
+        "file://host",
+        "file:///x%zz",
+        "file:///x%00",
+        "file://bad%2Fhost/path",
+        "file:///x?query",
+    ] {
+        assert!(!holds(&NativeFormat::UriList, format!("file:///good\n{uri}").as_bytes()), "{uri}");
+    }
+    assert!(!holds(&NativeFormat::UriList, "file:///x\n".repeat(257).as_bytes()));
+}
+
+/// A private pasteboard containing more than the supported item count is not read as a prefix.
+#[test]
+fn uri_batch_macos_read_never_returns_a_prefix() {
+    objc2::rc::autoreleasepool(|_| {
+        let board = Private::new();
+        let kind = NSString::from_str(FILE_URL_TYPE);
+        let file = NSString::from_str("file:///x");
+        let items: Vec<_> = (0..257)
+            .map(|_| {
+                let item = NSPasteboardItem::new();
+                assert!(item.setString_forType(&file, &kind));
+                ProtocolObject::<dyn NSPasteboardWriting>::from_retained(item)
+            })
+            .collect();
+        board.0.clearContents();
+        assert!(board.0.writeObjects(&NSArray::from_retained_slice(&items)));
+        assert_eq!(read_uri_list(&board.0, 1 << 20), TypeRead::TooLarge);
+    });
+}

@@ -355,7 +355,12 @@ fn windows_file_uri_paths() {
         ("C:\\\u{20ac}", Some("file:///C:/%E2%82%AC")),
         ("relative\\x", None),
     ] {
-        assert_eq!(windows_path_file_uri(path).as_deref(), uri, "{path}");
+        let mut encoded = Vec::new();
+        let result = emit_file_uri(path.chars().map(Some), &mut |part| {
+            encoded.extend_from_slice(part);
+            Ok(())
+        });
+        assert_eq!(result.ok().and_then(|_| std::str::from_utf8(&encoded).ok()), uri, "{path}");
     }
 }
 
@@ -514,4 +519,67 @@ fn clipboard_name_windows_duplicate_format_id_keeps_first() {
     assert_eq!(publish_offer(&mut backend, &custom, &|| true), Published::Written);
     assert_eq!((backend.clipboard.sets, backend.clipboard.allocs), (1, 1));
     assert_eq!(backend.clipboard.clipboard, [(0xC000, b"first".to_vec())]);
+}
+
+/// Many short paths stress per-item containers. Admission uses no heap, and the production
+/// encoder including its destination must fit the pre-post native reservation.
+#[test]
+fn uri_batch_windows_preflight_and_encoding_fit_reservation() {
+    let list = "file:///C:/x\n".repeat(256);
+    let names = CustomNames::new();
+    let counter = crate::lib_tests::CountAllocations::start();
+    let held = holds_with(&names, &NativeFormat::UriList, list.as_bytes());
+    let preflight = counter.peak_bytes();
+    drop(counter);
+    assert!(held);
+    assert_eq!(preflight, 0);
+    let counter = crate::lib_tests::CountAllocations::start();
+    let encoded = block(&NativeFormat::UriList, list.as_bytes());
+    let peak = counter.peak_bytes();
+    drop(counter);
+    assert!(peak <= copy_bound(&NativeFormat::UriList, list.len()), "peak {peak}");
+    assert_eq!(
+        hdrop_uri_list(&encoded, 1 << 20),
+        TypeRead::Bytes("file:///C:/x\r\n".repeat(256).into_bytes())
+    );
+}
+
+/// A drive-relative path, a decoded UNC authority with a separator/colon, and excess file
+/// counts cannot enter CF_HDROP, even when the first 256 lines were individually valid.
+#[test]
+fn uri_batch_windows_rejects_malformed_or_excess_items() {
+    let names = CustomNames::new();
+    for uri in [
+        "file:///C:",
+        "file://bad%3Ahost/share",
+        "file://bad%2Fhost/share",
+        "file://bad%5Chost/share",
+        "file://./share",
+        "file://host//path",
+    ] {
+        assert!(!holds_with(&names, &NativeFormat::UriList, uri.as_bytes()), "{uri}");
+    }
+    assert!(!holds_with(&names, &NativeFormat::UriList, "file:///C:/x\n".repeat(257).as_bytes()));
+}
+
+/// A single path terminator does not terminate the list. A huge path whose escaped URI would
+/// exceed the cap is sized before allocation, not built and then discarded.
+#[test]
+fn uri_batch_windows_read_refuses_before_allocating() {
+    let list = format!("file:///C:/{}", "%20".repeat(8192));
+    let encoded = block(&NativeFormat::UriList, list.as_bytes());
+    let counter = crate::lib_tests::CountAllocations::start();
+    let read = hdrop_uri_list(&encoded, 1024);
+    let peak = counter.peak_bytes();
+    drop(counter);
+    assert_eq!(read, TypeRead::TooLarge);
+    assert_eq!(peak, 0, "no path or URI scratch");
+    assert_eq!(hdrop_uri_list(&encoded[..encoded.len() - 2], 1 << 20), TypeRead::Absent);
+    let too_many = block(&NativeFormat::UriList, b"file:///C:/x");
+    let mut packed = too_many[..20].to_vec();
+    for _ in 0..257 {
+        packed.extend_from_slice(&too_many[20..too_many.len() - 2]);
+    }
+    packed.extend([0, 0]);
+    assert_eq!(hdrop_uri_list(&packed, 1 << 20), TypeRead::TooLarge);
 }

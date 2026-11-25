@@ -107,10 +107,8 @@ impl NativeOffer {
         let kept: usize = self.entries.iter().map(Vec::capacity).sum();
         let names: usize =
             self.representations.iter().map(|(format, _)| format_name_bytes(format)).sum();
-        let copies: usize = self
-            .representations()
-            .map(|(format, bytes)| native_copy_bytes(format, bytes.len()))
-            .sum();
+        let copies: usize =
+            self.representations().map(|(format, bytes)| native_copy_bytes(format, bytes)).sum();
         #[cfg(target_os = "linux")]
         let copies = copies + x11::owner_workspace(self);
         kept + names + copies
@@ -219,26 +217,27 @@ pub(in crate::app) fn plan(
     OfferPlan::Offer(NativeOffer { entries: kept, representations, omitted })
 }
 
-/// The URIs of a `text/uri-list` (RFC 2483): its lines without line ends, blank lines and `#`
-/// comments skipped; `None` when it is not UTF-8.
 #[cfg(any(test, target_os = "macos", target_os = "windows"))]
-fn uri_list_items(bytes: &[u8]) -> Option<Vec<&str>> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let items = text.lines().map(str::trim);
-    Some(items.filter(|line| !line.is_empty() && !line.starts_with('#')).collect())
-}
+#[path = "kitty_clipboard_offer_uri.rs"]
+mod uri;
 
 /// The staging one native copy of `format` from `byte_len` bytes takes: Windows converts text to
 /// UTF-16 and wraps HTML and file lists; elsewhere the copy is the bytes.
-fn native_copy_bytes(format: &NativeFormat, byte_len: usize) -> usize {
+fn native_copy_bytes(format: &NativeFormat, bytes: &[u8]) -> usize {
     #[cfg(target_os = "windows")]
     {
-        windows_formats::copy_bound(format, byte_len)
+        windows_formats::copy_bound(format, bytes.len())
     }
     #[cfg(not(target_os = "windows"))]
     {
+        #[cfg(target_os = "macos")]
+        if *format == NativeFormat::UriList {
+            // When: format is UriList, reserve native string storage and per-item staging before publication.
+            let count = uri::items(bytes).map_or(0, Iterator::count);
+            return 4 * bytes.len() + count * 4096;
+        }
         let _ = format;
-        byte_len
+        bytes.len()
     }
 }
 
