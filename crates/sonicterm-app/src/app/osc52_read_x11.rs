@@ -173,6 +173,12 @@ pub(in crate::app) enum ConvertTarget {
     Text,
     /// Legacy ICCCM STRING, used after an explicit refusal of UTF8_STRING.
     Latin1,
+    /// The explicitly UTF-8 MIME text target.
+    MimeUtf8,
+    /// The bare text/plain MIME target.
+    Plain,
+    /// The ICCCM polymorphic TEXT target.
+    GenericText,
     /// The existing atom named by a MIME read.
     Mime(u32),
     /// When the owner took the selection, as `TIMESTAMP`.
@@ -244,21 +250,29 @@ pub(in crate::app) fn read_selection(
     port: &mut dyn SelectionPort,
     max_bytes: usize,
 ) -> Option<ReadOutcome> {
-    if !port.convert(ConvertTarget::Text) {
-        // When: convert fails, the request never reached the server.
-        return None;
-    }
     let deadline = port.now() + SELECTION_WAIT;
-    if !wait_for_notify(port, deadline)? {
-        // When: wait_for_notify reports refusal, try the legacy STRING target on the same deadline.
-        if !port.convert(ConvertTarget::Latin1) {
-            // When: convert fails, the fallback request could not be sent.
+    let targets = [
+        ConvertTarget::Text,
+        ConvertTarget::Latin1,
+        ConvertTarget::MimeUtf8,
+        ConvertTarget::Plain,
+        ConvertTarget::GenericText,
+    ];
+    let mut stored = false;
+    for target in targets {
+        if port.now() >= deadline || !port.convert(target) {
+            // When: deadline expires or convert fails, do not extend the wait by trying another spelling.
             return None;
         }
-        if !wait_for_notify(port, deadline)? {
-            // When: wait_for_notify reports a second refusal, no text target was available.
-            return Some(ReadOutcome::Empty);
+        if wait_for_notify(port, deadline)? {
+            // When: wait_for_notify confirms a stored property, fetch it before any further conversion.
+            stored = true;
+            break;
         }
+    }
+    if !stored {
+        // When: stored is false, the owner explicitly refused every advertised text spelling.
+        return Some(ReadOutcome::Empty);
     }
     // The first reply is read without deleting it: deleting an `INCR` announcement asks the owner
     // for the first chunk, so an announced size is validated before that.

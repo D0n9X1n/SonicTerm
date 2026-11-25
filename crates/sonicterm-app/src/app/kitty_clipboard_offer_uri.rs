@@ -131,3 +131,106 @@ pub(super) fn windows_path(uri: &str, mut emit: impl FnMut(char)) -> Option<()> 
     chars.map(|scalar| if scalar == '/' { '\\' } else { scalar }).for_each(emit);
     Some(())
 }
+
+/// Validate RFC 3986 components without allocating during pasteboard preflight. Component-specific
+/// delimiters are allowed only at their own level; a percent escape always needs two hex digits.
+#[cfg(target_os = "macos")]
+fn component(value: &str, extra: &[u8]) -> bool {
+    let mut bytes = value.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            // When: byte introduces an escape, consume its encoded octet as one unit.
+            if !(0..2).all(|_| bytes.next().is_some_and(|digit| digit.is_ascii_hexdigit())) {
+                // When: bytes does not have two hexadecimal digits after %, the escape cannot be decoded.
+                return false;
+            }
+        } else if !(byte.is_ascii_alphanumeric()
+            || b"-._~!$&'()*+,;=".contains(&byte)
+            || extra.contains(&byte))
+        {
+            // When: byte is neither unreserved nor allowed by extra, it is illegal in this component.
+            return false;
+        }
+    }
+    true
+}
+
+/// Parse userinfo, a reg-name or IP literal, and an optional decimal port.
+#[cfg(target_os = "macos")]
+fn authority(value: &str, require_host: bool) -> bool {
+    let (user, server) = value.split_once('@').unwrap_or(("", value));
+    if !component(user, b":") {
+        // When: component rejects user information, the authority is not well-formed.
+        return false;
+    }
+    let (host, port) = if let Some(literal) = server.strip_prefix('[') {
+        // When: server starts with a bracket, the host must be an IP literal.
+        let Some((address, tail)) = literal.split_once(']') else {
+            // When: literal has no closing bracket, no host boundary can be identified.
+            return false;
+        };
+        let future = address
+            .strip_prefix(['v', 'V'])
+            .and_then(|value| value.split_once('.'))
+            .is_some_and(|(version, body)| {
+                !version.is_empty()
+                    && version.bytes().all(|digit| digit.is_ascii_hexdigit())
+                    && !body.is_empty()
+                    && !body.contains('%')
+                    && component(body, b":")
+            });
+        if !future && address.parse::<std::net::Ipv6Addr>().is_err() {
+            // When: address is neither IPvFuture nor IPv6, brackets cannot make it a host.
+            return false;
+        }
+        let Some(port) = tail.strip_prefix(':').or(tail.is_empty().then_some("")) else {
+            // When: tail is nonempty, only a colon followed by the port may follow the literal.
+            return false;
+        };
+        (address, port)
+    } else {
+        // When: server has no bracket prefix, split the reg-name from its optional port.
+        let (host, port) = server.split_once(':').unwrap_or((server, ""));
+        if !component(host, b"") {
+            // When: component rejects host, publishing it would require URL repair.
+            return false;
+        }
+        (host, port)
+    };
+    (!require_host || !host.is_empty()) && port.bytes().all(|digit| digit.is_ascii_digit())
+}
+
+/// An absolute non-file URI suitable for a public.url pasteboard item, without URL repair.
+#[cfg(target_os = "macos")]
+pub(super) fn absolute_uri(value: &str) -> bool {
+    let Some((scheme, remainder)) = value.split_once(':') else {
+        // When: value has no scheme delimiter, this is not an absolute URI.
+        return false;
+    };
+    let mut letters = scheme.bytes();
+    if !letters.next().is_some_and(|first| first.is_ascii_alphabetic())
+        || !letters.all(|byte| byte.is_ascii_alphanumeric() || b"+-.".contains(&byte))
+    {
+        // When: letters do not form a scheme, the URI has no valid scheme identifier.
+        return false;
+    }
+    let (resource, fragment) = remainder.split_once('#').unwrap_or((remainder, ""));
+    let (hierarchy, query) = resource.split_once('?').unwrap_or((resource, ""));
+    let web = scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https");
+    let path = if let Some(network) = hierarchy.strip_prefix("//") {
+        // When: hierarchy starts with two slashes, validate the authority separately from the path.
+        let (server, path) = network.split_once('/').unwrap_or((network, ""));
+        if !authority(server, web) {
+            // When: authority rejects the server, the URI cannot be published as an absolute URL.
+            return false;
+        }
+        path
+    } else if web {
+        // When: web has no network authority, it does not identify an HTTP resource.
+        return false;
+    } else {
+        // When: hierarchy has no authority, its full value is the scheme-specific path.
+        hierarchy
+    };
+    component(path, b"/:@") && component(query, b"/:@?") && component(fragment, b"/:@?")
+}

@@ -75,18 +75,6 @@ enum UriLayout<'list> {
     Url(&'list str),
 }
 
-/// Whether `item` starts with an RFC 3986 scheme and holds no whitespace.
-fn is_absolute_uri(item: &str) -> bool {
-    let Some((scheme, _)) = item.split_once(':') else {
-        // When: item has no colon, it has no scheme.
-        return false;
-    };
-    let mut bytes = scheme.bytes();
-    bytes.next().is_some_and(|first| first.is_ascii_alphabetic())
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || b"+-.".contains(&byte))
-        && !item.contains(char::is_whitespace)
-}
-
 /// Whether `item` is a `file:` URI.
 fn is_file_uri(item: &str) -> bool {
     item.get(..5).is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
@@ -107,7 +95,7 @@ fn uri_layout(bytes: &[u8]) -> Option<UriLayout<'_>> {
             })
             .then_some(UriLayout::Files);
     }
-    (items.next().is_none() && is_absolute_uri(first)).then_some(UriLayout::Url(first))
+    (items.next().is_none() && super::uri::absolute_uri(first)).then_some(UriLayout::Url(first))
 }
 
 /// Whether macOS can hold `format` with `bytes`; called on the VT worker, so it drains its own pool.

@@ -329,3 +329,37 @@ fn macos_file_items_refuse_nonlocal_authorities() {
         assert!(holds(&NativeFormat::UriList, uri.as_bytes()), "{uri}");
     }
 }
+
+/// A malformed non-file URI fails preflight and staging without clearing a private pasteboard;
+/// the valid case includes a query, fragment and percent escape.
+#[test]
+fn invalid_non_file_uri_keeps_previous_clipboard() {
+    objc2::rc::autoreleasepool(|_| {
+        let board = Private::new();
+        let mut writer = Pasteboard::on(board.0.clone());
+        assert_eq!(
+            publish_offer(&mut writer, &offer(&[("text/plain", b"old")]), &|| true),
+            Published::Written
+        );
+        let before = board.0.changeCount();
+        for uri in [
+            "https://example.org/%G0",
+            "https://[::1/path",
+            "https://example.org/a|b",
+            "https://example.org/?x=%",
+            "https://example.org#x#y",
+        ] {
+            assert!(!holds(&NativeFormat::UriList, uri.as_bytes()), "{uri}");
+            let forced = super::super::plan(
+                vec![("text/uri-list".into(), uri.as_bytes().into())],
+                &[],
+                &|_, _| true,
+            );
+            let OfferPlan::Offer(staged) = forced else { panic!("forced plan") };
+            assert_eq!(publish_offer(&mut writer, &staged, &|| true), Published::Failed);
+            assert_eq!(board.0.changeCount(), before);
+            assert_eq!(board.data("public.utf8-plain-text").as_deref(), Some(&b"old"[..]));
+        }
+        assert!(holds(&NativeFormat::UriList, b"https://[::1]:443/a%20b?x=a/b#part"));
+    });
+}

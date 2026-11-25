@@ -624,3 +624,18 @@ fn windows_mutation_releases_window_after_close() {
     assert_eq!(backend.write_text("text", None, &|| true).0, Published::Written);
     assert!(backend.clipboard.log.borrow().ends_with(&["close", "release window"]));
 }
+
+/// Use the name the listing actually emits to look up the same registered format. Enumeration
+/// may return either a MIME registration or a legacy name; neither lookup registers new names.
+#[test]
+fn listed_windows_legacy_names_read_back() {
+    use crate::app::osc52_read_source::{list_native_types, TypeListing};
+    for registered in ["Rich Text Format", "JFIF", "application/x-test"] {
+        let TypeListing::Types(names) = list_native_types([registered.to_owned()]) else {
+            panic!("listing")
+        };
+        assert_eq!(names.len(), 1);
+        assert!(registered_mime_matches(registered, &names[0]));
+        assert!(!registered_mime_matches(registered, "application/x-absent"));
+    }
+}

@@ -42,7 +42,9 @@ struct NativePort {
     requested: Option<Atom>,
     conversion: Atom,
     utf8: Atom,
+    mime_utf8: Atom,
     text_plain: Atom,
+    generic_text: Atom,
     incr: Atom,
     timestamp: Atom,
     targets: Atom,
@@ -81,10 +83,12 @@ impl NativePort {
                 &aux,
             )
             .ok()?;
-        let names: [&[u8]; 7] = [
+        let names: [&[u8]; 9] = [
             b"CLIPBOARD",
             b"UTF8_STRING",
             b"text/plain;charset=utf-8",
+            b"text/plain",
+            b"TEXT",
             b"INCR",
             b"TIMESTAMP",
             b"TARGETS",
@@ -101,8 +105,8 @@ impl NativePort {
             .map(|cookie| cookie.reply().map(|reply| reply.atom))
             .collect::<Result<Vec<Atom>, _>>()
             .ok()?;
-        let [clipboard, utf8, text_plain, incr, timestamp, targets, property] =
-            <[Atom; 7]>::try_from(atoms).ok()?;
+        let [clipboard, utf8, mime_utf8, text_plain, generic_text, incr, timestamp, targets, property] =
+            <[Atom; 9]>::try_from(atoms).ok()?;
         let selection = match location {
             ReadLocation::Clipboard => clipboard,
             ReadLocation::Primary => xproto::AtomEnum::PRIMARY.into(),
@@ -115,7 +119,9 @@ impl NativePort {
             requested: None,
             conversion: x11rb::NONE,
             utf8,
+            mime_utf8,
             text_plain,
+            generic_text,
             incr,
             timestamp,
             targets,
@@ -181,6 +187,9 @@ impl SelectionPort for NativePort {
         let target = match target {
             ConvertTarget::Text => self.utf8,
             ConvertTarget::Latin1 => xproto::AtomEnum::STRING.into(),
+            ConvertTarget::MimeUtf8 => self.mime_utf8,
+            ConvertTarget::Plain => self.text_plain,
+            ConvertTarget::GenericText => self.generic_text,
             ConvertTarget::Timestamp => self.timestamp,
             ConvertTarget::Mime(atom) => {
                 self.requested = Some(atom);
@@ -229,7 +238,11 @@ impl SelectionPort for NativePort {
             .ok()?;
         let kind = match reply.type_ {
             kind if Some(kind) == self.requested => PropertyKind::Requested,
-            kind if kind == self.utf8 || kind == self.text_plain => PropertyKind::Utf8,
+            kind if [self.utf8, self.text_plain, self.mime_utf8, self.generic_text]
+                .contains(&kind) =>
+            {
+                PropertyKind::Utf8
+            }
             kind if kind == Atom::from(xproto::AtomEnum::STRING) => PropertyKind::Latin1,
             kind if kind == self.incr => PropertyKind::Incr,
             kind if kind == Atom::from(xproto::AtomEnum::INTEGER) => PropertyKind::Integer,

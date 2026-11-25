@@ -283,7 +283,9 @@ pub(super) fn read_type(mime: &str, max_bytes: usize) -> TypeRead {
             Some(id) => read_block(id, max_bytes, raw),
             None => TypeRead::Absent,
         },
-        NativeFormat::Custom(name) => match find_named(&name) {
+        NativeFormat::Custom(name) => match find_registered(|registered| {
+            super::windows_formats::registered_mime_matches(registered, &name)
+        }) {
             Some(id) => read_block(id, max_bytes, raw),
             None => TypeRead::Absent,
         },
@@ -313,13 +315,18 @@ fn find_format(wanted: impl Fn(u32) -> bool) -> Option<u32> {
 
 /// The open clipboard's format registered under `name`, compared as Windows compares names.
 fn find_named(name: &str) -> Option<u32> {
+    find_registered(|registered| registered.eq_ignore_ascii_case(name))
+}
+
+/// Find a registered format by its actual name in the open clipboard.
+fn find_registered(matches: impl Fn(&str) -> bool) -> Option<u32> {
     find_format(|format| {
         let mut buffer = [0u16; 256];
         let length =
             // SAFETY: GetClipboardFormatNameW writes at most buffer.len() units into buffer.
             unsafe { GetClipboardFormatNameW(format, &mut buffer) };
         let length = usize::try_from(length).unwrap_or(0).min(buffer.len());
-        String::from_utf16_lossy(&buffer[..length]).eq_ignore_ascii_case(name)
+        length > 0 && matches(&String::from_utf16_lossy(&buffer[..length]))
     })
 }
 

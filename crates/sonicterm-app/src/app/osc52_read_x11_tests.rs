@@ -328,3 +328,29 @@ fn x11_string_only_owner_converts_latin1_within_cap() {
         assert_eq!(&owner.log[..2], ["convert Text", "convert Latin1"]);
     }
 }
+
+/// A sole text target that maps to the listed MIME must be tried after the owner's explicit
+/// refusals. The successful reply still passes through the byte cap and normal decoder.
+#[test]
+fn listed_text_mime_targets_read_back() {
+    use super::super::osc52_read_source::TypeListing;
+    for (name, refusals, target) in [
+        ("text/plain;charset=utf-8", 2, "MimeUtf8"),
+        ("text/plain", 3, "Plain"),
+        ("TEXT", 4, "GenericText"),
+    ] {
+        assert_eq!(
+            list_mime_atoms([name.to_owned()]),
+            TypeListing::Types(vec!["text/plain".into()])
+        );
+        for (cap, expected) in [(3, ReadOutcome::Text("abc".into())), (2, ReadOutcome::TooLarge)] {
+            let mut owner =
+                FakeOwner::answering(vec![reply(PropertyKind::Utf8, 8, 0, b"abc")], Polled::Idle);
+            owner.events = std::iter::repeat_n(Polled::Notify(false), refusals)
+                .chain([Polled::Notify(true)])
+                .collect();
+            assert_eq!(read_selection(&mut owner, cap), Some(expected), "{name}");
+            assert_eq!(owner.log[refusals], format!("convert {target}"));
+        }
+    }
+}

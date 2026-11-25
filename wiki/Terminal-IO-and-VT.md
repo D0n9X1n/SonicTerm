@@ -381,7 +381,7 @@ its deadline is also answered empty, however soon the event loop picks up its re
 | Platform | Bound |
 | --- | --- |
 | Windows | `OpenClipboard` retried 10 times 10 ms apart; `GlobalSize` decides a too-large `CF_UNICODETEXT` before `GlobalLock` |
-| Linux (X11, XWayland) | `ConvertSelection` to `UTF8_STRING`, then to `STRING` on refusal, sharing 2 s for the owner's answer; a format-8 `UTF8_STRING`, `STRING` or `text/plain;charset=utf-8` value within the cap; an `INCR` transfer whose format-32 size is within the cap, checked before the announcement is deleted (deleting it asks for the first chunk), 2 s per chunk and 5 s in all, the deadline checked before every event so a busy owner cannot extend it; no X server answers empty |
+| Linux (X11, XWayland) | `ConvertSelection` to `UTF8_STRING`, then `STRING`, `text/plain;charset=utf-8`, `text/plain` and `TEXT` on successive refusals, sharing 2 s for the owner's answer; a format-8 text value within the cap; an `INCR` transfer whose format-32 size is within the cap, checked before the announcement is deleted (deleting it asks for the first chunk), 2 s per chunk and 5 s in all, the deadline checked before every event so a busy owner cannot extend it; no X server answers empty |
 | macOS | `NSPasteboardTypeString`; AppKit holds the whole value before SonicTerm can measure it, as any paste does, and the copy into SonicTerm is refused past the cap |
 
 The reply for one request, all destinations together, is one message of at most about 10.7 MiB.

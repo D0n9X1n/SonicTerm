@@ -116,6 +116,13 @@ pub(super) enum NativeData<'bytes> {
     Files(Vec<String>),
 }
 
+/// Whether this registered format is advertised under the requested custom MIME name.
+pub(super) fn registered_mime_matches(registered: &str, mime: &str) -> bool {
+    registered.eq_ignore_ascii_case(mime)
+        || crate::app::osc52_read_source::native_type_mime(registered)
+            .is_some_and(|listed| listed.eq_ignore_ascii_case(mime))
+}
+
 /// The block `format` gives `bytes`; `None` for a uri-list whose items are not all Windows paths.
 pub(super) fn encode<'bytes>(
     format: &NativeFormat,

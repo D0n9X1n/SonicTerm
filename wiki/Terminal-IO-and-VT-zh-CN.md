@@ -289,7 +289,7 @@ PTY 或命令变化、窗口进入 READONLY，或其票据有效期在剪贴板 
 | 平台 | 上限 |
 | --- | --- |
 | Windows | `OpenClipboard` 重试 10 次，间隔 10 ms；`GlobalSize` 在 `GlobalLock` 之前判定过大的 `CF_UNICODETEXT` |
-| Linux（X11、XWayland） | 以 `ConvertSelection` 请求 `UTF8_STRING`，被拒后改试 `STRING`，两次共用 2 秒应答时限；接受上限内格式为 8 的 `UTF8_STRING`、`STRING` 或 `text/plain;charset=utf-8` 值；接受格式为 32 的大小在上限内的 `INCR` 传输，大小在删除声明之前检查（删除即请求第一个分块），每块 2 秒、总计 5 秒，每个事件之前都检查截止时间，繁忙的所有者无法延长它；没有 X 服务器时得到空应答 |
+| Linux（X11、XWayland） | 以 `ConvertSelection` 请求 `UTF8_STRING`，明确被拒后依次改试 `STRING`、`text/plain;charset=utf-8`、`text/plain` 和 `TEXT`，共用 2 秒应答时限；接受上限内格式为 8 的文本值；接受格式为 32 的大小在上限内的 `INCR` 传输，大小在删除声明之前检查（删除即请求第一个分块），每块 2 秒、总计 5 秒，每个事件之前都检查截止时间，繁忙的所有者无法延长它；没有 X 服务器时得到空应答 |
 | macOS | `NSPasteboardTypeString`；与任何粘贴一样，AppKit 在 SonicTerm 能测量之前就持有整个值，复制进 SonicTerm 时超过上限即拒绝 |
 
 一次请求的应答（所有目标合在一起）是一条至多约 10.7 MiB 的消息。它只发往发出请求的窗格的 PTY，
