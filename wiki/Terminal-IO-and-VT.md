@@ -1144,9 +1144,9 @@ URI to 8 KiB and client id to 1 KiB.
   `id` is empty or malformed (`/`-separated `[A-Za-z0-9_.+-]+` segments, at most 32 bytes each
   and 8 deep; an omitted `id` is the root record), `app` is over 32 bytes, `title` is over 256
   encoded or 192 decoded bytes, `msg` is over 2732 encoded or 2048 decoded bytes, either text is
-  not base64 (unpadded, or with exactly its canonical padding; an extra `=` or padding alone is
-invalid) of strict UTF-8 without control characters, or the state is not
-  `idle`, `working`, `done`, `blocked`, `error` or `clear`. `kind` (`permission`, `question`,
+  not base64 (unpadded, or with exactly its canonical padding; a partial pad such as `QQ=`, an
+  extra `=` or padding alone is invalid) of strict UTF-8 without control characters, or the state
+  is not `idle`, `working`, `done`, `blocked`, `error` or `clear`. `kind` (`permission`, `question`,
   `auth`) is kept only for `blocked`, `progress` (0-100) only for `working` and `blocked`, and
   an `app` outside `[A-Za-z0-9_.+-]` reads as empty. `state=clear` removes the `id` and its
   descendants, or every record without one. A pane holds at most 32 records; past that the

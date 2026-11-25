@@ -306,7 +306,8 @@ fn debug_prints_no_payload() {
 }
 
 /// `title` and `msg` padding is checked as supplied: canonical padding or none is accepted, and
-/// excess `=` or a value of padding alone is invalid base64 that discards the report.
+/// a partial pad, excess `=` or a value of padding alone is invalid base64 that discards the
+/// report.
 #[test]
 fn text_padding_is_validated_as_supplied() {
     let mut parser = parser();
@@ -314,14 +315,19 @@ fn text_padding_is_validated_as_supplied() {
     assert!(padded.ends_with('='), "the fixture carries canonical padding");
     report(&mut parser, &format!("state=done:title={padded}"));
     assert_eq!(records(&parser)[0].1, "done", "canonical padding is accepted");
+    // `A` encodes as `QQ==`: unpadded `QQ` is accepted, a single `=` is a partial pad.
+    report(&mut parser, "state=working:title=QQ");
+    assert_eq!(records(&parser)[0].1, "working", "unpadded text is accepted");
     for bad in [
+        "title=QQ=".to_owned(),
+        "msg=QQ=".to_owned(),
         format!("title={padded}="),
         format!("msg={padded}=="),
         "title====".to_owned(),
         "msg==".to_owned(),
     ] {
         report(&mut parser, &format!("state=error:{bad}"));
-        assert_eq!(records(&parser)[0].1, "done", "{bad} discards");
+        assert_eq!(records(&parser)[0].1, "working", "{bad} discards");
     }
 }
 

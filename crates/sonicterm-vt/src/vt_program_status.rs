@@ -48,10 +48,16 @@ pub(super) const MAX_PROGRAM_STATUS_BYTES: usize =
 const QUERY_REPLY: &str =
     "7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth";
 
-/// Standard base64 with optional padding, as kitty accepts.
-const TEXT_ENGINE: GeneralPurpose = GeneralPurpose::new(
+/// Standard base64 with canonical padding, for a value that ends in `=`.
+const PADDED_ENGINE: GeneralPurpose = GeneralPurpose::new(
     &base64::alphabet::STANDARD,
-    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::RequireCanonical),
+);
+
+/// Standard base64 with no padding, for a value that does not end in `=`, as kitty accepts.
+const UNPADDED_ENGINE: GeneralPurpose = GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::RequireNone),
 );
 
 /// Orders record changes across every pane, so the tab marker breaks urgency ties by the most
@@ -403,8 +409,10 @@ fn decode_text(
         // When: `encoded` is past its encoded cap, the report is discarded undecoded.
         return Err("text_length");
     }
-    // Padding is checked as supplied: canonical or none decodes, excess `=` or padding alone fails.
-    let decoded = TEXT_ENGINE.decode(encoded).map_err(|_| "text_base64")?;
+    // Padding is checked as supplied: canonical or none decodes; a partial pad, excess `=` or
+    // padding alone fails, because a value ending in `=` must carry its whole canonical pad.
+    let engine = if encoded.ends_with('=') { &PADDED_ENGINE } else { &UNPADDED_ENGINE };
+    let decoded = engine.decode(encoded).map_err(|_| "text_base64")?;
     if decoded.len() > max_decoded {
         // When: `decoded` is past its decoded cap, the report is discarded, never cut.
         return Err("text_length");
