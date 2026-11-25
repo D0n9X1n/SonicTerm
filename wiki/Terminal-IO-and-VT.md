@@ -557,7 +557,8 @@ touches the clipboard or the PTY: the reader thread before each native content c
 its offer-version check, and writer admission for the reply, retries included. A read whose
 grant ends first makes no further native call, its data is dropped, and it waits for an
 ordinary answer instead; this holds for a read whose result arrives after its deadline too. A
-read already answered at its deadline keeps that answer. The approval stays bound to the recipient and the offer until delivery: the reader
+read already answered at its deadline keeps that answer: it is a status with no clipboard data,
+so it is sent even after the grant ended. Only a reply carrying clipboard data needs the grant. The approval stays bound to the recipient and the offer until delivery: the reader
 thread compares the offer version before its native read and again after it, and the recipient
 is checked before the read starts and before delivery. A changed offer, DECRST 5522 or RIS after
 the read was accepted, or any other change to the recipient drops whatever was read, so nothing

@@ -104,3 +104,24 @@ fn late_read_with_an_ended_grant_returns_to_consent() {
     assert!(!harness.served(pane));
     assert_eq!(harness.waiting(), 1, "the read asks again");
 }
+
+/// Contract: a read abandoned at its deadline, whose grant ended before that deadline, still gets
+/// its deadline answer, exactly once: that answer is a status with no clipboard data, so it needs no
+/// live grant. Nothing is served and the late result adds no second answer.
+#[test]
+fn abandoned_read_past_its_grant_is_answered_once() {
+    let (mut harness, pane, password) = granted(Duration::from_millis(200));
+    harness.app.clip_state.reads.reader_deadline = Duration::from_millis(300);
+    let release = harness.gate_reads();
+    harness.follow_up(pane, "Paste event", &password);
+    // The grant ends, then the deadline passes, while the reader waits in its native call.
+    std::thread::sleep(Duration::from_millis(450));
+    // The deadline is handled while the native call still runs.
+    harness.app.pump_clipboard_reads();
+    release.send(()).unwrap();
+    harness.pump_until_reader_idle();
+    let sent = harness.sent.lock().unwrap().clone();
+    let answers = sent.iter().filter(|(_, bytes)| contains(bytes, b"status=EIO")).count();
+    assert_eq!(answers, 1, "the deadline answer goes out once");
+    assert!(!harness.served(pane), "no clipboard data");
+}

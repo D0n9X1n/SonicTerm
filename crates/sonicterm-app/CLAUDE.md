@@ -219,8 +219,9 @@ cargo build -p sonicterm-app
   checks `expires_at` against the clock before each native content call, and checks it again after
   its offer-version read; `deliver_read_reply` revalidates at `now.max(Instant::now())`, retries
   included. A reply refused as `PasteRevoked` returns its ticket from its typed `ReadCustody` to
-  `waiting`; a changed offer drops the data the same way. An abandoned reader keeps its deadline
-  answer.
+  `waiting`; a changed offer drops the data the same way. A reply with no ticket is a deadline
+  status with no data (`requeue_revoked` hands it back), sent without the grant: an abandoned
+  reader still gets its deadline answer once. Only replies carrying data hold a ticket.
   A reply dropped after its delivery retries leaves an OSC 5522 read one `EBUSY` packet. Native reads run one at a time on a disposable reader thread that keeps the ticket and
   its reply-budget lease until the native call returns; a result completed at or past its deadline
   (`ReaderDone::completed_at`) is answered as an overdue read. The X11 protocol runs over the

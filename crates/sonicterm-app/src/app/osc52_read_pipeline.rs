@@ -689,9 +689,14 @@ impl super::App {
             tracing::debug!(pane_id, bytes, ?reason, "OSC 52 read reply revoked");
             self.clip_state.reads.last_cancel = Some(reason);
             if reason == CancelReason::PasteRevoked {
-                // Only the paste approval ended: the stale bytes are dropped and the ticket the
-                // reply carries asks again.
-                self.requeue_revoked(reply);
+                // Only the paste approval ended. A reply holding a ticket drops its stale bytes and
+                // the ticket asks again; one holding none is a deadline status with no clipboard
+                // data, which needs no grant, so it is answered under the rest of its binding.
+                if let Some(status) = self.requeue_revoked(reply) {
+                    let mut binding = binding;
+                    binding.paste = None;
+                    self.deliver_read_reply(binding, status, now, check_age, attempts_before, busy);
+                }
             }
             return;
         }
@@ -723,18 +728,24 @@ impl super::App {
     }
 
     /// Return the ticket a refused `reply` carries to `waiting` after its paste approval ended: the
-    /// stale bytes are dropped first, then the approval is withdrawn, so the read asks again.
-    fn requeue_revoked(&mut self, reply: SensitiveReply) {
+    /// stale bytes are dropped first, then the approval is withdrawn, so the read asks again. A
+    /// reply carrying no ticket is a status with no clipboard data (a deadline answer) and comes
+    /// back whole to be answered; every reply that carries clipboard data holds its ticket.
+    fn requeue_revoked(&mut self, reply: SensitiveReply) -> Option<SensitiveReply> {
         let (bytes, custody) = reply.into_parts();
-        drop(bytes);
-        let Ok(custody) = custody.downcast::<ReadCustody>() else {
-            // When: downcast finds no ReadCustody (an overdue answer), no ticket is left to ask.
-            return;
+        let custody = match custody.downcast::<ReadCustody>() {
+            Ok(custody) => custody,
+            Err(custody) => {
+                // When: downcast finds no ReadCustody, the reply is a status alone: it comes back.
+                return Some(SensitiveReply::new(bytes, custody));
+            }
         };
+        drop(bytes);
         let ReadCustody { mut ticket, lease } = *custody;
         drop(lease);
         ticket.withdraw_paste();
         self.clip_state.reads.waiting.push(ticket);
+        None
     }
 
     /// Queue `reply` on pane `pane_id`'s sensitive-reply slot, or a test's port.
