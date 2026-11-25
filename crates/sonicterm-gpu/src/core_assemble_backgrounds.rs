@@ -26,6 +26,7 @@ impl GpuRenderer {
             glyphs: glyph_instances,
             quads,
             overlay_quads: quads_overlay,
+            pane_fills,
             staged_ranges,
             snapped,
             snapped_peak,
@@ -52,6 +53,15 @@ impl GpuRenderer {
         });
         let total_visible_rows: u16 = pane_views.iter().map(|pv| pv.grid.rows).sum();
         self.line_quad_cache.resize(total_visible_rows.max(1));
+        // A program background replaces the theme clear over the pane's clip before cell
+        // backgrounds blend; chrome keeps the theme. Panes off the surface have no clip.
+        push_planned_pane_fills(
+            pane_fills,
+            theme,
+            self.bg_opacity,
+            pane_views.iter().map(|pv| (pv.planned, pv.overrides)),
+            (sw, sh),
+        );
         for (pane_index, pv) in
             pane_views.iter().enumerate().filter(|(_, pane)| pane.planned.full_clip.is_some())
         {
@@ -66,6 +76,9 @@ impl GpuRenderer {
             // Mirror RowGlyphCache's dirty-row invalidation: drop the absolute
             // rows of every live row the VT thread mutated since the last frame.
             invalidate_planned_quad_rows(&mut self.line_quad_cache, pv.planned);
+            let colors = PaneColors::new(theme, pv.overrides);
+            // The pane's row-cache revision, resolved once for all of its rows.
+            let style_rev = colors.style_rev(self.style_rev);
             let pad_bg = pane_rect.x;
             let top_inset_bg = pane_rect.y;
             let max_cols = pv.planned.background_cols;
@@ -117,7 +130,7 @@ impl GpuRenderer {
                         slot: r,
                     },
                     row_cells.iter(),
-                    (self.style_rev, theme, sel_bbox_for_quads),
+                    (style_rev, colors, sel_bbox_for_quads),
                     &geometry,
                     snapped_cell_x_bg,
                     &mut *quads,

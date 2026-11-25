@@ -336,7 +336,8 @@ fn window_wide_dirt_callers_inventory() {
                 "\n",
                 include_str!("window_keyboard_ime.rs")
             ),
-            2,
+            // A key that clears the selection, a copy-mode key, and copy mode returned after a refused copy.
+            3,
         ),
         ("window_state.rs", include_str!("window_state.rs"), 1),
     ] {

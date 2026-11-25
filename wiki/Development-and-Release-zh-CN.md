@@ -71,6 +71,7 @@ python3 scripts/local-gate.py
 | `macos-logic-coverage` | `scripts/macos-logic-coverage.sh` | macOS | `local` | `rust`、`llvm-cov` | `macos-core` |
 | `colr-tests` | `cargo test --locked -p sonicterm-font --lib colr_` | Linux | `local` | `rust`、`native` | `tooling` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`、`native`、`warp` | `windows-tests-runtime` |
+| `windows-conpty-forms` | `cargo test --locked -p sonicterm-io -p sonicterm-app --test windows_conpty_protocol_forms --test windows_conpty_app_smoke -- --ignored --nocapture` | Windows | `local` | `rust`、`native`、`network` | `windows-tests-runtime` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests-workspace` |
 | `windows-perf-build` | `cargo build --locked -p sonicterm-app --example perf_scenarios` | Windows | `local` | `rust`、`native` | `windows-tests-runtime` |
 | `windows-perf-smoke` | `python scripts/perf-compare.py --smoke` | Windows | `local` | `rust`、`native` | `windows-tests-runtime` |
@@ -101,7 +102,7 @@ python3 scripts/local-gate.py
 - `pwsh`：`PATH` 上的 PowerShell 7（`pwsh`）。
 - `llvm-cov`：`scripts/pinned-tools.json` 固定版本的 `cargo-llvm-cov`。
 - `cargo-deny`：`scripts/pinned-tools.json` 固定版本的 `cargo-deny`，以及用于其 advisory 数据库的网络访问。
-- `network`：可访问 `scripts/native-dependencies.json` 列出的固定上游归档的网络。
+- `network`：可访问 `scripts/native-dependencies.json` 与 `scripts/windows-conpty.json` 列出的固定上游归档的网络。
 - `win-target`：`x86_64-pc-windows-msvc` 标准库（`rustup target add x86_64-pc-windows-msvc`）。
 - `warp`：支持 allocator report 的 DX12 WARP adapter。
 - 每个步骤还需要 `PATH` 上的 Git 与 Python 3。

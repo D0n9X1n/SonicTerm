@@ -125,8 +125,10 @@ close_button_fg = "#ff5555"
 tint 强度等 UI 颜色。窗口透明度和原生材质属于 `sonicterm.toml` 中的
 `[appearance]`，不属于主题文件。
 
-颜色应使用六位 RGB 字符串 `#rrggbb`。TOML loader 会接受任意字符串，但格式错误的
-颜色会显示为黑色。缺少必需字段会导致主题解析失败。只有
+颜色应使用六位 RGB 字符串 `#rrggbb`。TOML loader 会接受任意字符串。颜色按每两位一个通道读取，
+不是十六进制的一对显示为 0，其余通道保持原值；`#` 之后不是六个字符的值显示为黑色。格式错误的
+`background` 以 `[appearance]` 的 `opacity` 把窗口清除为黑色。程序的颜色查询（OSC 4、10-12、17、19
+以及 OSC 21 的 `cursor_text` 键）回答实际绘制的颜色。缺少必需字段会导致主题解析失败。只有
 `colors.tab.hover_fg` 有 schema 默认值；省略时为 `#d5c4a1`。
 
 ### 颜色应用
@@ -136,8 +138,9 @@ tint 强度等 UI 颜色。窗口透明度和原生材质属于 `sonicterm.toml`
 | `background` | 终端背景和应用 UI 的基础背景 |
 | `foreground` | 默认终端文字和应用文字 |
 | `cursor` | 光标、link 下划线和 link tint 来源 |
-| `cursor_text` | 块状光标下的字符 |
-| `selection_bg` | 选区 overlay，以 50% alpha 绘制 |
+| `cursor_text` | 块状光标下的字符，除非窗格中的程序设置了自己的颜色 |
+| `selection_bg` | 选区 overlay，以 50% alpha 绘制；窗格中的程序可以设置自己的颜色，仍保持 50% alpha；也是命令面板和搜索框中选中文字的背景 |
+| `selection_fg` | 命令面板和搜索框中选中的文字；终端选区保持字形自身颜色，除非窗格中的程序设置了选区前景色 |
 | `colors.ansi` | ANSI 颜色 0–7 和派生 UI accent |
 | `colors.bright` | ANSI 颜色 8–15 和派生 UI accent |
 | `colors.tab.bar_bg` | 标签栏、状态栏、集成标题栏带和搜索面板的背景，按主题设置的值原样使用。SonicTerm 不会从终端背景色推导更暗的颜色，也不做对比度筛选，因此请选择能让 `foreground` 和 `colors.tab.active_fg` 清晰可读的 `bar_bg`。 |
@@ -147,7 +150,7 @@ tint 强度等 UI 颜色。窗口透明度和原生材质属于 `sonicterm.toml`
 搜索的所有命中使用 `colors.ansi.yellow`，当前命中使用
 `colors.bright.green`。两者上方的文字都使用 `background`。
 
-自定义主题应保留 `selection_fg`、`colors.tab.hover_bg`、`colors.tab.hover_fg` 和
+自定义主题应保留 `colors.tab.hover_bg`、`colors.tab.hover_fg` 和
 `colors.tab.close_button_fg`：除 `hover_fg` 外都为 schema 必需字段，尽管目前均不影响渲染。
 
 主题加载后还会应用 `accessibility.high_contrast = true`。该设置把

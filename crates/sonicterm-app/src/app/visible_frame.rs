@@ -436,6 +436,8 @@ pub(super) fn pane_renders<'a>(
             // Read before the grid is lent mutably for the frame.
             let cursor_style =
                 sonicterm_render_model::CursorStyle::from_request(parser.cursor_request());
+            // The grid and the program's colors are lent together from the one held guard.
+            let (grid, colors) = parser.grid_and_color_overrides();
             PaneRender {
                 id: *id,
                 rect_px: sonicterm_render_model::geometry::PixelRect {
@@ -444,7 +446,7 @@ pub(super) fn pane_renders<'a>(
                     w: rect.w as u32,
                     h: rect.h as u32,
                 },
-                grid: parser.grid_mut(),
+                grid,
                 viewport_top_abs: viewports.of(*id),
                 is_active: *id == active,
                 cursor_style,
@@ -452,6 +454,7 @@ pub(super) fn pane_renders<'a>(
                 scrollbar_alpha: scrollbar_alpha.get(id).copied().unwrap_or(0.0),
                 inline_media_revision: images.revision,
                 inline_images: std::mem::take(&mut images.images),
+                colors,
             }
         })
         .collect()

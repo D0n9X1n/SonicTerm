@@ -94,6 +94,8 @@ pub(in crate::app) enum ClipWriteOutcome {
     Failed,
     /// `[terminal] osc52 = "deny"` refused it before the clipboard was touched.
     Denied,
+    /// No clipboard worker runs and the text is over the event-loop thread's native write limit.
+    TooLarge,
 }
 
 impl App {
@@ -163,16 +165,29 @@ impl App {
             UserEvent::LaunchFailed { message } | UserEvent::ScriptDraftRejected { message } => {
                 self.handle_script_draft_rejected(message);
             }
-            UserEvent::ClipboardWrite { pane_id, text } => {
-                let bytes = text.len();
-                let outcome = self.handle_clipboard_write(text);
-                self.note_clip_write(pane_id, bytes, outcome);
+            UserEvent::ClipboardWrite { pane_id, job } => {
+                if let Some(job) = job.take() {
+                    // The job is still untaken, so this is its one commit; a write posted to the
+                    // clipboard worker reports its outcome when the worker finishes it.
+                    let bytes = job.text.len();
+                    if let Some(outcome) = self.submit_program_clipboard(pane_id, job, false) {
+                        self.note_clip_write(pane_id, bytes, outcome);
+                    }
+                }
+            }
+            UserEvent::ClipboardDone => self.drain_clipboard_completions(),
+            UserEvent::ClipboardTicket { pane_id, ticket } => {
+                tracing::trace!(pane_id, "OSC 52 ticket admitted");
+                self.admit_clipboard_ticket(ticket);
             }
             UserEvent::ClipboardAttempts { pane_id, attempts } => {
-                self.note_clip_attempts(pane_id, attempts, Instant::now());
+                self.note_or_defer_clip_attempts(pane_id, attempts, Instant::now());
             }
             event @ (UserEvent::ProgramProgress { .. } | UserEvent::ProgramNotify { .. }) => {
                 self.handle_program_event(event);
+            }
+            UserEvent::ProgramStatus { pane_id, summary } => {
+                self.note_program_status(pane_id, summary);
             }
             UserEvent::PathProbeFinished(result) => {
                 self.handle_path_probe_finished(*result);
@@ -266,35 +281,13 @@ impl App {
         );
     }
 
-    /// Apply one accepted OSC 52 write under the live `[terminal] osc52` policy, checked here at the
-    /// side effect so a write queued before a reload to `"deny"` is refused too.
+    /// Route one program clipboard-target write as pane 0, as the event loop routes OSC 52.
+    #[cfg(test)]
     pub(super) fn handle_clipboard_write(&mut self, text: String) -> ClipWriteOutcome {
-        if self.config.terminal.osc52 == sonicterm_cfg::config::Osc52Policy::Deny {
-            // When: the `osc52` policy is Deny, the clipboard is never touched.
-            tracing::debug!(
-                bytes = text.len(),
-                "OSC 52 clipboard write denied by [terminal] osc52"
-            );
-            return ClipWriteOutcome::Denied;
-        }
-        #[cfg(target_os = "windows")]
-        let (previous_text, reassert_text) = (self.clipboard_text_for_reassert(), text.clone());
-        let written = self.set_clipboard_text(text);
-        // Windows reasserts a successful write once; a failed one has no value to reassert.
-        #[cfg(target_os = "windows")]
-        if written {
-            self.pending_osc52_reassert = Some(super::PendingOsc52Reassert {
-                text: reassert_text,
-                previous_text,
-                due: Instant::now() + super::OSC52_CLIPBOARD_REASSERT_DELAY,
-            });
-        }
-        if written {
-            ClipWriteOutcome::Written
-        } else {
-            // When: not `written`, the native clipboard refused the write; it is reported as failed.
-            ClipWriteOutcome::Failed
-        }
+        let staging = super::osc52_stream::ClipboardStaging::with_budget(usize::MAX / 4, 0);
+        let job = super::osc52_stream::ClipboardJob::for_test(&staging, &text);
+        self.submit_program_clipboard(0, job, false)
+            .expect("with no worker, the write settles here")
     }
 
     pub(super) fn handle_script_draft_rejected(&mut self, message: String) {
@@ -730,7 +723,7 @@ impl App {
             band_press_consumed: false,
             caption: Default::default(),
             band_last_press: None,
-            band_edge_cursor: false,
+            native_cursor: Default::default(),
             sel_status: Default::default(),
             ime_discarded_at: None,
             alert_settings: None,

@@ -12,7 +12,10 @@ the production glyph path.
 - `core_assemble.rs` - CPU assembly coordinator, scratch lease, retry decisions and receipts;
   `core_assemble_*` phases emit in the same painter order through borrowed `core_assembly_context`.
 - `core_source.rs` - test-only complete renderer source corpus for structural contracts;
-  extracted phases remain in the device-gate reachability graph.
+  extracted phases remain in the device-gate reachability graph. Every `core_*` part `core.rs`
+  declares belongs in it; a contract test fails on a missing one.
+- `core_pane_colors.rs` - a pane's colors: the theme under the program's OSC overrides, one resolver
+  for cells, fills, decorations, cursor and selection, and the frame key's color digest.
 - `atlas_lifecycle.rs` - private atlas reset, promotion/demotion, gated upload rebuild and retry settlement.
 - `device_errors.rs` - per-device wgpu error and loss state, the GPU-work gate,
   the frame-outcome decision, and the test fault kinds.

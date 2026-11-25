@@ -102,6 +102,10 @@ impl Grid {
             self.row_content_seq.push_back(changed_at);
         }
         if self.scrollback_limit == 0 {
+            // Without history each scrolled row was recycled, so the semantic anchor and the prompt
+            // regions move up with their rows and are evicted with them, as a history drain does.
+            self.rebase_prompts_after_drain(line_count as u64);
+            self.rebase_semantic(line_count as u64);
             // With no history, absolute rows are fixed screen positions. Every
             // one received different content after the rotation, not just the
             // newly blank row at the bottom.
@@ -164,6 +168,7 @@ impl Grid {
             // When: `line_count == 0`, preserve row identity and revision.
             return;
         }
+        self.invalidate_input_on_row_move(0, rows - 1);
         for _ in 0..line_count {
             // Drop bottom row, recycle it as the new blank top row.
             let Some(mut row) = self.visible.pop_back() else {
@@ -241,6 +246,7 @@ impl Grid {
             // When: `line_count == 0`, preserve every row in the scroll region.
             return;
         }
+        self.invalidate_input_on_row_move(top_i, bot_i);
         // Shift content up by `line_count` within the region.
         for row in top_i..=bot_i {
             let src = row + line_count;
@@ -296,6 +302,7 @@ impl Grid {
             // When: `line_count == 0`, preserve every row in the scroll region.
             return;
         }
+        self.invalidate_input_on_row_move(top_i, bot_i);
         // Shift content down by `line_count` within the region (work from the
         // bottom so we don't clobber sources).
         let mut row = bot_i + 1;

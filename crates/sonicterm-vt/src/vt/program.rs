@@ -1,5 +1,5 @@
-//! Program-state OSC grammar: ConEmu `OSC 9` (progress subcommand and plain
-//! notifications) and `OSC 777 ; notify`.
+//! Program-state OSC grammar: ConEmu `OSC 9` (progress subcommand, the `9;9` working-directory
+//! split-off and plain notifications) and `OSC 777 ; notify`.
 //!
 //! The parser only validates and bounds these strings; it never sanitizes, cuts,
 //! rate-limits or holds config. The host sanitizes first, then applies its display caps.
@@ -22,8 +22,9 @@ pub enum ProgressState {
 pub struct ProgressReport {
     /// The reported state.
     pub state: ProgressState,
-    /// Percent complete, `0..=100`; 0 for indeterminate.
-    pub percent: u8,
+    /// Percent complete, `0..=100`; `None` when the report carried none it could read (always
+    /// for indeterminate). `None` keeps the state; the host shows the pane's last value, or 0.
+    pub percent: Option<u8>,
 }
 
 /// Raw safety bound on one program-state sequence's payload. A longer one is refused whole,
@@ -42,7 +43,9 @@ pub(super) enum ProgramOsc {
         /// The text.
         body: String,
     },
-    /// Malformed, a ConEmu subcommand other than `4`, or another OSC 777 subcommand.
+    /// `9;12`: ConEmu's prompt start, whatever follows it.
+    PromptMark,
+    /// Malformed, a ConEmu subcommand other than `4` or `12`, or another OSC 777 subcommand.
     Ignored,
 }
 
@@ -53,12 +56,16 @@ pub(super) fn parse_osc9(params: &[&[u8]]) -> ProgramOsc {
         return ProgramOsc::Ignored;
     };
     if let Some(subcommand) = conemu_subcommand(first) {
-        // When: conemu_subcommand names 1..=12, it is never a notification; only 4 is implemented.
-        return if subcommand == 4 {
-            parse_progress(&params[1..])
-        } else {
-            // When: subcommand is not 4, that ConEmu command is not implemented.
-            ProgramOsc::Ignored
+        // When: conemu_subcommand names 1..=12, a command with parameters and never text.
+        return match (subcommand, params.len()) {
+            // Ghostty reads `9;12` as a prompt start and ignores what follows it.
+            (12, _) => ProgramOsc::PromptMark,
+            // Bare (one parameter) the table is Ghostty's: `5` and `10` are commands, the rest text.
+            (5 | 10, 1) => ProgramOsc::Ignored,
+            (_, 1) => joined_text(params)
+                .map_or(ProgramOsc::Ignored, |body| ProgramOsc::Notify { title: None, body }),
+            (4, _) => parse_progress(&params[1..]),
+            _ => ProgramOsc::Ignored,
         };
     }
     let Some(body) = joined_text(params) else {
@@ -69,7 +76,8 @@ pub(super) fn parse_osc9(params: &[&[u8]]) -> ProgramOsc {
 }
 
 /// Parse the parameters after `777`: only `notify ; <title> ; <body…>` is accepted, and further
-/// `;`-separated parameters rejoin the body.
+/// `;`-separated parameters rejoin the body. `notify ; <text>` with no body is body `<text>` with
+/// no title, as WezTerm shows it.
 pub(super) fn parse_osc777(params: &[&[u8]]) -> ProgramOsc {
     let [subcommand, rest @ ..] = params else {
         // When: params is empty, there is no subcommand.
@@ -85,16 +93,15 @@ pub(super) fn parse_osc777(params: &[&[u8]]) -> ProgramOsc {
         // When: parts holds a part that is not UTF-8, the sequence is ignored.
         return ProgramOsc::Ignored;
     };
-    let [title, body @ ..] = parts.as_slice() else {
-        // When: parts is empty, `notify` has neither a title nor a body separator.
-        return ProgramOsc::Ignored;
+    let (title, body) = match parts.as_slice() {
+        [] => {
+            // When: parts is empty, `notify` has neither a title nor a body.
+            return ProgramOsc::Ignored;
+        }
+        // A lone `text` is the body with no title, as WezTerm shows it.
+        [text] => (String::new(), (*text).to_owned()),
+        [title, body @ ..] => ((*title).to_owned(), body.join(";")),
     };
-    if body.is_empty() {
-        // When: body is empty, the title has no `;` after it, so the sequence is malformed.
-        return ProgramOsc::Ignored;
-    }
-    let title = (*title).to_owned();
-    let body = body.join(";");
     if title.len() + body.len() > MAX_NOTIFY_BYTES {
         // When: title and body pass MAX_NOTIFY_BYTES, the sequence is refused whole.
         return ProgramOsc::Ignored;
@@ -105,6 +112,24 @@ pub(super) fn parse_osc777(params: &[&[u8]]) -> ProgramOsc {
     }
     let title = (!title.trim().is_empty()).then_some(title);
     ProgramOsc::Notify { title, body }
+}
+
+/// The path a ConEmu `9;9;<path>` report carries, everything after its second `;`, separators
+/// included; `None` for any other OSC 9 payload, a bare `9;9` without the separator included.
+/// The subcommand is read with its C0 controls ignored, as the notification grammar will read it,
+/// and a report with a control there returns the whole payload, so the report rule refuses it.
+pub(super) fn osc9_cwd_payload(content: &[u8]) -> Option<&[u8]> {
+    let (subcommand, rest) = content.split_at(content.iter().position(|byte| *byte == b';')?);
+    let digits: Vec<u8> = subcommand.iter().copied().filter(|byte| *byte >= 0x20).collect();
+    if conemu_subcommand(&digits) != Some(9) {
+        // When: conemu_subcommand reads `digits` (controls ignored) as anything but 9, no report.
+        return None;
+    }
+    if digits.len() != subcommand.len() {
+        // When: a control sits in the subcommand, keep it in the value so the report is refused.
+        return Some(content);
+    }
+    Some(&rest[1..])
 }
 
 /// The ConEmu subcommand `param` names: an all-digit value in `1..=12`, leading zeros included.
@@ -120,37 +145,42 @@ fn conemu_subcommand(param: &[u8]) -> Option<u8> {
     (1..=12).contains(&value).then_some(value as u8)
 }
 
-/// `9;4;<st>[;<pr>][;…]`: `st` is one digit `0`–`4`, `pr` one to three digits clamped to 100.
+/// `9;4;<st>[;<pr>][;…]` (Ghostty): `st` is one digit `0`-`4`. Normal reads a missing `pr` as 0;
+/// error and paused keep none; a parsed `pr` is clamped to 100, and an unparsable or overflowing
+/// one leaves no percent for any state. Remove and indeterminate ignore `pr`.
 fn parse_progress(params: &[&[u8]]) -> ProgramOsc {
     let state = match params.first().copied() {
-        Some(b"0") => None,
-        Some(b"1") => Some(ProgressState::Normal),
-        Some(b"2") => Some(ProgressState::Error),
-        Some(b"3") => Some(ProgressState::Indeterminate),
-        Some(b"4") => Some(ProgressState::Paused),
+        Some(b"0") => {
+            // When: params start with `0`, the report removes the bar whatever follows.
+            return ProgramOsc::Progress(None);
+        }
+        Some(b"1") => ProgressState::Normal,
+        Some(b"2") => ProgressState::Error,
+        Some(b"3") => ProgressState::Indeterminate,
+        Some(b"4") => ProgressState::Paused,
         _ => {
             // When: params has no state, or it is not one digit 0-4, the report is malformed.
             return ProgramOsc::Ignored;
         }
     };
-    let percent = match params.get(1).copied() {
-        None => 0,
-        Some(digits)
-            if (1..=3).contains(&digits.len()) && digits.iter().all(u8::is_ascii_digit) =>
-        {
-            let value =
-                digits.iter().fold(0u16, |value, digit| value * 10 + u16::from(digit - b'0'));
-            value.min(100) as u8
-        }
-        Some(_) => {
-            // When: params holds a fractional, signed, empty or four-digit percent, it is malformed.
-            return ProgramOsc::Ignored;
-        }
+    let percent = match (state, params.get(1).copied()) {
+        (ProgressState::Indeterminate, _) => None,
+        (ProgressState::Normal, None) => Some(0),
+        (_, digits) => digits.and_then(parse_percent),
     };
-    ProgramOsc::Progress(state.map(|state| ProgressReport {
-        state,
-        percent: if state == ProgressState::Indeterminate { 0 } else { percent },
-    }))
+    ProgramOsc::Progress(Some(ProgressReport { state, percent }))
+}
+
+/// `digits` as a percent clamped to 100; `None` when empty, not all ASCII digits, or past `u64`.
+fn parse_percent(digits: &[u8]) -> Option<u8> {
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        // When: digits is empty or holds a sign, point or other byte, it is unparsable.
+        return None;
+    }
+    let value = digits.iter().try_fold(0u64, |value, digit| {
+        value.checked_mul(10)?.checked_add(u64::from(digit - b'0'))
+    })?;
+    Some(value.min(100) as u8)
 }
 
 /// The parameters rejoined with `;` as UTF-8 text; `None` when not UTF-8, blank or past

@@ -184,6 +184,34 @@ impl SoftwareFrame {
         }
     }
 
+    /// Write each pane fill's color over the pixels it covers, replacing rather than blending, as
+    /// the wgpu replacing draw does, so a translucent pane shows its fill at the fill's opacity.
+    pub(crate) fn replace_quads(&mut self, fills: &[QuadInstance]) {
+        let (width_px, height_px) = (self.width as f32, self.height as f32);
+        for fill in fills {
+            let Some((left, top, width, height)) =
+                ndc_rect_to_pixels(fill.rect, width_px, height_px)
+            else {
+                // When: `ndc_rect_to_pixels` returns None, the frame has zero extent and no pixel
+                // can be replaced.
+                continue;
+            };
+            // The covered span uses fill_rect's pixel-centre rule, so both write the same pixels.
+            let first_col = (left - 0.5).ceil().max(0.0) as usize;
+            let first_row = (top - 0.5).ceil().max(0.0) as usize;
+            let end_col = (left + width - 0.5).ceil().clamp(0.0, width_px) as usize;
+            let end_row = (top + height - 0.5).ceil().clamp(0.0, height_px) as usize;
+            let encoded = linear_rgba_to_bgra(fill.color);
+            for row in first_row..end_row {
+                let row_start = row * self.width as usize;
+                for col in first_col..end_col {
+                    let offset = (row_start + col) * 4;
+                    self.pixels[offset..offset + 4].copy_from_slice(&encoded);
+                }
+            }
+        }
+    }
+
     fn draw_quads(&mut self, quads: &[QuadInstance]) {
         let sw = self.width as f32;
         let sh = self.height as f32;
@@ -457,19 +485,22 @@ impl SoftwareFrame {
         }
         let atlas_w = atlas.width().max(1);
         let atlas_h = atlas.height().max(1);
-        let ax0 = (u0 * atlas_w as f32).round().clamp(0.0, atlas_w as f32) as u32;
-        let ay0 = (v0 * atlas_h as f32).round().clamp(0.0, atlas_h as f32) as u32;
-        let ax1 = (u1 * atlas_w as f32).round().clamp(0.0, atlas_w as f32) as u32;
-        let ay1 = (v1 * atlas_h as f32).round().clamp(0.0, atlas_h as f32) as u32;
+        // The instance's texel edges stay fractional: a part cut from a scaled glyph starts and ends
+        // inside texels, and only its exact edges map its pixels onto the original tile's texels.
+        let (src_left, src_right) = (u0 * atlas_w as f32, u1 * atlas_w as f32);
+        let (src_top, src_bottom) = (v0 * atlas_h as f32, v1 * atlas_h as f32);
+        // The texels the instance covers, so a part narrower than a texel still samples one.
+        let ax0 = texel_floor(src_left).clamp(0.0, atlas_w as f32) as u32;
+        let ay0 = texel_floor(src_top).clamp(0.0, atlas_h as f32) as u32;
+        let ax1 = (src_right - TEXEL_EDGE_SNAP).ceil().clamp(0.0, atlas_w as f32) as u32;
+        let ay1 = (src_bottom - TEXEL_EDGE_SNAP).ceil().clamp(0.0, atlas_h as f32) as u32;
         if ax1 <= ax0 || ay1 <= ay0 {
-            // When: ax1 or ay1 rounds onto its origin the tile spans no atlas texel, and
+            // When: ax1 or ay1 does not pass its origin the tile spans no atlas texel, and
             // the later (ax1 - 1) clamp would underflow on unsigned atlas coordinates.
             return;
         }
-        let src_w_u = (ax1 - ax0).max(1);
-        let src_h_u = (ay1 - ay0).max(1);
-        let src_w = src_w_u as f32;
-        let src_h = src_h_u as f32;
+        let src_w = src_right - src_left;
+        let src_h = src_bottom - src_top;
         let one_to_one_x = (w - src_w).abs() < 0.01;
         let one_to_one_y = (h - src_h).abs() < 0.01;
         let one_to_one = one_to_one_x && one_to_one_y;
@@ -493,11 +524,11 @@ impl SoftwareFrame {
         let subpixel_glyph = glyph.flags[1] >= 0.5;
         for yy in y0..y1 {
             let ty = ((yy as f32 + 0.5 - draw_y) / h).clamp(0.0, 0.999_999);
-            let sy = ay0 as f32 + src_h * ty;
+            let sy = src_top + src_h * ty;
             let row = yy as usize * self.width as usize * 4;
             for xx in x0..x1 {
                 let tx = ((xx as f32 + 0.5 - draw_x) / w).clamp(0.0, 0.999_999);
-                let sx = ax0 as f32 + src_w * tx;
+                let sx = src_left + src_w * tx;
                 // Match the GPU pipeline: glyphs use nearest sampling while
                 // inline images retain intentional bilinear scaling.
                 let sample = if one_to_one {
@@ -521,8 +552,8 @@ impl SoftwareFrame {
                     // Nearest, clamped to this glyph's own tile. The clamp is
                     // what makes neighbour bleed impossible rather than
                     // merely unlikely.
-                    let sx = sx.floor().clamp(ax0 as f32, (ax1 - 1) as f32) as u32;
-                    let sy = sy.floor().clamp(ay0 as f32, (ay1 - 1) as f32) as u32;
+                    let sx = texel_floor(sx).clamp(ax0 as f32, (ax1 - 1) as f32) as u32;
+                    let sy = texel_floor(sy).clamp(ay0 as f32, (ay1 - 1) as f32) as u32;
                     let pixel = bgra_pixel_at(atlas_pixels, atlas_w, sx, sy);
                     if self_colored {
                         premultiplied_srgb_bgra_to_linear_rgba(pixel)
@@ -638,6 +669,20 @@ fn premultiplied_srgb_channel_to_linear(encoded_premul: u8, alpha: u8) -> f32 {
         })
     })[(usize::from(alpha) << 8) | usize::from(encoded_premul)];
     srgb_u8_to_linear_lut()[staged as usize]
+}
+
+/// A texel coordinate this close below a texel edge is read as that edge. A cut part's texel
+/// coordinates come from rounded atlas coordinates and pixel rectangles, with float error far below
+/// it, and GPU samplers resolve 1/256 texel, so a pixel centre on an edge samples one texel whether
+/// its glyph is drawn whole or cut.
+#[cfg(any(target_os = "windows", test))]
+const TEXEL_EDGE_SNAP: f32 = 1.0 / 256.0;
+
+/// The texel holding texel coordinate `coordinate`, reading one within [`TEXEL_EDGE_SNAP`] below an
+/// edge as that edge.
+#[cfg(any(target_os = "windows", test))]
+fn texel_floor(coordinate: f32) -> f32 {
+    (coordinate + TEXEL_EDGE_SNAP).floor()
 }
 
 #[cfg(any(target_os = "windows", test))]

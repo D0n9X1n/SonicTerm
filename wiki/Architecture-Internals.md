@@ -475,9 +475,18 @@ visible, history, and saved-primary rows without reflow or later resurrection.
 
 Clipboard serialization keeps isolated or incomplete right-edge box drawing.
 It removes only a coherent multi-row side that ends in a lower-right frame
-corner. On Windows, a successful OSC 52 write gets one delayed reassertion only
-when the clipboard has reverted to the exact text observed before that write;
-a newer or unreadable clipboard owner is never overwritten.
+corner. On Windows, the clipboard worker gives a successful OSC 52 write of at
+most 262,144 UTF-16 units one reassertion 150 ms later. The write reads the
+`CF_UNICODETEXT` value it replaces (only when `GlobalSize` reports a block of at
+most 512 KiB), checks its binding and replaces the clipboard in one
+`OpenClipboard` acquisition. When due, the reassertion writes again only when the
+write's binding still holds, no newer clipboard job was posted (any newer job
+cancels it), the current block has exactly the snapshot's `GlobalSize` (checked
+before `GlobalLock`) and the same UTF-16 units, `GetClipboardSequenceNumber` did
+not move during that comparison, and the binding still holds after it. The
+comparison and the replacement share one acquisition, so no other program can
+change the clipboard between them. A newer, larger or unreadable clipboard owner
+is never overwritten, and a clear is never reasserted.
 
 Nested applications under rmux/tmux emit OSC 52 through `DCS tmux` passthrough.
 Trusted sessions require both options; `set-clipboard` alone does not relay the
@@ -872,7 +881,10 @@ and the last successful size stays cached. The first request always reaches the
 native call, because the cache starts empty rather than seeded from the spawn
 dimensions.
 
-The host first calls `Parser::resize`: grid bounds apply, and an effective row or
+The host first resizes the grid through `resize_terminal_grid` (`pane_refresh.rs`), which
+calls `Parser::resize_terminal` off Windows and `Parser::resize` on Windows; the first
+keeps a live prompt's cursor row on a rows shrink and otherwise is `Parser::resize`. Grid
+bounds apply, and an effective row or
 column change clears parser-owned scrolling margins without homing the cursor.
 Duplicate-size relayouts preserve partial margins. The grid is never rolled back
 when the native call fails: the pane keeps the requested geometry and only the

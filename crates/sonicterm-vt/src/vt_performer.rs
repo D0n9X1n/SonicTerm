@@ -39,6 +39,7 @@ impl Performer {
             shell_authenticated: false,
             shell_state: super::ShellIntegrationState::None,
             shell_input_seen: None,
+            section_commands: Default::default(),
             fg: Color::Default,
             bg: Color::Default,
             flags: CellFlags::empty(),
@@ -51,7 +52,9 @@ impl Performer {
             hyperlink_reclaim_backoff: 0,
             saved_cursor: None,
             bracketed_paste: false,
-            mouse_sgr: false,
+            paste_events: false,
+            paste_events_resets: 0,
+            mouse_format: MouseFormat::X10,
             app_cursor_keys: false,
             app_keypad: false,
             backarrow_key: false,
@@ -65,15 +68,25 @@ impl Performer {
             sync_epoch: 0,
             sync_resets: 0,
             title: None,
+            icon_title: None,
+            user_vars: Arc::default(),
+            program_status: Arc::default(),
+            program_status_dirty: false,
+            program_status_unseen: Arc::default(),
+            program_status_refusals: 0,
             cwd: None,
             osc7_cwd: None,
             cwd_revision: 0,
             reply_tx,
             captured_replies: std::cell::RefCell::new(None),
             reply_queue_full_warned: std::sync::atomic::AtomicBool::new(false),
+            color_overrides: sonicterm_types::ColorOverrides::default(),
             theme_fg: None,
             theme_bg: None,
             theme_cursor: None,
+            theme_selection_bg: None,
+            theme_selection_fg: None,
+            theme_cursor_text: None,
             theme_palette: [None; 16],
             theme_color_scheme: None,
             reported_theme: None,
@@ -81,7 +94,6 @@ impl Performer {
             cursor_request: None,
             kitty_notifications: kitty_notify::KittyNotifications::default(),
             report_cell_px: None,
-            suppress_next_osc4: false,
             scroll_top: None,
             scroll_bottom: None,
             fast_path_ready: true,
@@ -93,6 +105,7 @@ impl Performer {
             decrqss: None,
             decrqss_awaiting_backslash: false,
             kitty_kbd_flags: [Vec::new(), Vec::new()],
+            pointer_shape: super::vt_pointer_shape::PointerShapeState::default(),
             image_yield: false,
         }
     }
@@ -123,6 +136,8 @@ impl Performer {
     }
 
     pub(super) fn advance_hard_line(&mut self, fill: Cell, carriage_return: bool) {
+        // LF, IND and NEL all end input an OSC 133 I said runs to the end of the line.
+        self.grid.end_semantic_line();
         let (top, bottom) = self.effective_scroll_region();
         let col = self.physical_cursor_col();
         let col = if carriage_return { 0 } else { col };
@@ -140,7 +155,7 @@ impl Performer {
     // Ordering: reply_queue_full_warned uses Relaxed because it suppresses duplicate warnings without publishing reply bytes.
     pub(super) fn reply(&self, bytes: &[u8]) {
         if let Some(captured) = self.captured_replies.borrow_mut().as_mut() {
-            // When: captured_replies is enabled, stage one dispatch before yielding; OSC 4 input is capped at 4096 bytes.
+            // When: captured_replies is enabled, stage one dispatch before yielding; a color request's payload is bounded.
             captured.extend_from_slice(bytes);
             return;
         }
@@ -161,57 +176,6 @@ impl Performer {
                     // When: TrySendError::Disconnected means no host can receive bytes, so dropping the reply avoids blocking parser progress.
                 }
             }
-        }
-    }
-
-    pub(super) fn handle_osc4_raw(&self, raw_pairs: &[u8], bell_terminated: bool) {
-        let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
-        let mut parts = raw_pairs.split(|&byte| byte == b';');
-        while let Some(idx) = parts.next() {
-            let Some(spec) = parts.next() else {
-                // When: spec is missing from the index/spec pair, stop before replying with a mismatched palette entry.
-                break;
-            };
-            let idx =
-                std::str::from_utf8(idx).ok().and_then(|digits| digits.trim().parse::<u8>().ok());
-            let spec = std::str::from_utf8(spec).ok().map(str::trim);
-            if let (Some(idx), Some("?")) = (idx, spec) {
-                self.reply_osc4_query(idx, terminator);
-            }
-        }
-    }
-
-    pub(super) fn handle_osc4_pairs(&self, params: &[&[u8]], bell_terminated: bool) {
-        let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
-        let mut param_index = 1;
-        while param_index + 1 < params.len() {
-            let idx = std::str::from_utf8(params[param_index])
-                .ok()
-                .and_then(|digits| digits.trim().parse::<u8>().ok());
-            let spec = std::str::from_utf8(params[param_index + 1]).ok().map(str::trim);
-            if let (Some(idx), Some("?")) = (idx, spec) {
-                self.reply_osc4_query(idx, terminator);
-            }
-            param_index += 2;
-        }
-    }
-
-    fn reply_osc4_query(&self, idx: u8, terminator: &[u8]) {
-        // 0..=15 are the seeded theme colors; 16..=255 the shared table the renderer draws with.
-        let color = match self.theme_palette.get(usize::from(idx)) {
-            Some(seeded) => *seeded,
-            None => sonicterm_types::indexed_rgb(idx),
-        };
-        if let Some((red, green, blue)) = color {
-            let mut buf = Vec::with_capacity(28);
-            buf.extend_from_slice(b"\x1b]4;");
-            buf.extend_from_slice(idx.to_string().as_bytes());
-            buf.extend_from_slice(
-                format!(";rgb:{red:02x}{red:02x}/{green:02x}{green:02x}/{blue:02x}{blue:02x}")
-                    .as_bytes(),
-            );
-            buf.extend_from_slice(terminator);
-            self.reply(&buf);
         }
     }
 
@@ -236,11 +200,16 @@ impl Performer {
         let region = (self.scroll_top.is_some() || self.scroll_bottom.is_some())
             .then(|| self.effective_scroll_region());
         let fill = self.erase_fill_cell();
+        let mut flags = self.flags;
+        // A cell printed while the shell's OSC 133 state is input is typed input click-to-move counts.
+        if matches!(self.grid.semantic().mode, SemanticMode::Input { .. }) {
+            flags |= CellFlags::PROMPT_INPUT;
+        }
         self.grid.put_char_styled_in_region(
             character,
             self.fg,
             self.bg,
-            self.flags,
+            flags,
             self.current_hyperlink,
             self.underline_style,
             self.underline_color,
@@ -372,9 +341,14 @@ impl Performer {
         self.advance_keyboard_protocol_epoch();
         self.win32_input = false;
         self.reset_attrs();
+        // A reset program has named no tab; the window title stays, as before.
+        self.icon_title = None;
+        // A reset program reports no status.
+        self.end_program_status(|_| true);
         self.saved_cursor = None;
         self.bracketed_paste = false;
-        self.mouse_sgr = false;
+        self.set_paste_events(false);
+        self.mouse_format = MouseFormat::X10;
         self.app_cursor_keys = false;
         self.app_keypad = false;
         self.backarrow_key = false;
@@ -383,6 +357,11 @@ impl Performer {
         self.mouse_tracking = MouseTracking::Off;
         self.focus_reporting = false;
         self.color_scheme_updates = false;
+        // RIS resets the palette a program set, but not its foreground, background or cursor.
+        if self.clear_palette_overrides() {
+            // A removed palette entry drew another color, so the pane repaints once.
+            self.color_overrides.advance_generation();
+        }
         self.kitty_notifications.clear();
         // A program's cursor request ends with the reset, so the host draws the configured cursor.
         if self.cursor_request.take().is_some() {
@@ -398,17 +377,22 @@ impl Performer {
         for stack in &mut self.kitty_kbd_flags {
             stack.clear();
         }
+        self.clear_pointer_shapes();
         self.grid.set_autowrap(true);
         if self.grid.is_alt() {
             self.grid.leave_alt_screen();
         }
         self.grid.erase_screen_with(Cell::default());
         self.grid.goto(0, 0);
+        // The alternate screen's state left with it above; the primary's resets.
+        self.grid.reset_semantic();
         // RIS erases every screen and drops the alt buffer above, so no cell
         // can still reference an interned link. Clearing outright is cheaper
         // and no less correct than scanning to prove the set is empty.
         self.hyperlinks.clear();
         self.hyperlink_reclaim_backoff = 0;
+        // Both stacks are empty and tracking is off, so the pane shows the text fallback.
+        self.note_pointer_shape();
     }
 
     pub(super) fn apply_sgr(&mut self, params: &Params) {

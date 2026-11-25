@@ -259,9 +259,10 @@ impl App {
                 PalettePointerTarget::ConfirmRow(pressed),
                 Some(PalettePointerHit::ConfirmRow { index }),
             ) if pressed == index && self.interaction.command_palette.select_confirm_row(index) => {
-                // The Apply or Cancel row released on is the one pressed: act as Enter on it.
-                let apply = self.interaction.command_palette.confirm_applies();
-                self.close_confirm_page(apply);
+                // The row released on is the one pressed: act as Enter on it.
+                let palette = &self.interaction.command_palette;
+                let (apply, choice) = (palette.confirm_applies(), palette.confirm_choice());
+                self.close_confirm_page_choosing(apply, choice);
             }
             (
                 PalettePointerTarget::PickerRow(pressed),
@@ -328,10 +329,8 @@ impl App {
         match event {
             WindowEvent::CursorMoved { position, .. } => {
                 window.cursor_pos = (position.x, position.y);
+                // The open palette owns this window's cursor at the turn's cursor sync.
                 window.invalidate_path_hover();
-                if let Some(native) = window.window.as_ref() {
-                    native.set_cursor(CursorIcon::Default);
-                }
                 true
             }
             WindowEvent::CursorLeft { .. } => {

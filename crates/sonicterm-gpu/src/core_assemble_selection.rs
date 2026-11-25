@@ -11,11 +11,13 @@ impl GpuRenderer {
         inputs: AssemblyUi<'_>,
         scratch: &mut frame_scratch::FrameScratch,
         active_snapped_cell_x: &[f32],
+        active_rows: std::ops::Range<usize>,
         frame_recolor: &mut crate::cursor::RecolorRecord,
     ) {
         let AssemblyGeometry {
             grid,
             plan,
+            pane_views,
             active_origin_x,
             active_origin_y,
             active_pane_x,
@@ -43,40 +45,55 @@ impl GpuRenderer {
             row_spans,
             ..
         } = scratch;
+        // The active pane's colors: the theme under its program's colors, read once for the
+        // selection, copy mode and cursor; a missing view draws with the theme alone.
+        let pane_colors = PaneColors::new(
+            theme,
+            pane_views.get(plan.active_index).and_then(|view| view.overrides),
+        );
+        // Selection highlights are anchored to the active pane's
+        // origin. They MUST be clipped to that pane's rect — otherwise
+        // a selection that extends past the pane's last visible column
+        // (e.g. the user drags across the split into the neighbouring
+        // pane) would emit a quad that visually bleeds into the
+        // neighbouring pane's grid area. Regression-guard for the
+        // bug where dragging in a split-right layout painted the
+        // selection across both panes.
+        // Selection rows are scrollback-ABSOLUTE; the active pane's view top maps them back
+        // to viewport rows, so the highlight follows the TEXT when scrolled.
+        let geometry = SelectionGeometry {
+            view_top_abs: plan.active_view_top_abs,
+            grid_size: (grid.rows, grid.cols),
+            origin: (active_origin_x, active_origin_y),
+            cell_size: (self.cell_w, self.cell_h),
+            // Pane rect_px is the source of truth — see note above.
+            clip: (active_pane_x, active_pane_y, active_pane_w, active_pane_h),
+            surface: (sw, sh),
+        };
+        // A selection recolors only the active pane's glyph rows (`active_rows` of `row_spans`),
+        // the pane it belongs to; a glyph it cuts moves every row span by its parts.
         if let Some(sel) = selection {
             if !sel.is_empty() {
-                // Selection highlights are anchored to the active pane's
-                // origin. They MUST be clipped to that pane's rect — otherwise
-                // a selection that extends past the pane's last visible column
-                // (e.g. the user drags across the split into the neighbouring
-                // pane) would emit a quad that visually bleeds into the
-                // neighbouring pane's grid area. Regression-guard for the
-                // bug where dragging in a split-right layout painted the
-                // selection across both panes.
-                let pane_x = active_origin_x;
-                let pane_y = active_origin_y;
-                // Pane rect_px is the source of truth — see note above.
-                let pane_w = active_pane_w;
-                let pane_h = active_pane_h;
-                // Selection rows are scrollback-ABSOLUTE; resolve the active
-                // pane's view top so `selection_quad_rects` can map them back
-                // to viewport rows (so the highlight follows the TEXT when
-                // scrolled).
-                let sel_view_top_abs = plan.active_view_top_abs;
                 push_selection_quads(
                     &mut *quads,
                     sel,
-                    &SelectionGeometry {
-                        view_top_abs: sel_view_top_abs,
-                        grid_size: (grid.rows, grid.cols),
-                        origin: (active_origin_x, active_origin_y),
-                        cell_size: (self.cell_w, self.cell_h),
-                        clip: (pane_x, pane_y, pane_w, pane_h),
-                        surface: (sw, sh),
-                    },
+                    &geometry,
                     active_snapped_cell_x,
-                    self.selection_color,
+                    pane_colors.selection_rgba(self.selection_color),
                 );
+                if let Some(selected) = pane_colors.selection_foreground_rgba() {
+                    // Selected glyphs take the program's selection foreground; the cursor recolors
+                    // below run later, so cursor text wins on the cursor cell.
+                    recolor_selected_glyphs(
+                        &mut *glyph_instances,
+                        &mut *row_spans,
+                        active_rows.clone(),
+                        sel,
+                        &geometry,
+                        active_snapped_cell_x,
+                        selected,
+                    );
+                }
             }
         }
 
@@ -97,7 +114,7 @@ impl GpuRenderer {
                 );
             }
             let view_top_abs = plan.active_view_top_abs;
-            if let Some((cx, cy)) = Self::emit_copy_mode_quads(
+            let copy_cursor = Self::emit_copy_mode_quads(
                 copy_mode,
                 grid,
                 view_top_abs,
@@ -107,11 +124,26 @@ impl GpuRenderer {
                 self.cell_h,
                 sw,
                 sh,
-                self.selection_color,
+                pane_colors.selection_rgba(self.selection_color),
                 self.cursor_color,
                 &mut *quads,
                 active_snapped_cell_x,
-            ) {
+            );
+            if let Some(selected) = pane_colors.selection_foreground_rgba() {
+                // Copy mode's selected range takes the program's selection foreground by the
+                // mouse selection's rule, before its cursor recolors so cursor text wins there.
+                recolor_copy_mode_glyphs(
+                    &mut *glyph_instances,
+                    &mut *row_spans,
+                    active_rows.clone(),
+                    copy_mode,
+                    grid,
+                    &geometry,
+                    active_snapped_cell_x,
+                    selected,
+                );
+            }
+            if let Some((cx, cy)) = copy_cursor {
                 let RecolorOutcome { visited, record } = recolor_cursor_glyphs_in(
                     &mut *glyph_instances,
                     row_spans,
@@ -121,7 +153,8 @@ impl GpuRenderer {
                     self.cell_h,
                     sw,
                     sh,
-                    self.cursor_text_color,
+                    pane_colors.cursor_text_rgba(self.cursor_text_color),
+                    true,
                 );
                 crate::frame_stats::note_recolor_glyphs_visited(|| visited);
                 *frame_recolor = frame_recolor.merge(record);
@@ -178,7 +211,9 @@ impl GpuRenderer {
                 // Keep every cursor shape at its exact theme color. Alpha
                 // fading over the terminal background makes Gruvbox yellow
                 // read as olive/green during real redraws.
-                let color = active_cursor_color(self.cursor_color);
+                // The terminal cursor takes the active pane's OSC 12 color when its program set one.
+                let pane_cursor = pane_colors.cursor_rgba(self.cursor_color);
+                let color = active_cursor_color(pane_cursor);
                 // Wezterm cursor shapes:
                 //   Block     → full-cell quad, glyph re-rendered in bg
                 //   Bar       → 2px vertical bar pinned to the left edge
@@ -205,7 +240,9 @@ impl GpuRenderer {
                             });
                         }
                         // Mid-glide the block passes over text without recolouring it; the frame
-                        // that lands on the cell recolours its glyph as a resting block does.
+                        // that lands on the cell recolours its glyph as a resting block does. Only
+                        // the cell's columns are recoloured, at the glyph's full height, so a
+                        // ligature's other half keeps its color and ink above the row repaints.
                         if gliding.is_none() {
                             let RecolorOutcome { visited, record } = recolor_cursor_glyphs_in(
                                 &mut *glyph_instances,
@@ -216,7 +253,8 @@ impl GpuRenderer {
                                 self.cell_h,
                                 sw,
                                 sh,
-                                self.cursor_text_color,
+                                pane_colors.cursor_text_rgba(self.cursor_text_color),
+                                true,
                             );
                             crate::frame_stats::note_recolor_glyphs_visited(|| visited);
                             *frame_recolor = frame_recolor.merge(record);

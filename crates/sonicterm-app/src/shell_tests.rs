@@ -11,17 +11,12 @@ fn opaque_normalizer(mut config: Config) -> (Config, Vec<String>) {
     (config, warnings)
 }
 
-fn machine() -> AppStateMachine {
-    AppStateMachine::new(sonicterm_app_core::AppState::default())
-}
-
 #[test]
 fn every_platform_shell_defaults_to_unprivileged() {
     // Protect callers that do not install a native privilege observation from showing a false warning.
-    let mac = MacShell::new(machine(), Theme::default(), Config::default(), Keymap::default());
-    let windows =
-        WindowsShell::new(machine(), Theme::default(), Config::default(), Keymap::default());
-    let linux = LinuxShell::new(machine(), Theme::default(), Config::default(), Keymap::default());
+    let mac = MacShell::new(Theme::default(), Config::default(), Keymap::default());
+    let windows = WindowsShell::new(Theme::default(), Config::default(), Keymap::default());
+    let linux = LinuxShell::new(Theme::default(), Config::default(), Keymap::default());
 
     assert_eq!(mac.runner.process_privilege, ProcessPrivilege::Unprivileged);
     assert_eq!(windows.runner.process_privilege, ProcessPrivilege::Unprivileged);
@@ -31,12 +26,11 @@ fn every_platform_shell_defaults_to_unprivileged() {
 #[test]
 fn every_platform_shell_accepts_the_same_process_privilege_value() {
     // Protect macOS, Windows, and Linux from diverging at their otherwise-thin startup wrappers.
-    let mac = MacShell::new(machine(), Theme::default(), Config::default(), Keymap::default())
+    let mac = MacShell::new(Theme::default(), Config::default(), Keymap::default())
         .with_process_privilege(ProcessPrivilege::Privileged);
-    let windows =
-        WindowsShell::new(machine(), Theme::default(), Config::default(), Keymap::default())
-            .with_process_privilege(ProcessPrivilege::Privileged);
-    let linux = LinuxShell::new(machine(), Theme::default(), Config::default(), Keymap::default())
+    let windows = WindowsShell::new(Theme::default(), Config::default(), Keymap::default())
+        .with_process_privilege(ProcessPrivilege::Privileged);
+    let linux = LinuxShell::new(Theme::default(), Config::default(), Keymap::default())
         .with_process_privilege(ProcessPrivilege::Privileged);
 
     assert_eq!(mac.runner.process_privilege, ProcessPrivilege::Privileged);
@@ -50,10 +44,10 @@ fn mac_and_windows_shells_preserve_supported_backdrops() {
     for backdrop in [BackdropKind::Mica, BackdropKind::Acrylic, BackdropKind::Tabbed] {
         let mut config = Config::default();
         config.appearance.backdrop = backdrop;
-        let mac = MacShell::new(machine(), Theme::default(), config.clone(), Keymap::default())
+        let mac = MacShell::new(Theme::default(), config.clone(), Keymap::default())
             .runner
             .into_app_with_proxy(None);
-        let windows = WindowsShell::new(machine(), Theme::default(), config, Keymap::default())
+        let windows = WindowsShell::new(Theme::default(), config, Keymap::default())
             .runner
             .into_app_with_proxy(None);
         assert_eq!(mac.config.appearance.backdrop, backdrop);
@@ -66,7 +60,7 @@ fn mac_and_windows_shells_preserve_supported_backdrops() {
 fn shell_runner_stores_normalized_startup_config() {
     let mut config = Config::default();
     config.appearance.backdrop = BackdropKind::Mica;
-    let app = LinuxShell::new(machine(), Theme::default(), config, Keymap::default())
+    let app = LinuxShell::new(Theme::default(), config, Keymap::default())
         .with_config_normalizer(Box::new(opaque_normalizer))
         .runner
         .into_app_with_proxy(None);
@@ -79,7 +73,7 @@ fn shell_runner_stores_normalized_startup_config() {
 fn windows_shell_stores_normalized_startup_config() {
     let mut config = Config::default();
     config.appearance.backdrop = BackdropKind::Mica;
-    let app = WindowsShell::new(machine(), Theme::default(), config, Keymap::default())
+    let app = WindowsShell::new(Theme::default(), config, Keymap::default())
         .with_config_normalizer(Box::new(opaque_normalizer))
         .runner
         .into_app_with_proxy(None);

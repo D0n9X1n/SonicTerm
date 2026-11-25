@@ -697,6 +697,14 @@ pub use settings::start_dim;
 pub use settings::GlyphAtlasStart;
 pub use settings::RendererSettings;
 
+#[path = "core_pane_colors.rs"]
+mod pane_colors;
+#[cfg(test)]
+pub(crate) use assemble_search::field_selection_colors;
+#[doc(hidden)]
+pub use pane_colors::PaneColors;
+use pane_colors::PaneColorsDigest;
+
 #[path = "core_theme.rs"]
 mod theme;
 use theme::active_cursor_color;
@@ -778,9 +786,11 @@ pub use decorations::command_status_hash;
 use decorations::emit_broadcast_borders;
 pub use decorations::emit_pane_scrollbar;
 use decorations::fold_u64_to_u32;
+use decorations::push_strikethrough_quad;
 use decorations::push_underline_quads;
 pub use decorations::selection_quad_rects;
 use decorations::splitter_rects_from_panes;
+use decorations::strikethrough_key;
 use decorations::underline_key;
 
 #[path = "core_atlas_policy.rs"]
@@ -876,7 +886,6 @@ mod assemble;
 
 #[path = "core_row_shaping.rs"]
 mod row_shaping;
-#[cfg(test)]
 use row_shaping::cell_fg;
 use row_shaping::color_to_chrome;
 #[path = "core_inline_images.rs"]
@@ -898,7 +907,12 @@ pub use backgrounds::emit_cell_bg_quads_for_row;
 pub(crate) use backgrounds::emit_row_background;
 pub(crate) use backgrounds::focus_flash_quad;
 use backgrounds::indexed;
+#[cfg(test)]
+pub(crate) use backgrounds::pane_fill_quad;
+pub(crate) use backgrounds::push_planned_pane_fills;
 pub(crate) use backgrounds::push_selection_quads;
+pub(crate) use backgrounds::recolor_copy_mode_glyphs;
+pub(crate) use backgrounds::recolor_selected_glyphs;
 pub(crate) use backgrounds::RowBackgroundGeometry;
 pub(crate) use backgrounds::RowBackgroundRow;
 pub(crate) use backgrounds::SelectionGeometry;

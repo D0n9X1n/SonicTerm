@@ -370,15 +370,37 @@ fn only_a_named_family_sets_the_font_family() {
     assert_eq!(template.font.family, DEFAULT_FONT_FAMILY);
 }
 
-/// `[terminal] osc52` defaults to `"allow"`, parses `"deny"`, and refuses any other value.
+/// `[terminal] osc52` defaults to `"allow"`, parses `"ask"` and `"deny"`, and refuses any other
+/// value.
 #[test]
-fn osc52_policy_defaults_to_allow_and_parses_deny() {
+fn osc52_policy_defaults_to_allow_and_parses_each_value() {
     use crate::config::Osc52Policy;
     assert_eq!(Config::default().terminal.osc52, Osc52Policy::Allow);
-    let parsed: Config = toml::from_str("[terminal]\nosc52 = \"deny\"\n").unwrap();
-    assert_eq!(parsed.terminal.osc52, Osc52Policy::Deny);
-    assert!(toml::from_str::<Config>("[terminal]\nosc52 = \"ask\"\n").is_err());
+    for (name, expected) in [("ask", Osc52Policy::Ask), ("deny", Osc52Policy::Deny)] {
+        let parsed: Config = toml::from_str(&format!("[terminal]\nosc52 = \"{name}\"\n")).unwrap();
+        assert_eq!(parsed.terminal.osc52, expected, "{name}");
+    }
+    assert!(toml::from_str::<Config>("[terminal]\nosc52 = \"yes\"\n").is_err());
     assert!(crate::config::default_config_template().contains("\nosc52 = \"allow\"\n"));
+}
+
+/// `[terminal] osc52_read` defaults to `"ask"`, parses each policy, refuses any other value, and
+/// the starter template names the default.
+#[test]
+fn osc52_read_policy_defaults_to_ask_and_parses_each_value() {
+    use crate::config::Osc52ReadPolicy;
+    assert_eq!(Config::default().terminal.osc52_read, Osc52ReadPolicy::Ask);
+    for (name, expected) in [
+        ("ask", Osc52ReadPolicy::Ask),
+        ("allow", Osc52ReadPolicy::Allow),
+        ("deny", Osc52ReadPolicy::Deny),
+    ] {
+        let parsed: Config =
+            toml::from_str(&format!("[terminal]\nosc52_read = \"{name}\"\n")).unwrap();
+        assert_eq!(parsed.terminal.osc52_read, expected, "{name}");
+    }
+    assert!(toml::from_str::<Config>("[terminal]\nosc52_read = \"yes\"\n").is_err());
+    assert!(crate::config::default_config_template().contains("\nosc52_read = \"ask\"\n"));
 }
 
 /// The starter template is written only into an absent file: a config that already exists,
@@ -413,4 +435,42 @@ fn macos_option_as_alt_defaults_none_and_round_trips() {
     }
     assert!(toml::from_str::<Config>("[terminal]\nmacos_option_as_alt = \"meta\"\n").is_err());
     assert!(default_config_template().contains("macos_option_as_alt = \"none\""));
+}
+
+/// `[terminal] click_to_move` defaults to `"any-prompt"`, parses `"declared"` and `"off"`, refuses
+/// any other value, and the shipped template names the default.
+#[test]
+fn click_to_move_defaults_to_any_prompt_and_parses_each_mode() {
+    use crate::config::ClickToMove;
+    assert_eq!(Config::default().terminal.click_to_move, ClickToMove::AnyPrompt);
+    for (text, mode) in [
+        ("any-prompt", ClickToMove::AnyPrompt),
+        ("declared", ClickToMove::Declared),
+        ("off", ClickToMove::Off),
+    ] {
+        let parsed: Config =
+            toml::from_str(&format!("[terminal]\nclick_to_move = \"{text}\"\n")).unwrap();
+        assert_eq!(parsed.terminal.click_to_move, mode, "{text}");
+    }
+    assert!(toml::from_str::<Config>("[terminal]\nclick_to_move = \"always\"\n").is_err());
+    assert!(crate::config::default_config_template().contains("click_to_move = \"any-prompt\""));
+}
+
+/// `clipboard_write_limit_bytes` defaults to 64 MiB, the template documents it, and values clamp
+/// to at most 512 MiB, so one program write can never stage more than that in memory.
+#[test]
+fn clipboard_write_limit_defaults_and_clamps() {
+    let defaults = Config::default();
+    assert_eq!(defaults.terminal.clipboard_write_limit_bytes, DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES);
+    assert_eq!(DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES, 64 * 1024 * 1024);
+    assert!(default_config_template().contains("clipboard_write_limit_bytes = 67108864"));
+    let unset: Config = toml::from_str("[terminal]\nosc52 = \"allow\"\n").unwrap();
+    assert_eq!(unset.terminal.effective_clipboard_write_limit_bytes(), 64 * 1024 * 1024);
+    for (configured, effective) in [(0, 0), (1024, 1024), (usize::MAX, 512 * 1024 * 1024)] {
+        let cfg: Config =
+            toml::from_str(&format!("[terminal]\nclipboard_write_limit_bytes = {configured}\n"))
+                .unwrap();
+        assert_eq!(cfg.terminal.effective_clipboard_write_limit_bytes(), effective);
+    }
+    assert_eq!(MAX_CLIPBOARD_WRITE_LIMIT_BYTES, 512 * 1024 * 1024);
 }

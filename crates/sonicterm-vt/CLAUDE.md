@@ -9,6 +9,11 @@ grid through the terminal model.
 - `vt.rs` - parser, control sequence handling, terminal state mutation.
 - `vt/staging.rs` - media-capture staging pools (`CaptureStagingPool`) and
   per-capture reservations.
+- `vt_kitty_clipboard.rs` - OSC 5522 metadata grammar (strict Base64 fields, Ghostty's bounds,
+  sanitized ids, overflow classification from complete metadata only), status replies, and the
+  raw collector that holds one whole `5522;` packet (1 MiB wire cap) until BEL/ST, queues a valid
+  payload in `kitty_clipboard_inbox` and raises a payload-free `VtEvent::KittyClipboard`. It
+  decides no policy.
 - `lib.rs` - public exports.
 
 ## Local gate
@@ -22,8 +27,9 @@ cargo test -p sonicterm-vt
   background, inverse, underline, or hyperlink data.
 - Parser changes affect rendering and input semantics; add targeted tests
   for escape-sequence regressions.
-- Keep PTY writes outside parser/grid locks. OSC 52 remains a typed host event;
-  native clipboard policy and decoding belong above the parser.
+- Keep PTY writes outside parser/grid locks. OSC 52 streams its encoded payload into the
+  `ClipboardInbox` and raises payload-free `ClipboardStream` events; native clipboard policy,
+  reads, consent and decoding belong above the parser.
 - Preserve OSC 7 authority separately from its decoded path. Tab titles may use
   the permissive path, but relative local-path authorization must use the strict
   host-aware snapshot.
@@ -47,6 +53,11 @@ cargo test -p sonicterm-vt
   never cut and run. Keep `live_capture_count` at most one, count the APC and the open
   transfer in `retained_amount` and `capture_progress`, end an open upload before a Sixel or
   iTerm2 capture reserves, and never read a file, temporary file or shared-memory medium.
+- OSC 133 annotations (L/N/P/I, A options) and OSC 9;12 pass `admit_annotation`, which never
+  latches, and update only the per-screen semantic state, never prompt regions; a fresh line's
+  physical scroll can rebase or evict marks on a full-screen upward scroll, or invalidate MCP
+  input proof when a partial margin moves marked rows after B has arrived. Scrolling before the
+  first B does not invalidate that later marker. Neither directly changes a pinned run.
 - `cancel_capture` is called by the host on a stalled transfer, and the
   sender is never told. It must leave the parser swallowing the remaining
   payload rather than returning to ground — a payload is printable ASCII

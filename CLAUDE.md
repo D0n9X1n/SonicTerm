@@ -95,7 +95,6 @@ by default and the CI workflows are first-party files worth finding.
 | `sonicterm-render-model` | Renderer-agnostic frame data. |
 | `sonicterm-ui` | Tabs, palette, search, selection, IME. |
 | `sonicterm-gpu` | wgpu renderer. |
-| `sonicterm-app-core` | Winit-independent reducer/state. |
 | `sonicterm-app` | Cross-platform app orchestration, path probes, and native direct-open. |
 | `sonicterm-mac` | macOS binary/glue. |
 | `sonicterm-windows` | Windows binary/glue. |
@@ -166,6 +165,7 @@ python3 scripts/local-gate.py
 | `macos-logic-coverage` | `scripts/macos-logic-coverage.sh` | macOS | `local` | `rust`, `llvm-cov` | `macos-core` |
 | `colr-tests` | `cargo test --locked -p sonicterm-font --lib colr_` | Linux | `local` | `rust`, `native` | `tooling` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`, `native`, `warp` | `windows-tests-runtime` |
+| `windows-conpty-forms` | `cargo test --locked -p sonicterm-io -p sonicterm-app --test windows_conpty_protocol_forms --test windows_conpty_app_smoke -- --ignored --nocapture` | Windows | `local` | `rust`, `native`, `network` | `windows-tests-runtime` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests-workspace` |
 | `windows-perf-build` | `cargo build --locked -p sonicterm-app --example perf_scenarios` | Windows | `local` | `rust`, `native` | `windows-tests-runtime` |
 | `windows-perf-smoke` | `python scripts/perf-compare.py --smoke` | Windows | `local` | `rust`, `native` | `windows-tests-runtime` |
@@ -196,7 +196,7 @@ Needs:
 - `pwsh`: PowerShell 7 (`pwsh`) on `PATH`.
 - `llvm-cov`: `cargo-llvm-cov` at the version `scripts/pinned-tools.json` pins.
 - `cargo-deny`: `cargo-deny` at the version `scripts/pinned-tools.json` pins, and network access for its advisory database.
-- `network`: network access to the pinned upstream archives `scripts/native-dependencies.json` lists.
+- `network`: network access to the pinned upstream archives `scripts/native-dependencies.json` and `scripts/windows-conpty.json` list.
 - `win-target`: the `x86_64-pc-windows-msvc` standard library (`rustup target add x86_64-pc-windows-msvc`).
 - `warp`: a DX12 WARP adapter with allocator reporting.
 - Every step also needs Git and Python 3 on `PATH`.
@@ -267,7 +267,7 @@ force removal or discard dirty, unmerged, or locked worktrees or any stash.
 Before trusting a green run:
 
 - `rust-logic-coverage.sh` gates a deterministic-logic subset at 80% and skips
-  9 of the 24 crates outright, including `sonicterm-app` and `sonicterm-gpu`, so
+  9 of the 23 crates outright, including `sonicterm-app` and `sonicterm-gpu`, so
   a passing subset figure says nothing about code in those crates. The per-crate
   floor in `scripts/coverage-baseline.json` catches regressions, not low coverage.
   CI measures it on Linux (`linux-coverage`), so those floors do not measure

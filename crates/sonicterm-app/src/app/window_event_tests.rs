@@ -10,6 +10,8 @@ pub(super) use crate::app::{child_window::child_no_button_motion_report, hovered
 use sonicterm_cfg::config::ScrollbarMode;
 pub(super) use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 pub(super) use sonicterm_ui::pane::SplitAxis;
+#[cfg(windows)]
+use sonicterm_vt::vt::MouseFormat;
 pub(super) use winit::keyboard::KeyCode;
 #[cfg(windows)]
 use winit::keyboard::ModifiersState;
@@ -40,7 +42,7 @@ pub(super) const CHILD_SOURCES: &str = concat!(
 );
 
 pub(super) fn pointer_cell(pane_id: u64, row: u16, col: u16) -> PointerCell {
-    PointerCell { pane_id, row, col }
+    PointerCell { pane_id, row, col, pixel: (0, 0) }
 }
 
 #[cfg(windows)]
@@ -161,13 +163,7 @@ pub(super) fn run_readonly_native_matrix(event_loop: &winit::event_loop::ActiveE
                     } else if tracked {
                         vec![(
                             pane_id,
-                            wheel_report_bytes(
-                                true,
-                                true,
-                                u32::from(cell.2) + 1,
-                                u32::from(cell.1) + 1,
-                                3,
-                            ),
+                            wheel_report_bytes(MouseFormat::Sgr, true, (cell.1, cell.2), (0, 0), 3),
                         )]
                     } else {
                         vec![(pane_id, b"\x1b[A\x1b[A\x1b[A".to_vec())]
@@ -202,11 +198,12 @@ pub(super) fn run_readonly_native_matrix(event_loop: &winit::event_loop::ActiveE
                             vec![(
                                 pane_id,
                                 pointer_report_bytes(
-                                    true,
+                                    MouseFormat::Sgr,
                                     PointerReportKind::NoButtonMotion,
                                     ModifiersState::empty(),
                                     cell.1,
                                     cell.2,
+                                    (0, 0),
                                 ),
                             )]
                         },
@@ -231,11 +228,12 @@ pub(super) fn run_readonly_native_matrix(event_loop: &winit::event_loop::ActiveE
                             vec![(
                                 pane_id,
                                 pointer_report_bytes(
-                                    true,
+                                    MouseFormat::Sgr,
                                     PointerReportKind::LeftPress,
                                     ModifiersState::empty(),
                                     cell.1,
                                     cell.2,
+                                    (0, 0),
                                 ),
                             )]
                         }

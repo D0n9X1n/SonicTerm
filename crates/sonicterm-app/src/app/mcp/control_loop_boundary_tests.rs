@@ -1,8 +1,9 @@
 //! Pins the control tools at their boundaries with the rest of the app, through the real tool and
 //! loop paths: every control tool refuses out of scope or in READONLY without writing or changing
 //! topology, queued input refuses a run, only typing stamps the pane, an agent closing a child
-//! window's last tab reaps that window, and a helper created with argv is held after a real exit
-//! that `wait_for` reports.
+//! window's last tab reaps that window, a helper created with argv is held after a real exit
+//! that `wait_for` reports, `list_panes` titles respect the read scope and one reply budget, and
+//! a whole `list_panes` result stays inside its bound.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,11 +55,25 @@ fn call_through_loop(
     shared: &Arc<McpShared>,
     name: &str,
     arguments: Value,
+    tick: impl FnMut(&mut App),
+) -> Value {
+    call_through_loop_within(app, shared, name, arguments, None, tick)
+}
+
+/// [`call_through_loop`], with the worker's `list_panes` whole-result bound set to `limit_bytes`
+/// when given, so a few panes can reach it.
+fn call_through_loop_within(
+    app: &mut App,
+    shared: &Arc<McpShared>,
+    name: &str,
+    arguments: Value,
+    limit_bytes: Option<usize>,
     mut tick: impl FnMut(&mut App),
 ) -> Value {
     let worker_shared = Arc::clone(shared);
     let params = json!({ "name": name, "arguments": arguments });
     let worker = std::thread::spawn(move || {
+        crate::app::mcp::reply_budget::REPLY_LIMIT_OVERRIDE.set(limit_bytes);
         let scope = CallScope::admit(&worker_shared, &Arc::new(AtomicBool::new(false)));
         let caller = Caller { self_pane: None, client: None, initialized: true };
         tools_read::call(&worker_shared, &caller, &params, &scope)
@@ -290,4 +305,370 @@ fn a_helper_with_argv_is_held_after_its_real_exit() {
     assert_eq!(waited["structuredContent"]["reason"], "exited", "{waited}");
     assert_eq!(waited["structuredContent"]["exit_code"], 0);
     assert!(app.main().unwrap().panes.contains_key(&helper), "a held pane stays after code 0");
+}
+
+/// Refresh tab `tab_index`'s label from its active pane, as the redraw does for the visible tab.
+fn refresh_label(app: &mut App, tab_index: usize) {
+    let window = app.main_mut().unwrap();
+    window.tabs.activate(tab_index);
+    let source = window.tab_states[tab_index].active_pane;
+    let crate::app::WindowState { tabs, panes, .. } = window;
+    let parser = panes[&source].parser.lock();
+    crate::app::refresh_active_tab_title(tabs, source, &panes[&source], &parser, tab_index);
+}
+
+/// Split tab 0's active pane to the right with a seeded pane that runs no program, and focus it as
+/// a split does; the new pane's id. A real split starts a shell whose own title sequences (an OSC 0
+/// from ConPTY or the shell's prompt) would race the test's writes into the parser.
+fn split_quiet(app: &mut App) -> u64 {
+    let pane_id = crate::app::next_pane_id();
+    let parser =
+        Arc::new(parking_lot::Mutex::new(sonicterm_vt::vt::Parser::new_with_staging_pool(
+            sonicterm_grid::grid::Grid::new(80, 24),
+            None,
+            Arc::clone(&app.capture_staging_pool),
+        )));
+    let pane = crate::app::PaneState::new_with_media_pool(parser, None, &app.inline_media_pool);
+    let window = app.main_mut().unwrap();
+    let tab = &mut window.tab_states[0];
+    assert!(tab.tree.split(tab.active_pane, sonicterm_cfg::keymap::Direction::Right, pane_id));
+    tab.active_pane = pane_id;
+    window.panes.attach_new(pane_id, pane);
+    pane_id
+}
+
+/// The listed pane with `pane_id` in a `list_panes` result.
+fn listed(result: &Value, pane_id: u64) -> Value {
+    let wanted = pane_id.to_string();
+    let panes = result["structuredContent"]["panes"].as_array().expect("panes");
+    panes.iter().find(|pane| pane["pane_id"] == wanted.as_str()).expect("listed").clone()
+}
+
+/// Under `read = "agent"`, a tab label taken from a pane the caller may not read is withheld, with
+/// an explicit marker, from every pane of the tab, even a readable agent split beside it; once the
+/// agent's own pane is the label's source, the label is listed.
+#[test]
+fn list_panes_withholds_a_tab_label_from_an_unreadable_pane() {
+    let mut app = app();
+    let user = app.__test_seed_tab("user");
+    let agent = split_quiet(&mut app);
+    let window = app.main_mut().unwrap();
+    // No pane runs a program, so only this test writes either parser and no title can race it.
+    assert!(window.panes.values().all(|pane| pane.pty.is_none()), "a pane has a live shell");
+    window.panes.get_mut(&agent).unwrap().creator =
+        crate::app::mcp::agents::PaneOwner::agent_if(true);
+    window.panes[&user].parser.lock().advance(b"\x1b]1;user-secret\x07");
+    window.panes[&agent].parser.lock().advance(b"\x1b]1;agent-name\x07");
+    // The user's pane is active, so the tab shows the user's OSC 1 name.
+    window.tab_states[0].active_pane = user;
+    refresh_label(&mut app, 0);
+    let shared = install(&mut app, McpControl::Agent);
+    shared.set_read(sonicterm_cfg::config::McpRead::Agent);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    let panes = result["structuredContent"]["panes"].as_array().unwrap();
+    assert_eq!(panes.len(), 1, "only the agent's pane is readable: {result}");
+    let pane = listed(&result, agent);
+    assert_eq!(pane["tab_title"], Value::Null);
+    assert_eq!(pane["omitted"]["tab_title"], "unreadable");
+    assert_eq!(pane["icon_title"], "agent-name", "the pane's own name is readable");
+    assert!(!result.to_string().contains("user-secret"), "the user's label leaked: {result}");
+    // The agent's own pane becomes the source: the label it gives is listed.
+    app.main_mut().unwrap().tab_states[0].active_pane = agent;
+    refresh_label(&mut app, 0);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    let pane = listed(&result, agent);
+    assert!(pane["tab_title"].as_str().is_some_and(|label| label.ends_with("agent-name")));
+    assert_eq!(pane["omitted"], Value::Null, "nothing was omitted: {pane}");
+}
+
+/// Many panes with maximal titles cannot push a `list_panes` reply toward the bridge's 1 MiB line
+/// limit: the title fields share one byte budget per reply, a field past it is `null` with an
+/// explicit `"budget"` marker, the reply still succeeds and is `partial`, and the first panes keep
+/// their titles.
+#[test]
+fn list_panes_bounds_every_title_by_one_reply_budget() {
+    // The bridge's relay line limit (`sonicterm_mcp::relay::MAX_LINE_BYTES`).
+    const RELAY_LINE_BYTES: usize = 1 << 20;
+    let mut app = app();
+    let name = "n".repeat(16 * 1024);
+    let mut panes = Vec::new();
+    for tab_index in 0..24 {
+        let pane_id = app.__test_seed_tab("tab");
+        let window = app.main_mut().unwrap();
+        let sequence = format!("\x1b]1;{name}\x07\x1b]2;{name}\x07");
+        window.panes[&pane_id].parser.lock().advance(sequence.as_bytes());
+        refresh_label(&mut app, tab_index);
+        panes.push(pane_id);
+    }
+    let shared = install(&mut app, McpControl::Agent);
+    shared.set_read(sonicterm_cfg::config::McpRead::Any);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    assert_eq!(result["isError"], false);
+    let wire_bytes = result.to_string().len();
+    assert!(wire_bytes < RELAY_LINE_BYTES / 2, "the reply took {wire_bytes} bytes");
+    let first = listed(&result, panes[0]);
+    assert_eq!(first["icon_title"], name.as_str(), "the first pane keeps its name");
+    assert_eq!(first["title"], name.as_str());
+    let last = listed(&result, panes[23]);
+    assert_eq!(last["title"], Value::Null);
+    assert_eq!(last["omitted"]["title"], "budget", "{}", last["omitted"]);
+    assert_eq!(last["omitted"]["icon_title"], "budget");
+    assert_eq!(last["omitted"]["tab_title"], "budget");
+    // Every pane is listed, so only the budget omission makes the result partial.
+    assert_eq!(result["structuredContent"]["truncated_panes"], 0);
+    assert_eq!(result["structuredContent"]["partial"], true, "a title omission is partial");
+}
+
+/// A pane's OSC 1337 user variables as `list_panes` lists them: `(name, value)` pairs in order.
+fn listed_user_vars(pane: &Value) -> Vec<(String, String)> {
+    let entries = pane["user_vars"].as_array().expect("user_vars is a list");
+    let field = |entry: &Value, key: &str| entry[key].as_str().expect("a string").to_owned();
+    entries.iter().map(|entry| (field(entry, "name"), field(entry, "value"))).collect()
+}
+
+/// Under `read = "agent"`, `list_panes` carries each readable pane's user variables in the order
+/// they were set, through the real tool and loop paths; a pane the caller may not read is not
+/// listed, and none of its names or values reach the reply.
+#[test]
+fn list_panes_lists_readable_user_vars_in_insertion_order() {
+    let mut app = app();
+    let user = app.__test_seed_tab("user");
+    app.__test_set_main_pane_viewport(
+        sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+        10.0,
+        10.0,
+    );
+    app.__test_split_active_right();
+    let window = app.main_mut().unwrap();
+    let agent = window.tab_states[0].active_pane;
+    window.panes.get_mut(&agent).unwrap().creator =
+        crate::app::mcp::agents::PaneOwner::agent_if(true);
+    // `user-secret` in base64, so only a leak of the decoded value could put it in the reply.
+    window.panes[&user].parser.lock().advance(b"\x1b]1337;SetUserVar=private=dXNlci1zZWNyZXQ=\x07");
+    // `zeta` is set before `alpha`, so a sorted listing would differ from insertion order.
+    window.panes[&agent]
+        .parser
+        .lock()
+        .advance(b"\x1b]1337;SetUserVar=zeta=MQ==;SetUserVar=alpha=Mg==\x07");
+    let shared = install(&mut app, McpControl::Agent);
+    shared.set_read(sonicterm_cfg::config::McpRead::Agent);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    let panes = result["structuredContent"]["panes"].as_array().unwrap();
+    assert_eq!(panes.len(), 1, "only the agent's pane is readable: {result}");
+    let pane = listed(&result, agent);
+    let expected = [("zeta", "1"), ("alpha", "2")].map(|(name, value)| (name.into(), value.into()));
+    assert_eq!(listed_user_vars(&pane), expected);
+    let wire = result.to_string();
+    assert!(!wire.contains("private") && !wire.contains("user-secret"), "leaked: {wire}");
+}
+
+/// Many panes with full user-variable stores share the one reply budget with the titles: later
+/// panes list `user_vars` as `null` with a `"budget"` marker, never a cut list, the first pane
+/// keeps its whole list, the omission makes the reply `partial`, and the reply stays well inside
+/// the bridge's line limit.
+#[test]
+fn list_panes_bounds_user_vars_by_the_reply_budget() {
+    // The bridge's relay line limit (`sonicterm_mcp::relay::MAX_LINE_BYTES`).
+    const RELAY_LINE_BYTES: usize = 1 << 20;
+    use base64::Engine;
+    let mut app = app();
+    let value = base64::engine::general_purpose::STANDARD.encode([b'v'; 4000]);
+    // Four 4002-byte variables fill most of a pane's 16 KiB store.
+    let records: Vec<String> = (0..4).map(|index| format!("SetUserVar=n{index}={value}")).collect();
+    let sequence = format!("\x1b]1337;{}\x07", records.join(";"));
+    let mut panes = Vec::new();
+    for _ in 0..20 {
+        let pane_id = app.__test_seed_tab("tab");
+        let window = app.main_mut().unwrap();
+        window.panes[&pane_id].parser.lock().advance(sequence.as_bytes());
+        panes.push(pane_id);
+    }
+    let shared = install(&mut app, McpControl::Agent);
+    shared.set_read(sonicterm_cfg::config::McpRead::Any);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    assert_eq!(result["isError"], false);
+    let wire_bytes = result.to_string().len();
+    assert!(wire_bytes < RELAY_LINE_BYTES / 2, "the reply took {wire_bytes} bytes");
+    let first = listed(&result, panes[0]);
+    assert_eq!(listed_user_vars(&first).len(), 4, "the first pane keeps its whole list");
+    let last = listed(&result, panes[19]);
+    assert_eq!(last["user_vars"], Value::Null);
+    assert_eq!(last["omitted"]["user_vars"], "budget", "{}", last["omitted"]);
+    assert_eq!(result["structuredContent"]["truncated_panes"], 0);
+    assert_eq!(result["structuredContent"]["partial"], true, "a user_vars omission is partial");
+}
+
+/// Through the real tool and loop paths under `read = "agent"`, `list_panes` lists a readable
+/// pane's OSC 7501 status as typed metadata only (`program_state` and `program_status` records
+/// with state, kind and progress); its id, app, title and message appear only after the user's
+/// `program_status_text` opt-in, and an unreadable pane's status never reaches the reply.
+#[test]
+fn list_panes_lists_typed_program_status_and_text_only_on_opt_in() {
+    use base64::Engine;
+    let encode = |text: &str| base64::engine::general_purpose::STANDARD.encode(text);
+    let mut app = app();
+    let user = app.__test_seed_tab("user");
+    app.__test_set_main_pane_viewport(
+        sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+        10.0,
+        10.0,
+    );
+    app.__test_split_active_right();
+    let window = app.main_mut().unwrap();
+    let agent = window.tab_states[0].active_pane;
+    window.panes.get_mut(&agent).unwrap().creator =
+        crate::app::mcp::agents::PaneOwner::agent_if(true);
+    let private = format!("\x1b]7501;app=userapp:state=error:msg={}\x07", encode("user-secret"));
+    window.panes[&user].parser.lock().advance(private.as_bytes());
+    let report = format!(
+        "\x1b]7501;id=job:app=claude-code:state=blocked:kind=permission:progress=30:title={}:msg={}\x07",
+        encode("Approve?"),
+        encode("agent-message")
+    );
+    window.panes[&agent].parser.lock().advance(report.as_bytes());
+    let shared = install(&mut app, McpControl::Agent);
+    shared.set_read(sonicterm_cfg::config::McpRead::Agent);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    let pane = listed(&result, agent);
+    assert_eq!(pane["program_state"], "blocked");
+    assert_eq!(
+        pane["program_status"],
+        json!([{ "state": "blocked", "kind": "permission", "progress": 30 }])
+    );
+    let wire = result.to_string();
+    for hidden in ["job", "claude-code", "Approve?", "agent-message", "userapp", "user-secret"] {
+        assert!(!wire.contains(hidden), "{hidden} leaked without the opt-in: {wire}");
+    }
+    shared.set_program_status_text(true);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    let pane = listed(&result, agent);
+    assert_eq!(
+        pane["program_status"],
+        json!([{
+            "state": "blocked", "kind": "permission", "progress": 30,
+            "id": "job", "app": "claude-code", "title": "Approve?", "msg": "agent-message"
+        }])
+    );
+    let wire = result.to_string();
+    assert!(!wire.contains("userapp") && !wire.contains("user-secret"), "leaked: {wire}");
+    // An unreadable pane is filtered by scope, not omitted by a budget, so nothing is partial.
+    assert_eq!(result["structuredContent"]["partial"], false);
+}
+
+/// Opted-in status lists have their own 64 KiB sublimit inside the shared reply budget: once the
+/// lists listed so far fill it, a later pane keeps every record's typed state, kind and progress
+/// and drops only the free text, with a `"budget"` marker, never a cut list, while the shared
+/// budget still lists its title and its lightweight `program_state`, and the omission makes the
+/// whole result `partial`.
+#[test]
+fn list_panes_bounds_program_status_by_its_own_sublimit() {
+    use base64::Engine;
+    // Each quote serializes as two bytes, so one record's message costs about 4 KiB on the wire
+    // and eight of them about 33 KiB: one pane's list fits the 64 KiB sublimit, two do not, and
+    // twelve lists together stay far below the shared 256 KiB budget.
+    let msg = base64::engine::general_purpose::STANDARD.encode([b'"'; 2048]);
+    let sequence: String =
+        (0..8).map(|index| format!("\x1b]7501;id=r{index}:state=working:msg={msg}\x07")).collect();
+    let mut app = app();
+    let mut panes = Vec::new();
+    for _ in 0..12 {
+        let pane_id = app.__test_seed_tab("tab");
+        let window = app.main_mut().unwrap();
+        let mut parser = window.panes[&pane_id].parser.lock();
+        parser.advance(sequence.as_bytes());
+        parser.advance(b"\x1b]2;job\x07");
+        drop(parser);
+        panes.push(pane_id);
+    }
+    let shared = install(&mut app, McpControl::Agent);
+    shared.set_read(sonicterm_cfg::config::McpRead::Any);
+    shared.set_program_status_text(true);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    assert_eq!(result["isError"], false);
+    let first = listed(&result, panes[0]);
+    assert_eq!(first["program_status"].as_array().map(Vec::len), Some(8), "kept whole");
+    let second = listed(&result, panes[1]);
+    let typed = second["program_status"].as_array().expect("the typed records stay");
+    assert_eq!(typed.len(), 8, "past the sublimit every record stays");
+    assert!(typed.iter().all(|record| record["state"] == "working" && record.get("msg").is_none()));
+    assert_eq!(second["omitted"]["program_status"], "budget", "the dropped text is marked");
+    assert_eq!(second["program_state"], "working", "the lightweight state stays");
+    let last = listed(&result, panes[11]);
+    assert_eq!(last["title"], "job", "the shared budget is not spent by the status lists");
+    assert_eq!(last["omitted"]["program_status"], "budget");
+    assert_eq!(result["structuredContent"]["truncated_panes"], 0);
+    assert_eq!(result["structuredContent"]["partial"], true, "a status omission is partial");
+}
+
+/// Many panes with long OSC 7 directories share the one reply budget with the titles, so the
+/// complete JSON-RPC response line stays below the bridge's 1 MiB limit instead of closing the
+/// connection: later panes list `cwd` as `null` with a `"budget"` marker, the first keeps its own,
+/// and the omission makes the reply `partial`.
+#[test]
+fn list_panes_charges_every_cwd_to_the_reply_budget() {
+    use crate::app::mcp::jsonrpc::{response, MAX_LINE_BYTES};
+    let mut app = app();
+    // Each directory serializes to about 14 KiB, so 80 of them would pass 1 MiB on their own.
+    let directory = format!("/{}", "d".repeat(14 * 1024));
+    let mut panes = Vec::new();
+    for _ in 0..80 {
+        let pane_id = app.__test_seed_tab("tab");
+        let window = app.main_mut().unwrap();
+        let sequence = format!("\x1b]7;file://{directory}\x07");
+        window.panes[&pane_id].parser.lock().advance(sequence.as_bytes());
+        panes.push(pane_id);
+    }
+    let shared = install(&mut app, McpControl::Agent);
+    shared.set_read(sonicterm_cfg::config::McpRead::Any);
+    let result = call_through_loop(&mut app, &shared, "list_panes", json!({}), |_| {});
+    assert_eq!(result["isError"], false);
+    let line_bytes = response(&json!(1), result.clone()).len();
+    assert!(line_bytes < MAX_LINE_BYTES, "the response line took {line_bytes} bytes");
+    let first = listed(&result, panes[0]);
+    assert_eq!(first["cwd"], directory.as_str(), "the first pane keeps its directory");
+    let last = listed(&result, panes[79]);
+    assert_eq!(last["cwd"], Value::Null);
+    assert_eq!(last["omitted"]["cwd"], "budget", "{}", last["omitted"]);
+    assert_eq!(result["structuredContent"]["truncated_panes"], 0);
+    assert_eq!(result["structuredContent"]["partial"], true, "a cwd omission is partial");
+}
+
+/// The whole `list_panes` result, fixed fields and every pane record, stays within its bound:
+/// once the next pane would cross it, no later pane is listed, the result is `partial` and
+/// `truncated_panes` counts the panes left out, so no reply reaches the bridge's line limit.
+#[test]
+fn list_panes_stops_listing_at_the_whole_result_bound() {
+    const LIMIT_BYTES: usize = 8 * 1024;
+    let mut app = app();
+    let mut panes = Vec::new();
+    for _ in 0..40 {
+        let pane_id = app.__test_seed_tab("tab");
+        let window = app.main_mut().unwrap();
+        window.panes[&pane_id].parser.lock().advance(b"\x1b]7;file:///tmp/work\x07\x1b]2;job\x07");
+        panes.push(pane_id);
+    }
+    let shared = install(&mut app, McpControl::Agent);
+    shared.set_read(sonicterm_cfg::config::McpRead::Any);
+    let result = call_through_loop_within(
+        &mut app,
+        &shared,
+        "list_panes",
+        json!({}),
+        Some(LIMIT_BYTES),
+        |_| {},
+    );
+    assert_eq!(result["isError"], false);
+    let wire_bytes = result.to_string().len();
+    assert!(wire_bytes <= LIMIT_BYTES, "the result took {wire_bytes} bytes");
+    let structured = &result["structuredContent"];
+    let listed_panes = structured["panes"].as_array().expect("panes");
+    let truncated = structured["truncated_panes"].as_u64().expect("truncated_panes");
+    assert!(truncated > 0 && !listed_panes.is_empty(), "{structured}");
+    assert_eq!(listed_panes.len() as u64 + truncated, 40, "every pane is listed or counted");
+    assert_eq!(structured["partial"], true);
+    // The panes listed are the first ones, in order: the cut drops only the tail.
+    let listed_ids: Vec<&str> =
+        listed_panes.iter().filter_map(|pane| pane["pane_id"].as_str()).collect();
+    let expected: Vec<String> = panes[..listed_panes.len()].iter().map(u64::to_string).collect();
+    assert_eq!(listed_ids, expected);
 }

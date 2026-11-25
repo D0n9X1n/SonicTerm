@@ -19,6 +19,7 @@ This page explains what those figures count; protocol and atlas details are in
 | OSC 0/2/7/8 raw collector | 16 KiB whole payload | reject oversized input; report retained capacity, without incrementing media-capture count |
 | Media payload | 16 MiB per transfer | refuse rather than truncate or partially render |
 | Media capture staging | 64 MiB process-wide; 4 MiB floor; 13 concurrent floor reservations guaranteed | refuse an unstaged capture; cancel after two unchanged 30 s progress samples |
+| Program metadata | 32 OSC 7501 status records and 64 OSC 1337 user variables (16 KiB of names and values) per pane; `MAX_PROGRAM_METADATA_BYTES` bounds their owned heap, vector capacity and string capacity included | evict the least recently reported record or the oldest variable; persistent, so a capture cancel never releases or reports it |
 | Decoded inline images | 64 MiB and 128 images per pane (a kitty image's placements share one buffer and count once); 256 MiB process target divided across live panes; 4 MiB minimum and newest image retained | discard oldest images; a process under pressure may retain at most one 4 MiB newest-image residual per live pane beyond the target until the idle-pane pass converges |
 | Encoded image dimensions | pixels ≤ 2,048² and declared width/height ≤ 8,192; a larger image inside the budget is downscaled to 1,024 px on its long side | reject before decode |
 | Rendered image dimensions | width/height ≤ 1,024; BGRA8 ≤ 4 MiB | resize iTerm2/kitty images; Sixel decodes into a buffer sized to the painted extent, clipped at 1,024 |
@@ -168,7 +169,8 @@ Each `AppPane` owner does have one committed-byte tripwire. The typed
 `pane_seam_cap_terms()` inventory contains every charged pane class exactly
 once. Because visible, history, and saved-primary cells share one grid bound,
 `GridVisible` carries that cap while `GridHistory` and `GridAlternate` carry
-zero. `ParserCapture` carries both parser caps, and PTY input carries its queue
+zero. `ParserCapture` carries both parser caps, `ProtocolMetadata` carries the
+hyperlink registry cap plus `MAX_PROGRAM_METADATA_BYTES`, and PTY input carries its queue
 cap once:
 
 ```text
@@ -188,7 +190,7 @@ are observational, not a globally linearizable total.
 
 ### What is counted
 
-One pane report contains eight disjoint seams:
+One pane report contains nine disjoint seams:
 
 | Field | Owned memory |
 | --- | --- |
@@ -200,6 +202,7 @@ One pane report contains eight disjoint seams:
 | `inline_media_bytes` | decoded image pixels retained by the pane |
 | `pty_output_bytes` | ring memory pinned by queued PTY output |
 | `pty_input_bytes` | input-side memory: queued input vectors, the message the writer is writing, and the reply spool's resident ring (spilled replies are on disk and not counted) |
+| `program_metadata_bytes` | OSC 7501 program-status records and OSC 1337 user variables: vector capacity, each record's shared block and every string's capacity. Persistent pane state, charged to `ProtocolMetadata` with the hyperlinks; `parser_bytes` excludes it, so a stalled-capture cancel releases and logs only capture bytes |
 
 `total_bytes` is their sum. `largest_seam` names the largest part. A
 `session retention` line sums the same fields across sampled panes.
@@ -222,6 +225,50 @@ connection holds at that moment (partial request lines, the running call's
 arguments and replies being written) with one item per live connection. Both are bounded: `[mcp] max_connections` connections (4 by default, at most 16),
 and a request line of at most 1 MiB. Stopping the server releases the charge and
 closes the owner. No pane carries this class.
+
+OSC 52, OSC 1337 `Copy=:` and OSC 5522 writes reserve every buffer before allocating it from one
+process-wide clipboard staging budget of `max(128 MiB, 2 × clipboard_write_limit_bytes)` at
+startup: the decoded bytes, the Windows U+FFFD expansion of a non-UTF-8 payload, and one native copy
+per destination (`CF_UNICODETEXT` on Windows, the UTF-8 length elsewhere; an arboard `cp` write on Linux
+reserves two, because CLIPBOARD and PRIMARY keep separate copies). An OSC 5522 commit of several types
+reserves fixed capacities for planning before allocating the tables. The lease stays charged through
+alias disposal and retains the actual capacities of both output vectors, each kept buffer and
+one native copy per type before the job is posted: on
+Windows the `CF_UNICODETEXT` block (two bytes per UTF-8 byte and a terminator), the CF_HTML block
+with its header and wrapper (and the transient header string), `PNG` and custom blocks at their
+size, and a `CF_HDROP` list with space for the decoded strings, their descriptors and the final UTF-16 block. URI preflight scans borrowed lines without allocation, with a limit of 256 items. On macOS each URI list reserves four times its byte length plus 4 KiB per item for pasteboard staging; this is an allowance for native objects, not a measurement of AppKit heap usage. X11 reserves the
+atom and buffer-index tables, the format-32 property buffer and eight INCR cursors before staging.
+Text targets and aliases share the staged bytes, except that a non-ASCII `STRING` uses the reserved text copy for Latin-1; INCR sends slices rather than allocating chunk
+buffers. The owner keeps the lease after publication. Losing a selection stops admission there;
+the lease is released after the last selection is lost and admitted readers finish or time out
+(five seconds per chunk), or when the still-owned offer expires after one hour. A commit the budget cannot
+cover answers `EBUSY`. Each retention pass charges what
+live leases hold, as `ClipboardStaging`, to the tracking-only process owner, with one item per
+posted program write (at most 8), so a large write never trips a pane backstop. Apart from the X11 owner, a lease is
+released or split when the native clipboard call returns; on Linux and Windows that call runs on the
+clipboard worker, so the lease moves into the worker's job. On Linux each selection keeps its own
+share covering arboard's copy, charged until arboard synchronously replaces it on a later write to that selection, or the application exits. Clearing CLIPBOARD only relinquishes ownership; it does not release this charge. A nonempty CLIPBOARD-only write replaces only CLIPBOARD's share. When one
+selection refuses a write, the other's share is still kept; when a native call fails after it may
+have stored the text, the larger of the old and new shares stays charged.
+A Windows write armed for reassertion keeps its lease, plus its snapshot of the replaced value
+(at most 512 KiB, reserved before the read), until the reassertion runs or a newer job cancels
+it. A write the budget cannot cover is refused busy.
+
+OSC 52 clipboard reads reserve from their own 64 MiB reply budget before the native read starts:
+the largest raw text one destination may return (8 MiB, or 4 MiB per destination for `cp`) plus
+its largest reply, and for `cp` two more replies, because appending the second reply can move the
+first while the second destination's text is alive. Conversions to UTF-8 are built into a buffer
+reserved at the measured length, and an X11 property's value moves into the text. Once the replies are built the reservation shrinks to them, and it
+is released when the PTY writer has written them and freed their bytes, or when they are dropped. A read the budget
+cannot cover is answered empty. An OSC 5522 read job reserves 21 MiB from the same budget: the
+reply built so far plus, for the type being read, its 8 MiB of raw bytes and the larger of their
+conversion (8 MiB) and the reply regrown to at most 12 MiB. Types are read one at a time, and
+another is read only while the reply so far leaves that much of the reservation, so at most three
+jobs run at once and a
+fourth answers `EBUSY`. The retention pass adds these bytes to the same
+`ClipboardStaging` charge. At most 8 reads hold tickets at once, one per pane; a read whose
+reader is past its deadline keeps its reservation until its native call returns. On macOS the
+pasteboard's own copy of the value is AppKit's and is not counted.
 
 A `memory snapshot` line taken for a perf checkpoint carries the same fields plus
 four tags: `checkpoint_index`, `checkpoint_label`, `checkpoint_attempt`, and
@@ -272,14 +319,14 @@ Renderer memory is separate because it is window-owned rather than pane-owned:
   no fixed ceiling, because it follows the frame's vertex count;
 - `frame_scratch_bytes` / `frame_scratch_items`: the renderer's `FrameScratch`
   part, counted in `renderer_total_bytes`. It holds the per-frame draw vectors
-  one assembly pass fills (glyphs, quads, overlay glyphs and quads, images, the
+  one assembly pass fills (glyphs, quads, overlay glyphs and quads, pane fills, images, the
   inline-image allocation order and emitted draws, the kitty placeholder index,
   row spans, underlines,
   underline owners, staged ranges, tofu, pane rects, column edges and row keys),
   kept between assembled frames. Every restoration clears
   each vector and holds it within its cap: glyphs and quads 4 MiB each; overlay
   glyphs, overlay quads, images, emitted image draws, row spans, underlines and
-  tofu 1 MiB each; pane rects and staged ranges 64 KiB each; underline owners,
+  tofu 1 MiB each; pane fills, pane rects and staged ranges 64 KiB each; underline owners,
   row keys and the image allocation order 256 KiB each; the two kitty placeholder
   index maps 64 KiB each, a map past its cap dropped when the pass ends; the media
   revision list, which keeps each pane's image-store revision between frames, 1 KiB
@@ -287,7 +334,7 @@ Renderer memory is separate because it is window-owned rather than pane-owned:
   completed assembly also shrinks a vector to twice its use once its capacity is
   over four times that use and over 1 MiB, and drops the column-edge slots above
   its peak. A failed or retried frame's use understates the frame, so it keeps
-  its warm capacity. The class's coverage figure is the sum, 17,826,816 bytes. An unchanged or no-op frame takes no scratch and
+  its warm capacity. The class's coverage figure is the sum, 17,892,352 bytes. An unchanged or no-op frame takes no scratch and
   releases nothing. Items are the vectors that hold an allocation; the figure is
   zero while a frame holds the scratch;
 - `chrome_cache_bytes` / `chrome_cache_items`: the renderer's `ChromeCache`
@@ -468,7 +515,7 @@ The line combines:
 
 - `process_private_committed_bytes`, `process_resident_bytes`, and
   `process_virtual_bytes` from the OS, with deltas;
-- the session total and all eight pane seams;
+- the session total and all nine pane seams (`program_metadata_bytes` after the graphics fields);
 - `panes_total`, `panes_sampled`, and `panes_contended`;
 - renderer totals, roles, and `live_renderers`;
 - `live_fg_probe_workers`, the App's foreground-probe worker threads;
@@ -534,7 +581,7 @@ selection is never wiped while you make or copy it. Pressing `R` always shows a 
 | `DIFFERENCE` | The OS footprint minus SonicTerm's counted capacity, signed and never clamped. It is a diagnostic, not a reconciliation: allocator slack, GPU memory, fonts and untracked allocations land here, and the figures can overlap. |
 | `SAMPLE` | Panes measured and panes skipped because their lock was held (`busy, skipped`), so a partial total is never shown as the whole session. |
 | `WINDOWS / RENDERERS` | Each window's renderer by part (glyph atlas with size, entries and fit, row caches, scratch buffers), the report window's own renderer, and any warm renderer. Under each renderer, `GPU requested` lists its requested GPU bytes and resource count by class: surface, frame texture, glyph atlas, image atlas and present buffers. |
-| `PANES` | Each pane by tab title, split into grid visible, history and alternate, parser, hyperlinks, inline media, and PTY output and input. The per-pane rows sum to the pane total. |
+| `PANES` | Each pane by tab title, split into grid visible, history and alternate, parser, hyperlinks, inline media, PTY output and input, and program status / user vars. The per-pane rows sum to the pane total. |
 | `PTY QUEUES` | Every pane's PTY queues summed: bytes in memory (input waiting in the channel, the message the writer is writing, and the resident reply tier's allocation, which a drain keeps) and reply spill on disk, shown apart. A `reply spill files` line shows the process budget's charged file bytes against its size, and a `reply spill compactions` line their count, the longest, and the longest wait for a spool lock. Then the reaper's synchronous teardown fallbacks: how many, how many blocked past 50 ms, the longest and the total, and once any ran, their blocked times in power-of-four microsecond buckets. Each pane's figures are read without taking its queue's lock. |
 | `THREADS` | Thread count and names. Threads share the process's memory and hold none of their own. |
 | `CHILD PROCESSES` | Each pane shell and its descendants with the OS figure for each (`footprint`, `private` or `RSS`), at most 64 descendants per pane. These are separate processes, not part of SonicTerm's footprint. A process that left its shell's tree, such as a daemonized tmux server, is not listed, and WSL or remote processes are not visible. |

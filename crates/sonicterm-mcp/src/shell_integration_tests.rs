@@ -186,6 +186,46 @@ fn tokened(output: &str) -> Vec<String> {
     markers(output).into_iter().filter(|marker| marker.ends_with("sonicterm_token=<T>")).collect()
 }
 
+/// The command text each tokened C in `output` carries, percent-decoded; `None` for a C without
+/// one. The encoded value holds only unreserved characters and escapes, so no `;` can split it.
+fn cmdlines(output: &str) -> Vec<Option<String>> {
+    tokened(output)
+        .iter()
+        .filter(|marker| marker.starts_with('C'))
+        .map(|marker| {
+            let value = marker.split(';').find_map(|param| param.strip_prefix("cmdline_url="))?;
+            assert!(
+                value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-._~%".contains(&byte)),
+                "{marker}"
+            );
+            Some(percent_decoded(value))
+        })
+        .collect()
+}
+
+/// `text` with every `%XX` escape decoded.
+fn percent_decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            // When: `bytes[index]` starts an escape, its two hex digits are one byte.
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap();
+            out.push(u8::from_str_radix(hex, 16).unwrap());
+            index += 3;
+        } else {
+            // When: `bytes[index]` is unreserved, it stands for itself.
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).unwrap()
+}
+
+/// A command whose text holds a `;`, a backslash, quotes and a space, which the encoding keeps.
+const QUOTED: &str = "echo a\\;b 'c d'";
+
 /// The `sonicterm_src=` value a marker carries, if any.
 fn source(marker: &str) -> Option<&str> {
     marker.split(';').find_map(|param| param.strip_prefix("sonicterm_src="))
@@ -228,12 +268,16 @@ fn an_interactive_zsh_emits_tokened_markers_in_order() {
                    autoload -Uz add-zsh-hook add-zle-hook-widget; \
                    theirs_a() { printf '\\e]133;A\\a' }; theirs_b() { printf '\\e]133;B\\a' }; \
                    add-zsh-hook precmd theirs_a; add-zle-hook-widget line-init theirs_b";
-    let commands = ["false", "false", LEAK_PROBE, "true"];
+    let commands = ["false", "false", LEAK_PROBE, QUOTED, "true"];
     let Some(output) = drive("zsh", &["-f", "-i"], prehook, Shell::Zsh.snippet(), &commands) else {
         eprintln!("skipped: zsh is not installed");
         return;
     };
-    check_cycles("zsh", &output, &[1, 1, 0, 0]);
+    check_cycles("zsh", &output, &[1, 1, 0, 0, 0]);
+    // Every C carries the line preexec was given, history or not, the closing `exit` included.
+    let expected: Vec<Option<String>> =
+        commands.iter().chain(&["exit"]).map(|command| Some((*command).to_owned())).collect();
+    assert_eq!(cmdlines(&output), expected);
     assert!(output.contains("\u{1b}]133;A\u{7}"), "the existing integration stopped running");
 }
 
@@ -249,11 +293,22 @@ fn an_interactive_bash_emits_tokened_markers_in_order() {
     };
     let prehook = "set -a; HISTCONTROL=ignoreboth; PROMPT_COMMAND='printf \"[theirs]\"'; \
                    PS1='\\[\\e]133;B\\a\\]$ '";
-    let commands = ["false", "false", " false", "", LEAK_PROBE, "true"];
+    let commands = ["false", "false", " false", "", LEAK_PROBE, QUOTED, "true"];
     let args = ["--norc", "--noprofile", "-i"];
     let output = drive(&bash, &args, prehook, Shell::Bash.snippet(), &commands)
         .expect("bash was found above");
-    check_cycles("bash", &output, &[1, 1, 1, 0, 0]);
+    check_cycles("bash", &output, &[1, 1, 1, 0, 0, 0]);
+    // bash's C reads the command from history, so a line history ignored (the repeat and the
+    // space-prefixed one) carries no text rather than an older command's.
+    let text = |command: &str| Some(command.to_owned());
+    assert_eq!(
+        cmdlines(&output),
+        [text("false"), None, None, text(LEAK_PROBE), text(QUOTED), text("true"), text("exit")]
+    );
+    // bash redraws only a prompt's last line, so its A says so.
+    for start in tokened(&output).iter().filter(|marker| marker.starts_with('A')) {
+        assert_eq!(start, "A;redraw=last;sonicterm_token=<T>");
+    }
     let after_load = output.rsplit("sonicterm-shellint").next().unwrap_or("");
     assert!(after_load.contains("[theirs]"), "the existing PROMPT_COMMAND stopped running");
 }

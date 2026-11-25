@@ -133,7 +133,9 @@ pub struct PromptRegion {
     pub start_row: Option<u64>,
     /// Absolute row and column where the user's input begins (OSC 133 ; B).
     pub input_start: Option<(u64, u16)>,
-    /// When the B marker was parsed.
+    /// A physical clip or scroll made the open region's input cells untrustworthy for starting a run.
+    pub input_proof_lost: bool,
+    /// When the first B marker was parsed; retained even after its input_start row is evicted.
     pub input_start_at: Option<std::time::Instant>,
     /// Absolute row where the command's output begins (OSC 133 ; C).
     pub output_start_row: Option<u64>,
@@ -318,6 +320,10 @@ pub struct Grid {
     /// The one command run an agent is waiting on, kept apart from the evictable deque; see
     /// [`Grid::pin_run`]. Never moves with the alternate-screen swap.
     pinned_run: Option<PinnedRun>,
+    /// This screen's semantic prompt state; moves with the alternate-screen swap.
+    semantic: SemanticState,
+    /// The last alternate screen's final semantic generation, so the next one starts past it.
+    alt_semantic_floor: u64,
     autowrap: bool,
     pending_wrap: bool,
 }
@@ -360,6 +366,8 @@ impl Grid {
             prompts: VecDeque::new(),
             prompt_seq_next: 0,
             pinned_run: None,
+            semantic: SemanticState::default(),
+            alt_semantic_floor: 0,
             autowrap: true,
             pending_wrap: false,
         }
@@ -575,6 +583,13 @@ mod grid_retention;
 #[path = "grid_prompts.rs"]
 mod grid_prompts;
 pub use grid_prompts::{CommandRegion, CommandSpan, ExitSource, PinnedRun, RowToken};
+
+#[path = "grid_semantic.rs"]
+mod grid_semantic;
+pub use grid_semantic::{
+    ClickEvents, ClickLine, CmdlineText, PromptClick, PromptKind, PromptOptions, PromptRedraw,
+    SemanticMode, SemanticState, MAX_CMDLINE_BYTES,
+};
 
 #[cfg(test)]
 #[path = "grid_test_support.rs"]

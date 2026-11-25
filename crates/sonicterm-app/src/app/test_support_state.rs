@@ -42,7 +42,7 @@ pub struct TestSupportState {
     #[cfg(test)]
     pub(in crate::app) test_pty_write_sources: std::cell::RefCell<Vec<(u64, PtyInputSource)>>,
     /// Whether the PTY write ledger above is actually recorded. `false` in
-    /// production so `dispatch_pty_write_effect` does no lock/clone/push per
+    /// production so `write_to_pane` does no lock/clone/push per
     /// write (the ledger would otherwise grow unbounded for the whole
     /// session —). Set `true` when the app is built without an
     /// event-loop proxy (headless/test construction) so existing tests keep

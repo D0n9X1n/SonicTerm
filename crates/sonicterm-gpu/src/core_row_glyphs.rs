@@ -9,7 +9,8 @@ pub(crate) struct GlyphShaping<'frame> {
     pub(crate) font_stack: Option<&'frame sonicterm_engine::FontStack>,
     pub(crate) wt_raster: Option<&'frame mut sonicterm_engine::FontStack>,
     pub(crate) style_rev: u64,
-    pub(crate) theme: &'frame Theme,
+    /// The pane's colors: the theme under its program's overrides.
+    pub(crate) colors: PaneColors<'frame>,
     pub(crate) fg_default: ChromeColor,
     pub(crate) raster_px: f32,
     pub(crate) cell_size: (f32, f32),
@@ -28,7 +29,7 @@ impl GlyphShaping<'_> {
             font_stack: self.font_stack,
             wt_raster: self.wt_raster.as_deref_mut(),
             style_rev: self.style_rev,
-            theme: self.theme,
+            colors: self.colors,
             fg_default: self.fg_default,
             raster_px: self.raster_px,
             cell_size: self.cell_size,
@@ -119,7 +120,7 @@ pub(crate) fn emit_row_glyphs(
         row_cache,
         font_stack,
         mut wt_raster,
-        theme,
+        colors,
         fg_default,
         cell_size: (cell_w, cell_h),
         surface,
@@ -169,16 +170,31 @@ pub(crate) fn emit_row_glyphs(
     // frame buffers.
     let mut records = sonicterm_text::row_glyph_cache::CachedRow::default();
     let mut ul_start: Option<(u16, UnderlineStyle, Color)> = None;
+    // An open SGR 9 run: its first column and the decoration color it draws in.
+    let mut strike_start: Option<(u16, Color)> = None;
     let mut last_visible_col: u16 = 0;
     // First pass: per-cell underline coalescing; underlines are a cell-level decoration,
     // independent of shaping.
     for (col, cell) in row.iter().enumerate() {
+        // A run still open at the row's end covers through its last column, the trailing half of
+        // a wide glyph included.
+        last_visible_col = col as u16;
         if cell.flags.contains(CellFlags::WIDE_CONT) {
             // When: `WIDE_CONT` — the trailing half of a wide
             // glyph, whose decoration belongs to its lead cell.
             continue;
         }
-        last_visible_col = col as u16;
+        // Strikethrough runs coalesce by the color their glyphs draw with, beside the underline
+        // runs.
+        let strike = strikethrough_key(cell, colors, fg_default);
+        if strike_start.is_some_and(|(_, open)| Some(open) != strike) {
+            // The open run's color differs from this cell's, so the open run ends here.
+            let (start, color) = strike_start.take().expect("checked open");
+            records.underlines.push(strike_run(start, (col as u16).saturating_sub(1), color));
+        }
+        if strike_start.is_none() {
+            strike_start = strike.map(|color| (col as u16, color));
+        }
         if let Some((style, color)) = underline_key(cell) {
             match ul_start {
                 Some((_, active_style, active_color))
@@ -193,6 +209,7 @@ pub(crate) fn emit_row_glyphs(
                         end_col: (col as u16).saturating_sub(1),
                         style: active_style,
                         color: active_color,
+                        strikethrough: false,
                     });
                     ul_start = Some((col as u16, style, color));
                 }
@@ -208,6 +225,7 @@ pub(crate) fn emit_row_glyphs(
                 end_col: (col as u16).saturating_sub(1),
                 style,
                 color,
+                strikethrough: false,
             });
         }
     }
@@ -217,7 +235,11 @@ pub(crate) fn emit_row_glyphs(
             end_col: last_visible_col,
             style,
             color,
+            strikethrough: false,
         });
+    }
+    if let Some((start, color)) = strike_start.take() {
+        records.underlines.push(strike_run(start, last_visible_col, color));
     }
 
     // Second pass: group cells into style runs and shape each one. Every run is built, whatever
@@ -234,7 +256,7 @@ pub(crate) fn emit_row_glyphs(
             slot,
             run.style,
             run.cells,
-            theme,
+            colors,
             fg_default,
             cell_w,
             cell_h,
@@ -412,3 +434,14 @@ pub(crate) fn assemble_pane_glyph_rows(
 #[cfg(test)]
 #[path = "core_row_glyphs_tests.rs"]
 mod core_row_glyphs_tests;
+
+/// The strikethrough run from `start` to `end` (inclusive) in decoration `color`.
+fn strike_run(start: u16, end: u16, color: Color) -> sonicterm_text::row_glyph_cache::UnderlineRun {
+    sonicterm_text::row_glyph_cache::UnderlineRun {
+        start_col: start,
+        end_col: end,
+        style: UnderlineStyle::Single,
+        color,
+        strikethrough: true,
+    }
+}

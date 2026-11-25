@@ -267,7 +267,7 @@ fn pointer_modes_read_while_the_parser_is_held_by_another_thread() {
         release_tx.send(()).unwrap();
         let modes = modes.expect("pointer mode read waited for the parser lock");
         assert_eq!(modes.tracking(), sonicterm_vt::vt::MouseTracking::AnyMotion);
-        assert!(modes.sgr());
+        assert_eq!(modes.format(), sonicterm_vt::vt::MouseFormat::Sgr);
     });
     holder.join().unwrap();
 }
@@ -331,11 +331,19 @@ fn published_cases() -> [(sonicterm_vt::vt::PointerModes, Vec<u8>); 2] {
     [
         // Any-motion SGR tracking: no-button motion at column 3, row 2 reports button 35.
         (
-            PointerModes::new(MouseTracking::AnyMotion, true, false, false),
+            PointerModes::new(
+                MouseTracking::AnyMotion,
+                sonicterm_vt::vt::MouseFormat::Sgr,
+                false,
+                false,
+            ),
             b"\x1b[<35;3;2M".to_vec(),
         ),
         // Untracked alternate screen with DECCKM: motion reports nothing.
-        (PointerModes::new(MouseTracking::Off, false, true, true), Vec::new()),
+        (
+            PointerModes::new(MouseTracking::Off, sonicterm_vt::vt::MouseFormat::X10, true, true),
+            Vec::new(),
+        ),
     ]
 }
 

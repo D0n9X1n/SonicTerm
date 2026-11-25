@@ -13,6 +13,8 @@ pub(super) struct AssemblyPaneView<'frame> {
     pub(super) rect_h: f32,
     pub(super) scrollbar_alpha: f32,
     pub(super) inline_images: &'frame [sonicterm_render_model::InlineImage],
+    /// The colors the pane's program set; `None` draws the pane with the theme alone.
+    pub(super) overrides: Option<&'frame sonicterm_types::ColorOverrides>,
 }
 
 /// Immutable inputs copied into each phase without cloning frame or terminal state.

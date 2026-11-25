@@ -173,19 +173,3 @@ fn snap_scrollbars_join_the_render_wake_minimum() {
         "an earlier notification must remain ahead of scrollbar expiration"
     );
 }
-
-/// The Windows OSC 52 repair participates in the event-loop wake fold.
-#[cfg(target_os = "windows")]
-#[test]
-fn pending_osc52_reassertion_arms_its_deadline() {
-    let mut app = app_with_main_window();
-    app.__test_set_memory_clipboard("old");
-    app.handle_clipboard_write("Copilot selection".into());
-    let due = app
-        .pending_osc52_reassert
-        .as_ref()
-        .expect("successful OSC 52 write arms a reassertion")
-        .due;
-
-    assert_eq!(app.wake_deadline(None), Some(due));
-}

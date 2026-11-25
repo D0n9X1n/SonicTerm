@@ -13,6 +13,7 @@
 
 pub mod action;
 pub mod cell;
+pub mod color_overrides;
 pub mod geom;
 pub mod glyph_key;
 pub mod hyperlink_id;
@@ -30,6 +31,7 @@ pub mod window_key;
 
 pub use action::{Action, BroadcastScope, Direction, ScrollAction};
 pub use cell::{Cell, CellFlags, Color, FatAttributes, UnderlineStyle};
+pub use color_overrides::{ColorOverrides, DynamicColor, Rgb};
 pub use geom::{GeometryQuad, Pos};
 pub use glyph_key::{GlyphKey, GlyphRasterVariant};
 pub use hyperlink_id::HyperlinkId;
@@ -54,7 +56,9 @@ pub use script_draft::{
     classify_shell, format_script_draft, shell_quote_powershell, DraftRejection, ShellDialect,
 };
 pub use shell_quote::shell_quote_posix;
-pub use terminal_report::{indexed_rgb, ColorScheme, CursorRequest, CursorRequestShape};
+pub use terminal_report::{
+    indexed_rgb, theme_hex_rgb, ColorScheme, CursorRequest, CursorRequestShape,
+};
 pub use traits::{ClipboardBackend, FrameLike, PaintError, Painter, PtyTransport, WindowBackend};
 pub use window_key::WindowKey;
 

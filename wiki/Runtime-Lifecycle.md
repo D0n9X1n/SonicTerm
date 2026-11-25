@@ -16,7 +16,6 @@ flowchart TD
     config["load sonicterm.toml<br/>collect fallback warnings"]
     logging["initialize [logging]<br/>replay warnings"]
     assets["load theme, keymap, packaged fonts"]
-    machine["create AppStateMachine"]
     shell["create platform Shell"]
     loop["ShellRunner creates EventLoop&lt;UserEvent&gt;"]
     app["create App and install bridges"]
@@ -24,7 +23,7 @@ flowchart TD
     window["create native window + GpuRenderer"]
     pane["seed startup tabs and PTY panes"]
 
-    platform --> diagnostics --> config --> logging --> assets --> machine --> shell
+    platform --> diagnostics --> config --> logging --> assets --> shell
     shell --> loop --> app --> resumed --> window --> pane
 ```
 
@@ -59,8 +58,7 @@ Platform startup adds these steps:
   separate scratch config/log roots, a 30-second in-app proof deadline, and a
   45-second process-tree watchdog.
 
-The binaries load theme and keymap assets, create
-`AppStateMachine::new(AppState::default())`, build `MacShell`, `WindowsShell`, or
+The binaries load theme and keymap assets, build `MacShell`, `WindowsShell`, or
 `LinuxShell`, and call `run`.
 
 Immediately before shell construction, each native binary records one typed
@@ -88,7 +86,7 @@ snapshot.
 
 ### Shell and event-loop construction
 
-Each platform shell wraps one `ShellRunner`. The runner owns the state machine,
+Each platform shell wraps one `ShellRunner`. The runner owns the
 theme, config, keymap, process-privilege snapshot, optional asset loaders, native
 drag hooks, startup payload, breadcrumb recorder, and one-shot native-window
 hooks. It installs the snapshot on `App` before queuing any startup payload.
@@ -101,7 +99,7 @@ privilege. The value participates in retained-frame identity.
 1. calls idempotent tracing initialization;
 2. creates `EventLoop<UserEvent>` with `ControlFlow::Wait`;
 3. installs menu, OS-drag, and open-script proxy bridges;
-4. constructs `App` with the state machine and event-loop proxy;
+4. constructs `App` with the event-loop proxy;
 5. installs the optional hooks and backends;
 6. queues any startup tab payload;
 7. calls `run_app`;
@@ -159,7 +157,6 @@ The app then:
 flowchart TD
     app["App"] --> windows["HashMap&lt;WindowId, WindowState&gt;"]
     app --> process["ResourceGovernor Process owner"]
-    app --> machine["AppStateMachine"]
     windows --> window["WindowState"]
     window --> native["Arc&lt;Window&gt; + GpuRenderer"]
     window --> tabs["TabBar + Vec&lt;TabState&gt;"]
@@ -174,7 +171,7 @@ flowchart TD
     pane --> paneowner["AppPane owner + class charges"]
 ```
 
-The main window is one entry in `App::windows`. `main_window_id` identifies it.
+The main window is one entry in the window registry. `main_window_id` identifies it.
 Torn-out windows use the same `WindowState` type and the same event map.
 
 `TabBar` stores tab identity, title, order, and active index. The parallel
@@ -187,7 +184,7 @@ The pane also owns terminal-mode atomics, command events, inline images, its
 shared redraw target, resource reservations, and owner guard.
 
 Process-wide state stays on `App`. This includes the command palette and its
-attached window, broadcast state, resource governor, state machine, warm-window
+attached window, broadcast state, resource governor, warm-window
 pool, native drag backends, and event-loop scheduling flags.
 
 ### Creating tabs and splits
@@ -314,65 +311,35 @@ A governor owner refuses to close while it has charges or open children.
 `OwnerGuard::drop` logs a warning and leaves a refused record retained. It does
 not retry.
 
-### Input and effect state changes
+### Input state changes
 
 Keyboard ownership and terminal-byte encoding are summarized in
 [From Keypress to Pixel](From-Keypress-to-Pixel). Native input reaches
-`write_to_pane` after local routing and encoding, without a transient reducer.
-The pane's bounded queue and rejection diagnostics are the only admission path.
+`write_to_pane` after local routing and encoding. The pane's bounded queue and
+rejection diagnostics are the only admission path.
 
 ```mermaid
 flowchart TD
     source["native input or lifecycle code"]
-    live["App / WindowState authoritative mutation"]
-    observe["observe_intent"]
-    machine["AppStateMachine::handle<br/>observational AppState; discard effects"]
-    explicit["supported explicit-target intent / effect"]
-    resolve["resolve stable live window / pane"]
+    live["App / WindowState mutation"]
     boundary["bounded PTY, redraw, or side-channel operation"]
 
     source --> live --> boundary
-    source --> observe --> machine
-    explicit --> resolve --> boundary
 ```
 
-GUI `AppState` fields are compatibility observations, not live-topology decisions.
-The independently usable reducer orders effects as `PtyWrite`, `Render`, `OsDrag`,
-`Clipboard`, `WindowOp`, `MenubarUpdate`, then `Log`. Its private follow-on queue
-is bounded by `MAX_CASCADE_DEPTH = 16`; no production path enqueues there, so
-`drain_pending` normally returns an empty batch.
-
-| Observational `AppState` fields | Authoritative live state |
-| --- | --- |
-| `cols`, `rows`, `last_window_pos` | each native window/renderer and pane grid geometry |
-| `focused_window`, `live_window_count` | `App::windows`, `main_window_id`, native focus, and empty-window policy |
-| `tab_count`, `active_tab_idx` | each window's `TabBar` and parallel `TabState` vector |
-| `pane_count`, `focused_pane_idx`, `pane_zoomed` | active `TabState` and its `PaneTree` |
-| `last_mouse_pos`, `mouse_left_down`, `selection_active` | window pointer gesture, cursor, and selection state |
-| `search_open`, `palette_open` | tab search and the app palette's attached window |
-| `fg_proc_name`, `broadcast_scope` | live pane process observations and `App::broadcast` |
-
-The operational boundary is separate from those observations:
-
-| Intent or explicit effect | GUI behavior |
-| --- | --- |
-| `PtyWrite` intent/effect | exact pane's bounded input queue |
-| `PtyExit`; `PtyClose`, `ChildExitPropagate` effects | close the identified pane through live topology; report exit metadata |
-| `PtyBurst`, `ForegroundProcChanged` intents | request the named live pane's current window redraw |
-| `RedrawRequested`, pressed `Key`, IME start/preedit/end, hover, scroll, and wheel intents | redraw only the named live window; native handlers own encoding and content changes |
-| `ImeCommit`, `Paste` intents | resolve the named live window's active pane and queue supplied text; native routes own overlay policy and paste wrapping |
-| `ClickUrl`; `OpenURL`, nonempty `ClipboardSet`, `Notification` effects | native side channels, with URL validation that admits only `http`, `https`, and `mailto`; empty clipboard sentinel is inert |
-| `Exit` intent; `Quit` effect | explicit application exit request |
-| `Render`, `RenderDirtyRect`, `WindowResize` effects | named-window redraw only; no claim of native resize completion |
-| `WindowOpen` effect | queue creation for the event loop; not a completed window |
-| `ChildSpawn`, `OsDragStart/End`, `ClipboardRequest`, `WindowClose/Move/SetTitle`, `TimerSchedule/Cancel`, `MenubarUpdate` effects | record-only; native app/platform paths own the work |
-| `LogEvent` effect | forward structured diagnostics |
-| all other intents | `observe_intent` updates only compatibility state and discards the reducer batch |
+`App`'s typed owners hold all live state: windows, geometry and focus in the
+window registry (its `WindowMap`, `main_window_id` and `frontmost_window`) and
+native focus; tabs in each window's `TabBar` and parallel `TabState` vector;
+panes in each `TabState`'s `PaneTree` and the window's `PaneMap`; pointer
+gestures, cursor and selection in each window; tab search and the palette's
+attached window in the interaction state, which also holds broadcast scope; and
+live pane process observations. No second model mirrors them.
 
 Window keys start at one, are monotonic, and are removed on closure without
 reuse. Missing, removed, and zero keys do not mean main or frontmost. Native
-window-close and tab/pane actions run their existing live paths and only observe
-the reducer; a stale `live_window_count` cannot close windows or trigger quit.
+window close, tab and pane actions, and the exit that follows the last window
+closing decide from live topology only; an explicit Quit (menu, palette or the
+held chord) exits directly, whatever is open.
 Source-less menu actions may select the current window, but an explicitly named
 missing source never falls through to a different terminal.
 
@@ -563,7 +530,7 @@ The hidden warm-window pool reduces tear-out latency:
 
 `about_to_wait` removes excess entries and creates at most one missing warm
 window per pass. Adoption is last-in, first-out. A consumed or failed-adoption
-entry is replaced on a later idle pass. Warm windows stay outside `App::windows`
+entry is replaced on a later idle pass. Warm windows stay outside the window registry
 and have no resource owner until promoted.
 
 New-window tear-out holds the detached tab, tab state, panes, source index, and
@@ -582,12 +549,11 @@ After native preparation succeeds, native drop-target registration must succeed
 before accounting admission. Registration failure drops the hidden destination
 and restores the source transaction before any ownership transfer. The app then
 prepares destination owners and transfers all pane charges before changing redraw
-targets, inserting the live window into `App::windows`, or sizing its panes. An
+targets, inserting the live window into the window registry, or sizing its panes. An
 accounting refusal revokes the native registration, drops the hidden artifacts,
 and restores the source transaction. Success reveals the destination once and
 requests its first frame; only then may source neighbour activation, hiding, or
-reaping run. Reducer departure observations are record-only and cannot execute a
-second native operation.
+reaping run.
 
 Native drag support differs by platform:
 

@@ -11,6 +11,10 @@ use serde_json::{json, Value};
 /// The longest line a connection may send; a longer one closes the connection.
 pub(crate) const MAX_LINE_BYTES: usize = 1024 * 1024;
 
+/// The longest serialized request id accepted. A response echoes its id outside every reply
+/// bound, so this keeps a response line below the bridge's 1 MiB limit; a longer id is refused.
+pub(crate) const MAX_REQUEST_ID_BYTES: usize = 1024;
+
 /// The MCP protocol revisions this server speaks over `initialize`, newest first. Later revisions
 /// that drop the `initialize` handshake for `server/discover` are not offered: a client that
 /// probes with `server/discover` gets "method not found" and falls back to `initialize`.
@@ -116,6 +120,15 @@ pub(crate) fn parse_line(line: &str) -> Incoming {
         return Incoming::Preamble { pane_id };
     }
     let id = value.get("id").cloned();
+    if id.as_ref().is_some_and(|id| id.to_string().len() > MAX_REQUEST_ID_BYTES) {
+        // When: the serialized id passes MAX_REQUEST_ID_BYTES, echoing it could push a response
+        // past the bridge's line limit, so the request is refused with a null id.
+        return Incoming::Invalid {
+            id: Value::Null,
+            code: INVALID_REQUEST,
+            message: "request id too long",
+        };
+    }
     let Some(method) = value.get("method").and_then(Value::as_str).map(str::to_owned) else {
         // When: `method` is missing, the value is not a request or a notification.
         return Incoming::Invalid {

@@ -522,13 +522,15 @@ fn trimmed_punctuation_cannot_bypass_osc8_cell_rejection() {
 /// POSIX relative paths resolve only from an accepted local OSC 7 snapshot.
 #[test]
 fn posix_relative_resolution_is_host_aware_and_root_clamped() {
-    let cwd = Osc7Cwd { authority: "localhost".into(), path: "/work/project".into() };
+    let cwd =
+        Osc7Cwd { authority: "localhost".into(), path: "/work/project".into(), uri_path: true };
     assert_eq!(
         resolve_path_candidate("../../file", PathStyle::Posix, Some(&cwd), None, "my-host"),
         Some(PathBuf::from("/file"))
     );
 
-    let foreign = Osc7Cwd { authority: "remote-host".into(), path: "/work/project".into() };
+    let foreign =
+        Osc7Cwd { authority: "remote-host".into(), path: "/work/project".into(), uri_path: true };
     assert_eq!(
         resolve_path_candidate("./file", PathStyle::Posix, Some(&foreign), None, "my-host"),
         None
@@ -539,19 +541,22 @@ fn posix_relative_resolution_is_host_aware_and_root_clamped() {
 /// Separator-relative paths resolve only from the exact pane's trusted local OSC 7 directory.
 #[test]
 fn contextual_relative_resolution_is_host_aware() {
-    let local = Osc7Cwd { authority: "localhost".into(), path: "/work/project".into() };
+    let local =
+        Osc7Cwd { authority: "localhost".into(), path: "/work/project".into(), uri_path: true };
     assert_eq!(
         resolve_path_candidate("src/main.rs", PathStyle::Posix, Some(&local), None, "host"),
         Some(PathBuf::from("/work/project/src/main.rs"))
     );
-    let foreign = Osc7Cwd { authority: "remote".into(), path: "/work/project".into() };
+    let foreign =
+        Osc7Cwd { authority: "remote".into(), path: "/work/project".into(), uri_path: true };
     assert_eq!(
         resolve_path_candidate("src/main.rs", PathStyle::Posix, Some(&foreign), None, "host"),
         None
     );
     assert_eq!(resolve_path_candidate("src/main.rs", PathStyle::Posix, None, None, "host"), None);
 
-    let windows = Osc7Cwd { authority: String::new(), path: "/C:/work/project".into() };
+    let windows =
+        Osc7Cwd { authority: String::new(), path: "/C:/work/project".into(), uri_path: true };
     assert_eq!(
         resolve_path_candidate(r"src\main.rs", PathStyle::Windows, Some(&windows), None, "host"),
         Some(PathBuf::from(r"C:\work\project\src\main.rs"))
@@ -611,7 +616,7 @@ fn home_relative_resolution_uses_valid_native_home() {
 /// The exact local hostname is accepted case-insensitively without weakening foreign-host checks.
 #[test]
 fn local_hostname_authority_is_accepted() {
-    let cwd = Osc7Cwd { authority: "MY-HOST".into(), path: "/work".into() };
+    let cwd = Osc7Cwd { authority: "MY-HOST".into(), path: "/work".into(), uri_path: true };
     assert_eq!(
         resolve_path_candidate("./file", PathStyle::Posix, Some(&cwd), None, "my-host"),
         Some(PathBuf::from("/work/file"))
@@ -621,7 +626,7 @@ fn local_hostname_authority_is_accepted() {
 /// Windows OSC 7 drive paths normalize before dot-relative resolution.
 #[test]
 fn windows_relative_resolution_normalizes_drive_form() {
-    let cwd = Osc7Cwd { authority: String::new(), path: "/C:/work/project".into() };
+    let cwd = Osc7Cwd { authority: String::new(), path: "/C:/work/project".into(), uri_path: true };
     assert_eq!(
         resolve_path_candidate(r"..\..\file", PathStyle::Windows, Some(&cwd), None, "host"),
         Some(PathBuf::from(r"C:\file"))

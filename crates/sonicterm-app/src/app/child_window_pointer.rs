@@ -6,10 +6,11 @@ use winit::{
     dpi::PhysicalPosition,
     event::{ElementState, MouseScrollDelta},
     event_loop::{ActiveEventLoop, EventLoopProxy},
-    window::{CursorIcon, WindowId},
+    window::WindowId,
 };
 
 use super::child_window::{child_no_button_motion_report, scroll_child_pane};
+use super::input_dispatch::MotionProfile;
 use super::tab_gesture::TabPress;
 use super::{
     pane_id_at_point, scrollbar_input::HitOutcome, App, FrontmostKind, PointerCell,
@@ -87,7 +88,6 @@ impl App {
                 child.mouse_down = true;
                 child.request_window_redraw();
             }
-            self.set_child_splitter_cursor(win_id, hit.axis);
             return true;
         }
         // Modifier-click opens a URI or existence-authorized path in
@@ -232,14 +232,25 @@ impl App {
         // All four modes come from one published byte; no parser lock.
         let modes = child.panes.get(&pane_id).map(|pane| {
             let modes = pane.pointer_modes();
-            (modes.is_alt(), modes.tracking(), modes.sgr(), modes.application_cursor())
+            (modes.is_alt(), modes.tracking(), modes.format(), modes.application_cursor())
         });
-        let (alt_screen, tracking, sgr, application_cursor) =
-            modes.unwrap_or((false, sonicterm_vt::vt::MouseTracking::Off, false, false));
+        let (alt_screen, tracking, format, application_cursor) = modes.unwrap_or((
+            false,
+            sonicterm_vt::vt::MouseTracking::Off,
+            sonicterm_vt::vt::MouseFormat::X10,
+            false,
+        ));
+        let pixel = {
+            let window: &WindowState = child;
+            super::mouse_report::pane_pixel_in(window, pane_id, || {
+                App::compute_pane_rects_for(window)
+            })
+        };
         let target = super::wheel_plan::WheelTarget {
             tracking,
             alt_screen,
-            sgr,
+            format,
+            pixel,
             application_cursor,
             readonly: child
                 .copy_mode
@@ -281,19 +292,44 @@ impl App {
             return;
         };
         child.cursor_pos = (position.x, position.y);
-        let pointer_cell = child_pane_cell_at(child, position.x as f32, position.y as f32)
-            .map(|(pane_id, row, col)| PointerCell { pane_id, row, col });
-        if let Some(held) = child.secondary_motion(pointer_cell) {
+        // The cell and pixels are read before the child is borrowed mutably again.
+        let pointer_cell = self
+            .registry
+            .windows
+            .get(&win_id)
+            .and_then(|child| child_pane_cell_at(child, position.x as f32, position.y as f32))
+            .map(|(pane_id, row, col)| PointerCell {
+                pane_id,
+                row,
+                col,
+                pixel: self.pane_pixel(win_id, pane_id),
+            });
+        let press_pixel = self.held_press_pixel(win_id);
+        let Some(child) = self.registry.windows.get_mut(&win_id) else {
+            // When: `windows` no longer holds `win_id`, the child closed and nothing is left to route.
+            return;
+        };
+        if let Some(held) = child.secondary_motion(pointer_cell, press_pixel) {
             // When: a right or middle press is `held`, it owns the motion until its release.
-            if let Some((pane_id, bytes)) = held {
-                self.write_to_pane(pane_id, bytes, super::PtyInputSource::PointerMotion);
+            if let Some((pane_id, profile, bytes)) = held {
+                self.write_pointer_motion(pane_id, profile, bytes);
             }
             return;
         }
+        // The modes a no-button report is encoded under, so they, not a later read, stamp it.
+        let mut encoded_modes = None;
+        // The press-time profile a held gesture's motion is stamped with.
+        let mut held_profile = None;
         let pointer_route = if child.mouse_down {
             let modifiers = child.modifiers;
             child.pointer_gesture.as_mut().map(|gesture| {
-                super::window_event::route_pressed_pointer_motion(gesture, pointer_cell, modifiers)
+                held_profile = gesture.held_profile();
+                super::window_event::route_pressed_pointer_motion(
+                    gesture,
+                    pointer_cell,
+                    press_pixel,
+                    modifiers,
+                )
             })
         } else {
             // When: `child.mouse_down` is false, child chrome may suppress no-button terminal motion.
@@ -317,14 +353,16 @@ impl App {
                     )
                 })
             });
+            child.native_cursor.on_scrollbar = scrollbar_owned;
             pointer_cell.and_then(|cell| {
                 child.panes.get(&cell.pane_id).and_then(|pane| {
                     let modes = pane.pointer_modes();
+                    encoded_modes = Some(modes);
                     child_no_button_motion_report(
                         child,
                         cell,
                         modes.tracking(),
-                        modes.sgr(),
+                        modes.format(),
                         scrollbar_owned,
                     )
                 })
@@ -342,7 +380,8 @@ impl App {
                 }
                 report @ super::window_event::PointerMotionRoute::Report { .. } => {
                     // When: `route` contains Report data, encode terminal motion for the child pane.
-                    let kind = if child.mouse_down {
+                    let held = child.mouse_down;
+                    let kind = if held {
                         super::window_event::PointerReportKind::HeldLeftMotion
                     } else {
                         super::window_event::PointerReportKind::NoButtonMotion
@@ -352,7 +391,23 @@ impl App {
                     // bounded effect path resolves and enqueues the PTY write.
                     let _ = child;
                     if let Some((pane_id, bytes)) = report {
-                        self.write_to_pane(pane_id, bytes, super::PtyInputSource::PointerMotion);
+                        // A no-button report is stamped by the modes it was encoded under; a held
+                        // gesture by its press-time profile.
+                        match (encoded_modes, held_profile) {
+                            (Some(modes), _) => {
+                                #[cfg(test)]
+                                super::mouse_report::run_motion_queue_hook();
+                                let profile = MotionProfile::of(modes, held);
+                                self.queue_pointer_motion(pane_id, profile, bytes);
+                            }
+                            (None, Some(profile)) => {
+                                self.write_pointer_motion(pane_id, profile, bytes);
+                            }
+                            (None, None) => {
+                                // When: neither encoded_modes nor held_profile exists, no profile
+                                // can stamp the report, so it is dropped.
+                            }
+                        }
                     }
                     return;
                 }
@@ -439,10 +494,16 @@ impl App {
                 let pixel_target = renderer.pixel_to_pane_cell(cursor_x, cursor_y);
                 let geometry_pane = pane_id_at_point(&pane_rects, cursor_x, cursor_y);
                 let pointer_cell = pixel_target.and_then(|(rendered_pane, row, col)| {
-                    (rendered_pane != 0)
-                        .then_some(rendered_pane)
-                        .or(geometry_pane)
-                        .map(|pane_id| PointerCell { pane_id, row, col })
+                    (rendered_pane != 0).then_some(rendered_pane).or(geometry_pane).map(|pane_id| {
+                        PointerCell {
+                            pane_id,
+                            row,
+                            col,
+                            pixel: super::mouse_report::pane_pixel_in(child, pane_id, || {
+                                pane_rects.clone()
+                            }),
+                        }
+                    })
                 });
                 let about_copy = child.role == super::WindowRole::About
                     && pointer_cell.is_some_and(|cell| {
@@ -463,18 +524,23 @@ impl App {
                 }
                 if let Some(pointer_cell) = pointer_cell {
                     // When: `pointer_cell` resolves a rendered grid cell, route focus and press through its exact pane.
-                    let PointerCell { pane_id, row, col } = pointer_cell;
+                    let PointerCell { pane_id, row, col, .. } = pointer_cell;
                     if pane_id != 0 {
                         // When: `pane_id` is nonzero, snapshot that live pane's terminal mouse profile.
-                        let (tracking, sgr) = child
+                        let (tracking, format, is_alt) = child
                             .panes
                             .get(&pane_id)
                             .map(|pane| {
                                 let modes = pane.pointer_modes();
-                                (modes.tracking(), modes.sgr())
+                                (modes.tracking(), modes.format(), modes.is_alt())
                             })
-                            .unwrap_or((sonicterm_vt::vt::MouseTracking::Off, false));
-                        let terminal_press = child.begin_pointer_press(pointer_cell, tracking, sgr);
+                            .unwrap_or((
+                                sonicterm_vt::vt::MouseTracking::Off,
+                                sonicterm_vt::vt::MouseFormat::X10,
+                                false,
+                            ));
+                        let terminal_press =
+                            child.begin_pointer_press(pointer_cell, tracking, format, is_alt);
                         if let Some(bytes) = terminal_press {
                             // When: `terminal_press` contains bytes, the child latched terminal ownership before the unguarded enqueue.
                             if let Some(change) = child.begin_pointer_pane_focus_change(pane_id) {
@@ -502,6 +568,7 @@ impl App {
                 // When: the button was `Released`, so any drag, selection or
                 // tab-move started by the press is resolved here.
                 let modifiers = child.modifiers;
+                let released_gesture = child.pointer_gesture;
                 let terminal_owned = matches!(
                     child.pointer_gesture.as_ref().map(|gesture| gesture.owner),
                     Some(PointerGestureOwner::Terminal { .. })
@@ -549,9 +616,6 @@ impl App {
                 // End any in-flight splitter divider drag and restore the
                 // default cursor.
                 if child.splitter_drag.take().is_some() {
-                    if let Some(window) = child.window.as_ref() {
-                        window.set_cursor(CursorIcon::Default);
-                    }
                     child.request_window_redraw();
                 }
                 if let Some(renderer) = child.renderer.as_mut() {
@@ -564,6 +628,8 @@ impl App {
                     }
                 }
                 let _ = child;
+                // A plain single click in a shell prompt moves its cursor, once the selection settled.
+                self.try_prompt_click(win_id, released_gesture);
                 self.apply_tab_release(release, |app, source, index| {
                     app.tear_out_from_child(event_loop, source, index);
                 });

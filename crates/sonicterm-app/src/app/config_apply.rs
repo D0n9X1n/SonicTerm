@@ -601,12 +601,16 @@ impl App {
             }
         }
 
-        // A reload to `osc52 = "deny"` cancels a write still waiting to be reasserted, so a later
-        // reload back to allow cannot replay what the denial stopped.
-        #[cfg(target_os = "windows")]
-        if new_cfg.terminal.osc52 == sonicterm_cfg::config::Osc52Policy::Deny {
-            self.pending_osc52_reassert = None;
-        }
+        // Reads that end from now on follow the reloaded `osc52_read`. A change to `osc52` or
+        // `osc52_read` starts a new policy generation, which revokes every outstanding ticket and
+        // every program write (approved or auto-allowed) not yet committed, and cancels an armed
+        // reassertion: each one's binding is checked at its commit point.
+        self.publish_clipboard_policies(&new_cfg);
+        // A changed write limit applies to streams opened from now on; open streams and leases
+        // keep what they reserved.
+        self.clip_state
+            .staging
+            .set_stream_limit(new_cfg.terminal.effective_clipboard_write_limit_bytes());
         self.config = new_cfg;
         // Open windows take a changed Option-as-Alt at once; the warm pool was emptied above, so
         // every later window is created with it.

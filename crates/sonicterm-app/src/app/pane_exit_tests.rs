@@ -80,7 +80,7 @@ fn an_unclean_exit_holds_its_tab_open() {
 
     assert_eq!(tab_ids(&app), before, "a non-zero exit must leave every tab exactly as it was");
     // The assertion that matters: holding the tab open is pointless if the
-    // `PaneState` behind it is gone. A build that dispatched `PtyExit`
+    // `PaneState` behind it is gone. A build that called `close_pty_pane`
     // regardless of cleanliness would keep the leaf and drop the scrollback,
     // satisfying a tree-only check while destroying what the policy protects.
     assert!(
@@ -109,7 +109,7 @@ fn an_unknown_exit_status_holds_its_tab_open() {
     );
 }
 
-/// A split pane's exit is the reducer's case, not the tab's.
+/// A clean exit in a split closes that pane, not its tab.
 ///
 /// The tab still has something to show, so it stays; only the dead pane goes.
 #[test]
@@ -208,9 +208,9 @@ fn a_clean_exit_closes_a_child_windows_tab_too() {
 
     // The TAB count, not the pane count. `close_pty_pane` already scans child
     // windows and removes the `PaneState` on its own, so a pane-map assertion
-    // drops 2→1 from the reducer alone and passes against a build whose child
-    // branch was deleted outright — leaving a tab whose tree points at a pane
-    // that no longer exists, which is the very bug this change fixes.
+    // drops 2→1 from that call alone and passes against a build without the
+    // child tab close — leaving a tab whose tree points at a pane that no
+    // longer exists.
     assert_eq!(
         app.__test_child_tab_count(child),
         Some(1),

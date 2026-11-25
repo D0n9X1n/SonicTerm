@@ -135,7 +135,7 @@ impl Grid {
     /// the marker more than once per prompt doesn't bloat the buffer.
     pub fn record_prompt_start(&mut self) {
         let row = self.cursor_absolute_row();
-        if matches!(self.prompts.back(), Some(prompt) if prompt.start_row == Some(row) && !prompt.output_seen && !prompt.completed)
+        if matches!(self.prompts.back(), Some(prompt) if prompt.start_row == Some(row) && !prompt.output_seen && !prompt.completed && !prompt.input_proof_lost)
         {
             // When: `matches!` finds a prompt at `row` whose command has not started, coalesce
             // the marker; once C was seen, an A on the same row is a new prompt.
@@ -167,6 +167,7 @@ impl Grid {
             start_row: Some(row),
             input_start: None,
             input_start_at: None,
+            input_proof_lost: false,
             output_start_row: None,
             output_start_col: 0,
             output_start_at: None,
@@ -182,12 +183,78 @@ impl Grid {
     }
 
     /// Record an OSC 133 `B` (input-start) marker at the cursor in the newest region; a duplicate
-    /// keeps the first position.
+    /// cannot replace the first position, even when that row has left history.
     pub fn record_input_start(&mut self) {
         let at = (self.cursor_absolute_row(), self.cursor.col.min(self.cols.saturating_sub(1)));
-        if let Some(last) = self.prompts.back_mut().filter(|last| last.input_start.is_none()) {
+        if let Some(last) = self.prompts.back_mut().filter(|last| last.input_start_at.is_none()) {
             last.input_start = Some(at);
             last.input_start_at = Some(Instant::now());
+        }
+    }
+
+    /// In-place scrolling does not rebase absolute marks. Invalidate only the newest pre-C
+    /// proof when the moved rows include A or the input span from B down. While the prompt
+    /// is still being drawn, the first B will establish input at its post-scroll position.
+    pub(super) fn invalidate_input_on_row_move(&mut self, top: usize, bottom: usize) {
+        let history = self.scrollback.len() as u64;
+        let moved = history + top as u64..=history + bottom as u64;
+        if let Some(prompt) = self
+            .prompts
+            .back_mut()
+            .filter(|prompt| !prompt.output_seen && prompt.input_start_at.is_some())
+        {
+            prompt.input_proof_lost |= prompt.start_row.is_some_and(|row| moved.contains(&row))
+                || prompt.input_start.is_some_and(|(row, _)| row <= *moved.end());
+        }
+    }
+
+    /// Check the old geometry before resizing. A surviving blank suffix is evidence only when
+    /// no input mark or nonblank draft cell was clipped; a severed wide lead is clipped too.
+    pub(super) fn invalidate_input_on_clip(&mut self, cols: u16, rows: u16) {
+        if cols >= self.cols && rows >= self.rows {
+            // When: cols and rows only grow, padding does not remove evidence or restore a lost proof.
+            return;
+        }
+        let Some(prompt) =
+            self.prompts.back().filter(|prompt| !prompt.output_seen && !prompt.input_proof_lost)
+        else {
+            // When: there is no pre-C prompt with intact evidence, the clip cannot revoke readiness.
+            return;
+        };
+        let history = self.scrollback.len() as u64;
+        let bottom = history + u64::from(rows);
+        let lost = prompt.start_row.is_some_and(|row| row >= bottom)
+            || prompt.input_start.is_some_and(|(input_row, input_col)| {
+                if input_row >= bottom || input_col >= cols {
+                    // When: input_row or input_col is clipped, padding must never resurrect B.
+                    return true;
+                }
+                // A width shrink may also truncate input in retained history. Height alone can only
+                // discard the visible rows past the new bottom; never rescan surviving history for it.
+                let first = if cols < self.cols { input_row } else { bottom };
+                (first..history + u64::from(self.rows)).any(|abs| {
+                    let Some(row) = self.row_at_abs(abs) else {
+                        // When: row_at_abs cannot locate a possible draft row, its contents are unproven.
+                        return true;
+                    };
+                    let from = draft_start(abs, input_row, input_col);
+                    let edge = usize::from(cols) - 1;
+                    let clipped = if abs >= bottom {
+                        0
+                    } else if row.get(edge).is_some_and(|cell| cell.flags.contains(CellFlags::WIDE))
+                    {
+                        // When: the edge retains a WIDE lead, resize blanks it with its clipped continuation.
+                        edge
+                    } else {
+                        // When: the edge holds no severed wide cell, only columns past it disappear.
+                        edge + 1
+                    };
+                    row.get_range(from.max(clipped), row.len())
+                        .any(|cell| cell.ch != ' ' && cell.ch != '\0')
+                })
+            });
+        if lost {
+            self.prompts.back_mut().expect("tested newest prompt").input_proof_lost = true;
         }
     }
 
@@ -426,30 +493,47 @@ impl Grid {
             .find(|prompt| prompt.start_row.is_some_and(|row| row > from_absolute_row))
     }
 
-    /// Rebase every region after `removed` rows left the front of history: a coordinate on a
-    /// removed row becomes `None`. A region whose start left is kept while its command is running
-    /// (C seen, no D) or while it is the pinned run's, so a long command's completion is not
-    /// lost; any other such region can no longer name a prompt and is dropped.
+    /// Rebase every region after `removed` rows left the front of history, or were discarded by a
+    /// scroll with history off: a coordinate on a removed row becomes `None`. A region whose start
+    /// left is kept while its command is running (C seen, no D), while it is the pinned run's, so a
+    /// long command's completion is not lost, or while it is the newest and has no C, so readiness
+    /// refuses its lost prompt instead of reading an older one; any other such region is dropped.
     pub(super) fn rebase_prompts_after_drain(&mut self, removed: u64) {
         let rebase = |row: Option<u64>| row.and_then(|row| row.checked_sub(removed));
         // The pinned run's region is kept until the run ends, so its C and D still reach the pin.
         let is_alt = self.is_alt();
         let pinned = self.pinned_run.filter(|run| run.alt == is_alt).map(|run| run.seq);
+        let open_newest =
+            self.prompts.back().filter(|prompt| !prompt.output_seen).map(|prompt| prompt.seq);
         self.prompts.retain_mut(|prompt| {
             let start = rebase(prompt.start_row);
             let running = prompt.output_seen && !prompt.completed;
-            if start.is_none() && !running && Some(prompt.seq) != pinned {
-                // When: the start left history and the region is neither `running` nor `pinned`,
-                // nothing can still complete it.
+            let kept = Some(prompt.seq) == pinned || Some(prompt.seq) == open_newest;
+            if start.is_none() && !running && !kept {
+                // When: the start left history and the region is neither `running` nor `kept` (the
+                // pinned run's or the open newest), nothing can still complete it.
                 return false;
             }
             prompt.start_row = start;
             prompt.input_start =
                 prompt.input_start.and_then(|(row, col)| Some((row.checked_sub(removed)?, col)));
+            // The first B is still recorded. Only a fresh A/B pair can replace its evicted row.
+            prompt.input_proof_lost |=
+                prompt.input_start_at.is_some() && prompt.input_start.is_none();
             prompt.output_start_row = rebase(prompt.output_start_row);
             prompt.end_row = rebase(prompt.end_row);
             true
         });
+    }
+}
+
+/// Only the input row excludes the prompt's prefix; every later row can contain a draft.
+fn draft_start(abs: u64, input_row: u64, input_col: u16) -> usize {
+    if abs == input_row {
+        usize::from(input_col)
+    } else {
+        // When: abs follows input_row, the full line belongs to the possible draft.
+        0
     }
 }
 

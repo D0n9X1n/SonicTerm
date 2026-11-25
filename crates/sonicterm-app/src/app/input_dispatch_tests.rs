@@ -1,8 +1,5 @@
 use super::*;
-use crate::app::spawn_pane::{
-    osc52_decision, Osc52Outcome, Osc52Refusal, MAX_OSC52_CLIPBOARD_BYTES,
-};
-use base64::Engine;
+use crate::app::input_dispatch::MotionProfile;
 use sonicterm_io::pty::{PtyInputDiagnostics, PtyInputError, PtyWriterPhase};
 
 // A burst retains only its final position and retries it without requiring another native event.
@@ -77,23 +74,37 @@ fn pointer_motion_isolated_slots_clear_on_disconnect() {
     assert_eq!(second.take(), b"second");
 }
 
-// A shell or encoding transition invalidates deferred bytes before retry or a following key.
+/// The profile of a no-button motion under 1003 with SGR reports on the alternate screen.
+fn any_motion_sgr() -> MotionProfile {
+    MotionProfile {
+        tracking: MouseTracking::AnyMotion,
+        format: sonicterm_vt::vt::MouseFormat::Sgr,
+        is_alt: true,
+        held: false,
+    }
+}
+
+// A shell or encoding transition invalidates deferred bytes before retry or a following key: the
+// queued report keeps its encode-time profile, so any live change of mode, format or screen drops it.
 #[test]
 fn pointer_motion_profile_change_discards_stale_report() {
     let mut motion = PendingPointerMotion::default();
-    let active = Some((MouseTracking::AnyMotion, true, true));
-    motion.validate_profile(active);
-    motion.replace(b"motion");
-    motion.validate_profile(active);
+    let active = (MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::Sgr, true);
+    motion.offer(any_motion_sgr(), b"motion");
+    motion.validate(Some(active));
     assert_eq!(motion.len, 6);
     for changed in [
-        Some((MouseTracking::Off, true, true)),
-        Some((MouseTracking::AnyMotion, false, true)),
-        Some((MouseTracking::AnyMotion, true, false)),
+        (MouseTracking::Off, sonicterm_vt::vt::MouseFormat::Sgr, true),
+        (MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::X10, true),
+        (MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::SgrPixels, true),
+        (MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::Sgr, false),
     ] {
-        motion.validate_profile(active);
-        motion.replace(b"motion");
-        motion.validate_profile(changed);
+        motion.offer(any_motion_sgr(), b"motion");
+        motion.validate(Some(changed));
+        assert_eq!(motion.len, 0, "{changed:?}");
+        // The profile is never retagged: the original modes do not revive a dropped report, and a
+        // later report under them is still validated against its own encode-time profile.
+        motion.validate(Some(active));
         assert_eq!(motion.len, 0);
     }
 }
@@ -102,14 +113,45 @@ fn pointer_motion_profile_change_discards_stale_report() {
 #[test]
 fn pointer_motion_unknown_profile_retains_pending_position() {
     let mut motion = PendingPointerMotion::default();
-    let active = Some((MouseTracking::AnyMotion, true, true));
-    motion.validate_profile(active);
-    motion.replace(b"latest");
-    motion.validate_profile(None);
-    assert_eq!(motion.profile, active);
+    let active = (MouseTracking::AnyMotion, sonicterm_vt::vt::MouseFormat::Sgr, true);
+    motion.offer(any_motion_sgr(), b"latest");
+    motion.validate(None);
+    assert_eq!(motion.profile, Some(any_motion_sgr()));
     assert_eq!(motion.len, 6);
-    motion.validate_profile(active);
+    motion.validate(Some(active));
     assert_eq!(motion.take(), b"latest");
+}
+
+// Writer admission alone records a 1016 report as sent: a flush the writer refuses keeps the report
+// pending and unrecorded, so it is offered again; once admitted, an identical offer is dropped, and a
+// motion prepended to admitted discrete input counts as admitted too.
+#[test]
+fn pixel_motion_is_recorded_only_when_the_writer_admits_it() {
+    let pixels =
+        MotionProfile { format: sonicterm_vt::vt::MouseFormat::SgrPixels, ..any_motion_sgr() };
+    let report = b"\x1b[<35;5;7M";
+    let mut motion = PendingPointerMotion::default();
+    motion.offer(pixels, report);
+    motion.flush(|bytes| Err(PtyInputError::QueueFull(bytes))).unwrap();
+    assert_eq!(motion.last_admitted, None, "a refused flush is not admission");
+    motion.offer(pixels, report);
+    assert_eq!(motion.len, report.len(), "the refused report is still offered");
+    let mut disconnected = PendingPointerMotion::default();
+    disconnected.offer(pixels, report);
+    assert!(disconnected.flush(|bytes| Err(PtyInputError::WriterDisconnected(bytes))).is_err());
+    assert_eq!(disconnected.last_admitted, None, "a disconnected writer admits nothing");
+    motion.flush(|_| Ok(())).unwrap();
+    motion.offer(pixels, report);
+    assert_eq!(motion.len, 0, "an identical report after admission is dropped");
+    let mut prefixed = PendingPointerMotion::default();
+    prefixed.offer(pixels, report);
+    prefixed.send_ordered(b"key".to_vec(), |_| Ok(())).unwrap();
+    prefixed.offer(pixels, report);
+    assert_eq!(prefixed.len, 0, "a motion admitted ahead of discrete input counts as sent");
+    let mut refused = PendingPointerMotion::default();
+    refused.offer(pixels, report);
+    let _ = refused.send_ordered(b"key".to_vec(), |bytes| Err(PtyInputError::QueueFull(bytes)));
+    assert_eq!(refused.last_admitted, None, "a refused combined write admits no motion");
 }
 
 // Real app admission retains motion across parser contention and drains it after the lock is released.
@@ -122,9 +164,23 @@ fn pointer_motion_app_retries_after_parser_contention() {
     let pane = app.main_mut().unwrap().panes.get_mut(&pane_id).unwrap();
     pane.pty = Some(pty);
     let parser = pane.parser.clone();
-    parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    {
+        let mut locked = parser.lock();
+        locked.advance(b"\x1b[?1003h\x1b[?1006h");
+        pane.__test_publish_input_modes(&locked);
+    }
     let guard = parser.lock();
-    assert!(app.write_to_pane(pane_id, b"\x1b[<35;1;1M".to_vec(), PtyInputSource::PointerMotion));
+    // The pane publishes 1003 and 1006 on the primary screen, the profile this no-button report has.
+    app.write_pointer_motion(
+        pane_id,
+        crate::app::input_dispatch::MotionProfile {
+            tracking: sonicterm_vt::vt::MouseTracking::AnyMotion,
+            format: sonicterm_vt::vt::MouseFormat::Sgr,
+            is_alt: false,
+            held: false,
+        },
+        b"\x1b[<35;1;1M".to_vec(),
+    );
     let now = Instant::now();
     assert_eq!(app.flush_pointer_motion(now), Some(now + Duration::from_millis(10)));
     assert_ne!(app.pane_by_id(pane_id).unwrap().pending_pointer_motion.len, 0);
@@ -174,7 +230,6 @@ fn rejection_event_preserves_identity_and_observations_without_payload() {
         PtyInputSource::FocusReport,
         PtyInputSource::TerminalReply,
         PtyInputSource::ScriptDraft,
-        PtyInputSource::StateMachine,
     ] {
         let event = pty_input_rejected_event(
             7,
@@ -323,16 +378,25 @@ fn terminal_key_dispatch_excludes_attempted_but_undelivered_panes() {
     );
     let pane_id = app.__test_seed_tab("missing-pty");
 
-    let delivered = app.dispatch_terminal_key_writes(vec![
-        (
-            pane_id,
-            super::keyboard_protocol::EncodedKey { bytes: b"a".to_vec(), held: HeldKey::Legacy },
-        ),
-        (
-            u64::MAX,
-            super::keyboard_protocol::EncodedKey { bytes: b"b".to_vec(), held: HeldKey::Legacy },
-        ),
-    ]);
+    let delivered = app.dispatch_terminal_key_writes(
+        vec![
+            (
+                pane_id,
+                super::keyboard_protocol::EncodedKey {
+                    bytes: b"a".to_vec(),
+                    held: HeldKey::Legacy,
+                },
+            ),
+            (
+                u64::MAX,
+                super::keyboard_protocol::EncodedKey {
+                    bytes: b"b".to_vec(),
+                    held: HeldKey::Legacy,
+                },
+            ),
+        ],
+        true,
+    );
 
     assert!(delivered.is_empty());
 }
@@ -445,102 +509,14 @@ fn accepted_windows_pty_input_arms_foreground_probe() {
         .get_mut(&pane_id)
         .expect("synthetic pane")
         .pty = Some(pty);
-    let effect = sonicterm_app_core::AppEffect::PtyWrite {
-        pane: sonicterm_app_core::PaneId(pane_id),
-        data: bytes::Bytes::from_static(b"ver\r"),
-    };
     let before = std::time::Instant::now();
 
-    app.dispatch_pty_write_effect(&effect, PtyInputSource::Keyboard);
+    app.write_to_pane(pane_id, b"ver\r".to_vec(), PtyInputSource::Keyboard);
 
     let wake = app.services.foreground_schedule.activity_wake.expect("accepted input arms a probe");
     assert!(wake.fixed);
     assert!(wake.due >= before + FOREGROUND_PROCESS_TTL);
     assert!(wake.due <= std::time::Instant::now() + FOREGROUND_PROCESS_TTL);
-}
-
-/// Valid OSC 52 clipboard writes decode exactly before app-thread delivery.
-#[test]
-fn osc52_clipboard_write_decodes_bounded_utf8() {
-    let encoded = base64::engine::general_purpose::STANDARD.encode("Copilot copied text");
-
-    assert_eq!(osc52_decision('c', &encoded), Osc52Outcome::Write("Copilot copied text".into()));
-}
-
-/// The documented OSC 52 cap accepts its exact byte count and rejects the next byte.
-#[test]
-fn osc52_clipboard_write_enforces_actual_decoded_boundary() {
-    let exact = vec![b'x'; MAX_OSC52_CLIPBOARD_BYTES];
-    let exact_encoded = base64::engine::general_purpose::STANDARD.encode(&exact);
-    let accepted = osc52_decision('c', &exact_encoded);
-    assert!(matches!(accepted, Osc52Outcome::Write(text) if text.len() == exact.len()));
-
-    let oversized = vec![b'x'; MAX_OSC52_CLIPBOARD_BYTES + 1];
-    let oversized_encoded = base64::engine::general_purpose::STANDARD.encode(oversized);
-    assert_eq!(
-        osc52_decision('c', &oversized_encoded),
-        Osc52Outcome::Refused(Osc52Refusal::TooLarge)
-    );
-}
-
-/// Queries, unsupported targets, malformed data, and oversized writes fail closed.
-#[test]
-fn osc52_clipboard_write_rejects_unsupported_or_unsafe_payloads() {
-    // Each refusal names its reason; none can reach the native clipboard.
-    let refused = |reason| Osc52Outcome::Refused(reason);
-    assert_eq!(osc52_decision('c', "?"), refused(Osc52Refusal::Read));
-    assert_eq!(osc52_decision('p', "?"), refused(Osc52Refusal::Read), "a read of any selection");
-    assert_eq!(osc52_decision('p', "dGV4dA=="), refused(Osc52Refusal::Selection('p')));
-    assert_eq!(osc52_decision('c', ""), refused(Osc52Refusal::Invalid));
-    assert_eq!(osc52_decision('c', "not base64!"), refused(Osc52Refusal::Invalid));
-    assert_eq!(
-        osc52_decision('c', &"A".repeat((MAX_OSC52_CLIPBOARD_BYTES + 1).div_ceil(3) * 4 + 4)),
-        refused(Osc52Refusal::TooLarge)
-    );
-    let invalid_utf8 = base64::engine::general_purpose::STANDARD.encode([0xff, 0xfe]);
-    assert_eq!(osc52_decision('c', &invalid_utf8), refused(Osc52Refusal::Invalid));
-}
-
-/// Windows reasserts an OSC 52 write after a failing native helper, but never over a newer copy.
-#[cfg(target_os = "windows")]
-#[test]
-fn windows_osc52_reassertion_is_bounded_and_supersedable() {
-    let mut app = App::new(
-        sonicterm_cfg::theme::Theme::default(),
-        sonicterm_cfg::config::Config::default(),
-        sonicterm_cfg::keymap::Keymap::default(),
-    );
-    app.__test_set_memory_clipboard("old");
-
-    app.handle_clipboard_write("Copilot selection".into());
-    let due = app
-        .pending_osc52_reassert
-        .as_ref()
-        .expect("a successful Windows OSC 52 write schedules one reassertion")
-        .due;
-
-    app.testing.test_clipboard_text = Some("old".into());
-    app.reassert_osc52_clipboard_if_due(due);
-    assert_eq!(app.__test_memory_clipboard().as_deref(), Some("Copilot selection"));
-    assert!(app.pending_osc52_reassert.is_none(), "the retry is one-shot");
-
-    app.handle_clipboard_write("stale OSC 52".into());
-    app.testing.test_clipboard_text = Some("newer external copy".into());
-    app.reassert_osc52_clipboard_if_due(due + std::time::Duration::from_secs(1));
-    assert_eq!(app.__test_memory_clipboard().as_deref(), Some("newer external copy"));
-
-    app.handle_clipboard_write("another stale OSC 52".into());
-    assert!(app.set_clipboard_text("newer local copy".into()));
-    app.reassert_osc52_clipboard_if_due(due + std::time::Duration::from_secs(2));
-    assert_eq!(app.__test_memory_clipboard().as_deref(), Some("newer local copy"));
-
-    app.pending_osc52_reassert = Some(PendingOsc52Reassert {
-        text: "must not replace unreadable content".into(),
-        previous_text: None,
-        due,
-    });
-    app.reassert_osc52_clipboard_if_due(due);
-    assert_eq!(app.__test_memory_clipboard().as_deref(), Some("newer local copy"));
 }
 
 /// Event-loop clipboard delivery uses the same system/test write seam as local copy.
@@ -570,28 +546,4 @@ fn script_draft_rejection_becomes_a_visible_warning() {
     app.handle_script_draft_rejected("unsafe script path".to_string());
 
     assert_eq!(app.__test_main_notification_message(), Some("unsafe script path"));
-}
-
-/// A reload to `osc52 = "deny"` drops a pending reassertion: reloading allow before its deadline
-/// and servicing it then writes nothing the denial stopped.
-#[cfg(windows)]
-#[test]
-fn reloading_deny_cancels_a_pending_osc52_reassertion() {
-    use sonicterm_cfg::config::{Config, Osc52Policy};
-    let mut app = App::new(
-        sonicterm_cfg::theme::Theme::default(),
-        Config::default(),
-        sonicterm_cfg::keymap::Keymap::default(),
-    );
-    app.__test_set_memory_clipboard("before");
-    app.handle_clipboard_write("from OSC 52".into());
-    let due = app.pending_osc52_reassert.as_ref().expect("a reassertion is armed").due;
-    let mut deny = Config::default();
-    deny.terminal.osc52 = Osc52Policy::Deny;
-    app.apply_new_config(deny);
-    assert!(app.pending_osc52_reassert.is_none(), "deny cancelled the reassertion");
-    app.apply_new_config(Config::default());
-    app.__test_set_memory_clipboard("user copy");
-    app.reassert_osc52_clipboard_if_due(due);
-    assert_eq!(app.__test_memory_clipboard().as_deref(), Some("user copy"));
 }

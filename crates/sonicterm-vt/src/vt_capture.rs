@@ -195,7 +195,8 @@ impl Parser {
     /// Bytes and buffers this parser is holding mid-sequence.
     ///
     /// Covers the in-flight media capture, the raw OSC palette accumulator, and
-    /// reserved capacity in both. Excludes the grid and the hyperlink registry,
+    /// reserved capacity in both. Excludes the grid, the hyperlink registry and
+    /// the persistent program metadata ([`Self::program_metadata_amount`]),
     /// which report their own retention: a pane composes these figures rather
     /// than any one of them restating another.
     ///
@@ -211,11 +212,11 @@ impl Parser {
             .map(MediaCapture::retained_bytes)
             .sum::<usize>();
         let osc_bytes = match &self.raw_osc {
-            Some(RawOsc::Palette { content }) | Some(RawOsc::Semantic { content, .. }) => {
-                content.capacity()
-            }
+            Some(RawOsc::Semantic { content, .. }) => content.capacity(),
             Some(RawOsc::Iterm2 { capture, .. }) => capture.retained_bytes(),
-            Some(RawOsc::Probe { .. }) | None => 0,
+            Some(RawOsc::Clipboard(_)) => self.clipboard_retained_bytes(),
+            Some(RawOsc::KittyClipboard(_)) => self.kitty_clipboard_retained_bytes(),
+            Some(RawOsc::Probe { .. } | RawOsc::Refused { .. }) | None => 0,
         };
         // OSC 99 chunks wait here until their notification completes, at most MAX_NOTIFY_BYTES.
         let notify_bytes = self.performer.kitty_notifications.retained_bytes();
@@ -251,18 +252,23 @@ impl Parser {
             });
         let osc = match &self.raw_osc {
             Some(RawOsc::Iterm2 { capture, .. }) => capture.seen,
-            Some(RawOsc::Probe { .. })
-            | Some(RawOsc::Palette { .. })
-            | Some(RawOsc::Semantic { .. })
+            Some(
+                RawOsc::Probe { .. }
+                | RawOsc::Semantic { .. }
+                | RawOsc::Refused { .. }
+                | RawOsc::Clipboard(_)
+                | RawOsc::KittyClipboard(_),
+            )
             | None => 0,
         };
         direct.saturating_add(osc)
     }
 
-    /// Abandon any capture or raw OSC palette accumulation in flight, releasing
+    /// Abandon any capture or raw OSC accumulation in flight, releasing
     /// its retained allocation.
     ///
-    /// Returns the bytes released. The partially-received payload is
+    /// Returns the bytes released; pending OSC 99 chunks count only when an OSC 99 in flight is
+    /// cancelled, which drops them. The partially-received payload is
     /// discarded rather than dispatched: a fragment of an image decodes to
     /// nothing useful, so surfacing it would trade memory for a broken
     /// picture instead of no picture.
@@ -273,6 +279,9 @@ impl Parser {
     /// megabytes of base64 into the grid — the user would lose the image
     /// *and* the screen. The discard ends at the transfer's terminator, or at
     /// the first newline if the sender died and no terminator is ever coming.
+    /// A title, CWD, link, program, color or user-variable OSC in flight is discarded through
+    /// its own collector's terminators instead, as an over-cap one is, and an
+    /// open kitty upload reclaimed beside it leaves that discard in place.
     ///
     /// Intended for a capture the host has determined is stalled — see
     /// [`Parser::capture_progress`]. Cancelling one that is merely slow costs
@@ -282,9 +291,33 @@ impl Parser {
     /// Returns 0 and does nothing only when neither a media capture nor a raw
     /// OSC palette accumulation is retaining bytes.
     pub fn cancel_capture(&mut self) -> usize {
-        let released = self.retained_amount().bytes;
+        // Pending OSC 99 chunks are freed only when the cancelled OSC is itself an OSC 99 chunk;
+        // otherwise they stay, so they are not counted as released.
+        let notify_freed = matches!(self.raw_osc, Some(RawOsc::Semantic { code: 99, .. }));
+        let kept_bytes = if notify_freed {
+            0
+        } else {
+            // When: no OSC 99 is in flight (`notify_freed` false), its pending chunks are kept.
+            self.performer.kitty_notifications.retained_bytes()
+        };
+        let released = self.retained_amount().bytes.saturating_sub(kept_bytes);
+        // Whether a title, CWD, link, program or color OSC is in flight, accepted or already
+        // refused, and whether its last byte was an ESC that may start ST.
         let semantic = match self.raw_osc.as_ref() {
-            Some(RawOsc::Semantic { code, pending_esc, .. }) => Some((*code, *pending_esc)),
+            Some(RawOsc::Semantic { pending_esc, .. } | RawOsc::Refused { pending_esc }) => {
+                Some(*pending_esc)
+            }
+            Some(RawOsc::KittyClipboard(collector)) => {
+                // An open OSC 5522 packet is dropped whole and swallowed as a refused semantic
+                // OSC is, so no part of it is raised or printed.
+                Some(collector.pending_esc)
+            }
+            Some(RawOsc::Clipboard(_)) => {
+                // When: RawOsc::Clipboard is open, it aborts like the host's expiry and the rest
+                // of the OSC is swallowed through its terminator.
+                self.abort_clipboard_stream();
+                return 0;
+            }
             _ => None,
         };
         if released == 0 && self.live_capture_count() == 0 && semantic.is_none() {
@@ -296,26 +329,32 @@ impl Parser {
             || self.performer.dcs_capture.is_some()
             || self.raw_osc.is_some();
         self.abort_kitty_transfer();
+        if let Some(pending_esc) = semantic {
+            // When: semantic holds an OSC in flight, it becomes a refusal in the collector's own
+            // framing: only its BEL, ST, CAN or SUB ends it, never 0x9c or a newline.
+            if let Some(RawOsc::Semantic { code, content, .. }) = self.raw_osc.as_ref() {
+                self.performer.invalidate_semantic_osc(*code, content);
+            }
+            self.raw_osc = Some(RawOsc::Refused { pending_esc });
+            return released;
+        }
         if !in_sequence {
             // When: in_sequence is false, only a kitty transfer was open between chunks; ground stays, later chunks are swallowed.
             return released;
         }
-        let escape_family =
-            if matches!(self.raw_osc, Some(RawOsc::Iterm2 { .. } | RawOsc::Semantic { .. })) {
-                EscapeFamily::Osc
-            } else {
-                EscapeFamily::String
-            };
-        if let Some((code, _)) = semantic {
-            self.performer.invalidate_semantic_osc(code);
-        }
+        let escape_family = if matches!(self.raw_osc, Some(RawOsc::Iterm2 { .. })) {
+            EscapeFamily::Osc
+        } else {
+            // With no iTerm2 capture, the cancelled sequence is an APC or DCS string.
+            EscapeFamily::String
+        };
         self.inner = vte::Parser::new();
         self.reset_cancelled_escape();
         // OSC payloads also accept BEL, unlike APC/DCS strings.
         self.escape_family = escape_family;
         self.discarding_oversized_escape = true;
-        self.discard_escape_pending_esc = semantic.is_some_and(|(_, pending)| pending);
-        self.discard_exits_on_newline = semantic.is_none();
+        self.discard_escape_pending_esc = false;
+        self.discard_exits_on_newline = true;
         self.performer.fast_path_ready = false;
         released
     }

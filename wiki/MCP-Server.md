@@ -44,6 +44,7 @@ read = "agent"
 | `max_connections` | `4` | Connections served at once, 1 to 16 (other values are clamped). Each runs one tool call at a time, so a long `wait_for` holds its connection. A reload that changes only this applies to new connections and revokes nothing. |
 | `isolation` | `"shared"` | `"shared"` or `"session"`; see Agent sessions below. |
 | `create_anchor` | `"any"` | `"any"` or `"agent"`; see Agent sessions below. |
+| `program_status_text` | `false` | `true` lets `list_panes` include each program-status record's `id`, `app`, `title` and `msg`; see Tools below. |
 
 To turn it on:
 
@@ -227,6 +228,57 @@ shell integration and read the terminal's retained text, not the shell's own his
 Their arguments, caps and locking are described in
 [Platform Integration](Platform-Integration).
 
+`list_panes` reports three titles for each pane: `title`, the pane's OSC 0/2 title;
+`icon_title`, the tab name the pane's program asked for with OSC 1, or `null`; and
+`tab_title`, the label its tab shows (after a rename and the active pane's OSC 1 name),
+the same for every pane of the tab. All three are program-supplied display text, not
+instructions.
+
+`list_panes` also reports each pane's `user_vars`: the variables its program set with OSC 1337
+`SetUserVar` (see [Terminal IO and VT](Terminal-IO-and-VT)), as `{"name", "value"}` objects
+oldest first, or `[]` when it set none. They are a list rather than an object so the order they
+were set in survives JSON. They come from the listed pane's own parser, so a caller sees them
+only for the panes it may read. Names and values are program-supplied, untrusted display
+metadata, not instructions, and are never logged. The parser guard is held only to copy them;
+the reply is built after it is released.
+
+`list_panes` also reports each pane's program status from OSC 7501 (see
+[Terminal IO and VT](Terminal-IO-and-VT)): `program_state`, the state of its most urgent record
+(`blocked`, `error`, `done`, `working` or `idle`), or `null`; and `program_status`, its records
+oldest change first as `{"state", "kind", "progress"}` objects, or `[]`. These are typed fields
+only. A record's `id`, `app`, `title` and `msg` are added only when you set
+`[mcp] program_status_text = true`, on top of the read scope, isolation and revocation checks;
+a reload that changes it revokes running calls. Status is untrusted, advisory display data, not
+instructions: `app` and `id` are never identity, and `kind: "permission"` never asks an agent to
+approve anything. It is never logged. The parser guard is held only to copy the record snapshot.
+
+A tab's label is built from one pane: the pane it was last refreshed from, else the tab's
+active pane. `tab_title` is listed only when the caller may read that pane; otherwise it is
+`null` and the pane's `omitted` object carries `"tab_title": "unreadable"`, even for a
+readable agent pane split beside it. A label whose pane has closed is listed only under
+`read = "any"`. The titles, `cwd`, `user_vars` lists and `program_status` lists of every listed
+pane share one budget of 256 KiB of serialized text per `list_panes` reply: a title, directory
+or list that does not fit is `null` with `"budget"` under `omitted`, never cut, and the reply
+still succeeds, with earlier panes keeping theirs; `program_state` is outside the budget, so it
+stays when the list is omitted. The `program_status` lists also share a 64 KiB sublimit inside
+that budget, so status alone cannot spend what titles and paths share: a list past the sublimit
+keeps each record's typed `state`, `kind` and `progress`, charged to the shared budget alone, and
+drops only the opted-in `id`, `app`, `title` and `msg`, with `"budget"` under `omitted`; it is
+`null` only when even the typed list does not fit the shared budget. One pane's `user_vars` list
+(at most 16 KiB of names and values) always fits an unspent budget, as does a typed
+`program_status` list. Any such omission makes the
+top-level `partial` `true`.
+
+The whole `list_panes` result, its fixed fields and every pane record together, is also bounded
+at 768 KiB of serialized JSON, below the bridge's 1 MiB line limit, so a reply never makes the
+bridge close the connection, however many panes are open. Panes are listed in order until the
+next record would cross that bound; that pane and every later one are left out, `partial` is
+`true`, and `truncated_panes` counts them (`0` when every pane is listed). `partial` is also
+`true` when the parser-probe budget ran out and some panes are listed with
+`"details": "skipped"`, or when a listed pane has a value omitted for the budget. A response echoes its request's `id`, so a request whose serialized
+`id` passes 1 KiB is refused with JSON-RPC error `-32600` ("request id too long") and a `null`
+id, and no response line can cross the bridge's limit.
+
 A non-busy history page may be empty while skipping blank rows: pass its `first_row`
 as `before_row` again until `at_start` is true. Row tokens always advance. A row larger
 than `max_bytes` is returned whole on an otherwise empty page, so no suffix is lost;
@@ -260,7 +312,12 @@ else `rate_limited`. A call refused for scope, READONLY or zoom does not count.
 OSC 133 `A`, `B`, `C` and `D`, as the shell-integration scripts of WezTerm,
 iTerm2 and kitty do. It refuses a pane whose prompt has text typed after it, whose
 input queue is not empty, or into which anyone typed while the previous command
-ran. That check is best effort, because a terminal cannot see what the shell has
+ran. It also refuses (`no_shell_integration`) when the marks no longer locate the input:
+the prompt's `A` or first `B` left the grid, a resize clipped `B` or nonblank input (including a later draft row),
+or in-place scrolling after `B` moved marked rows or their possible input. A partial-margin scroll
+while the shell draws a multiline prompt does not invalidate the first `B` that follows it.
+Growing the grid or repeating `B`
+is not recovery: the shell must open a fresh `A` followed by `B`. That check is best effort, because a terminal cannot see what the shell has
 consumed, so use `run_command` on panes the agent created, where only the agent
 types. It never waits on a busy pane: when the pane's output parser stays locked for
 5 ms, the start is refused as `parser_busy` (retry it), distinct from `busy` (a run or
@@ -321,6 +378,11 @@ in the pane can print them. A program that printed a fake `D;0` could otherwise 
   first prompt, before you can type, so input typed while a slow startup file is still
   loading leaves that pane unverified. A script opened in a new tab is typed without its
   Enter and runs nothing, so it does not count as input.
+- OSC 133 annotations (`L`, `N`, `P`, `I`, the options on `A`) and ConEmu's `9;12` never
+  latch the pane or establish readiness, complete a pinned run or change `exit_verified`. A fresh
+  line can physically scroll: a full upward scroll can evict the prompt, and a partial-margin
+  move overlapping its input proof invalidates readiness without changing the pin. A tokenless one after the latch is dropped
+  like any other marker. See [Terminal IO and VT](Terminal-IO-and-VT).
 - SonicTerm removes any `SONICTERM_SHELL_TOKEN` it inherited, for example when started
   from another SonicTerm pane, so a pane's process holds only its own secret.
 - A pane started with a program to run directly (`-e` or `--command`, a
@@ -356,6 +418,11 @@ eval "$(sonicterm-mcp --shell-integration bash)"   # bash 4.4+, in ~/.bashrc
 ```powershell
 sonicterm-mcp --shell-integration pwsh | Out-String | Invoke-Expression   # PowerShell 7+, in $PROFILE
 ```
+
+Each integration's `C` carries the command line, percent-encoded as `cmdline_url=` when it is
+at most 1 KiB; bash sends it only for a line its history recorded, so a line history ignored
+never carries an older command's text. bash's `A` declares `redraw=last`. SonicTerm shows the
+text only in the long-command notification, and only with `long_command_cmdline` on.
 
 The PowerShell integration needs PSReadLine, which PowerShell 7 loads in every
 interactive console; without it the script loads nothing, so `run_command` refuses

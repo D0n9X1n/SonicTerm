@@ -20,6 +20,9 @@ pub(in crate::app) struct InteractionState {
     pub(in crate::app) agent_disconnect: Option<overlays::AgentDisconnect>,
     /// Tab captured when a rename or color editor opened; submit edits only that live tab.
     pub(in crate::app) tab_edit_target: Option<overlays::TabEditTarget>,
+    /// The client window the pointer is over (its last enter or move, until it leaves that window);
+    /// only this window writes the native cursor.
+    pub(in crate::app) pointer_window: Option<WindowId>,
     /// One modal press retains its source and target until release or an intervening input change.
     pub(in crate::app) palette_pointer_capture: Option<overlays::PalettePointerCapture>,
     /// Left-button gesture inside a palette or search query, bound to its source window and field.

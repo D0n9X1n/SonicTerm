@@ -88,10 +88,131 @@ pub(in crate::app) fn publish_grid_change(
 mod spawn_pane_vt_tests;
 
 #[cfg(test)]
+#[path = "spawn_pane_vt_clipboard_tests.rs"]
+mod spawn_pane_vt_clipboard_tests;
+
+#[cfg(test)]
 #[path = "spawn_pane_vt_fuzz_tests.rs"]
 mod spawn_pane_vt_fuzz_tests;
 
+/// What one section's OSC 5522 requests produced: status replies (one packet each, so the batch
+/// can bound them at packet boundaries), committed writes by wire position, and consent tickets.
+#[derive(Default)]
+pub(in crate::app) struct KittySection {
+    pub(in crate::app) status: Vec<Vec<u8>>,
+    pub(in crate::app) writes: Vec<(usize, super::super::osc52_stream::ClipboardJobHandle)>,
+    pub(in crate::app) tickets: Vec<super::super::osc52_read_ticket::ConsentTicket>,
+}
+
 impl PaneVtHandles {
+    /// Settle the clipboard intake at `now`: abort an OSC 52 stream past its expiry, and finish an
+    /// open OSC 5522 write past its deadline or under `deny`, sending its status through
+    /// `send_reply`.
+    pub(in crate::app) fn settle_clipboard_intake(
+        &self,
+        now: Instant,
+        send_reply: &mut impl FnMut(Vec<u8>),
+    ) {
+        self.expire_clipboard_stream(now);
+        self.service_kitty_clipboard(now, send_reply);
+    }
+
+    /// Take one ready output chunk at `now`: settle the clipboard intake first, then `parse` it,
+    /// so a terminator or commit the chunk carries never lands on a stream or write that expired
+    /// or whose policy generation moved before it was read. The worker loop and its tests run
+    /// this one step, so they share its order.
+    pub(in crate::app) fn take_ready_output<Reply: FnMut(Vec<u8>)>(
+        &self,
+        now: Instant,
+        send_reply: &mut Reply,
+        parse: impl FnOnce(&mut Reply),
+    ) {
+        self.settle_clipboard_intake(now, send_reply);
+        parse(send_reply);
+    }
+
+    /// The worker's wait at `now`: `flush_wait`, shortened to the open clipboard stream's expiry.
+    pub(in crate::app) fn clipboard_wait(&self, now: Instant, flush_wait: Duration) -> Duration {
+        let osc52 = self.clipboard.borrow().deadline();
+        let kitty = self.kitty_clipboard.borrow().deadline();
+        match osc52.into_iter().chain(kitty).min() {
+            Some(deadline) => flush_wait.min(deadline.saturating_duration_since(now)),
+            None => flush_wait,
+        }
+    }
+
+    /// Finish an open OSC 5522 write whose deadline passed (`EBUSY`) or whose policy is now `deny`
+    /// (`EPERM`), sending its status through `send_reply`; runs on every worker wake.
+    pub(in crate::app) fn service_kitty_clipboard(
+        &self,
+        now: Instant,
+        send_reply: &mut impl FnMut(Vec<u8>),
+    ) {
+        let reply = self.kitty_clipboard.borrow_mut().service(now);
+        if let Some(reply) = reply {
+            send_reply(reply);
+        }
+    }
+
+    /// Run one section's OSC 5522 requests: return the section's status replies, its committed
+    /// writes with their wire positions (posted in wire order with the section's OSC 52 writes),
+    /// and the consent tickets to post once its command epoch is published.
+    pub(in crate::app) fn run_kitty_section(
+        &self,
+        inbox: Option<&sonicterm_vt::vt::ClipboardInbox>,
+        requests: Vec<super::super::kitty_clipboard_tx::KittySectionRequest>,
+    ) -> KittySection {
+        use super::super::kitty_clipboard_tx::KittyStep;
+        let mut section = KittySection::default();
+        if requests.is_empty() {
+            // When: requests is empty, the section raised no OSC 5522 packet or RIS and the
+            // transaction is not touched.
+            return section;
+        }
+        let steps = self.kitty_clipboard.borrow_mut().run(inbox, requests, Instant::now());
+        for (position, step) in steps {
+            match step {
+                KittyStep::Silent => {
+                    // When: the step is Silent, the packet produced nothing to send.
+                }
+                KittyStep::Reply(reply) => section.status.push(reply),
+                KittyStep::Post(job) => {
+                    let job = super::super::osc52_stream::ClipboardJobHandle::new(job);
+                    section.writes.push((position, job));
+                }
+                KittyStep::Ticket(ticket) => section.tickets.push(ticket),
+            }
+        }
+        section
+    }
+
+    /// Post the OSC 5522 consent tickets a section admitted, after its command epoch.
+    pub(in crate::app) fn post_kitty_tickets(
+        &self,
+        tickets: Vec<super::super::osc52_read_ticket::ConsentTicket>,
+        emit: &mut impl FnMut(UserEvent),
+    ) {
+        for ticket in tickets {
+            let ticket = super::super::osc52_read_ticket::ClipboardTicketHandle::new(ticket);
+            emit(UserEvent::ClipboardTicket { pane_id: self.pane_id, ticket });
+        }
+    }
+
+    /// Abort a clipboard stream open past its expiry, in the intake and the parser, releasing its
+    /// lease and queued chunks; the parser swallows the rest of that OSC.
+    // Lock order: the clipboard borrow ends before the parser lock is taken.
+    pub(in crate::app) fn expire_clipboard_stream(&self, now: Instant) {
+        let Some(stream) = self.clipboard.borrow_mut().expire(now) else {
+            // When: no stream expired, the parser is not locked.
+            return;
+        };
+        let mut parser = self.parser.lock();
+        if parser.open_clipboard_stream() == Some(stream) {
+            // The parser still holds the expired stream, so it aborts it too.
+            parser.abort_clipboard_stream();
+        }
+    }
+
     /// Publish whether the program asked for a steady cursor, so blink deadlines stop without
     /// locking the parser; `None` restores the configured cursor, which may blink.
     // Ordering: cursor_steady is a self-contained Relaxed word this worker alone writes.

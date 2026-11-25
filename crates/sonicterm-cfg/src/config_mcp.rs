@@ -27,6 +27,9 @@ pub struct McpConfig {
     pub isolation: McpIsolation,
     /// Which panes `create_pane` may open a helper beside under `control = "agent"`.
     pub create_anchor: McpCreateAnchor,
+    /// Let `list_panes` include each OSC 7501 record's id, app, title and message for panes the
+    /// caller may read. Off by default: those are untrusted program-supplied text.
+    pub program_status_text: bool,
 }
 
 impl Default for McpConfig {
@@ -38,6 +41,7 @@ impl Default for McpConfig {
             max_connections: DEFAULT_MCP_CONNECTIONS,
             isolation: McpIsolation::default(),
             create_anchor: McpCreateAnchor::default(),
+            program_status_text: false,
         }
     }
 }

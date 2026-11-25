@@ -1,32 +1,20 @@
 use super::*;
 use crate::vt::vt_test_support::*;
 
-/// OSC 52 surfaces the selection and encoded payload without decoding on the parser thread.
-#[test]
-fn osc52_clipboard_write_is_typed_for_the_host() {
-    let mut parser = Parser::new(Grid::new(80, 24));
-
-    let events = parser.advance(b"\x1b]52;c;Q29waWxvdCBjb3B5\x07");
-
-    assert!(events.iter().any(|event| {
-        matches!(
-            event,
-            VtEvent::Clipboard { selection: 'c', data }
-                if data == "Q29waWxvdCBjb3B5"
-        )
-    }));
-}
-
 /// OSC 7 parsing keeps authority provenance while decoding the filesystem path.
 #[test]
 fn osc7_snapshot_preserves_authority_and_decodes_path() {
     assert_eq!(
         parse_osc7_cwd_snapshot("file://remote-host/home/user/My%20Files"),
-        Some(Osc7Cwd { authority: "remote-host".into(), path: "/home/user/My Files".into() })
+        Some(Osc7Cwd {
+            authority: "remote-host".into(),
+            path: "/home/user/My Files".into(),
+            uri_path: true
+        })
     );
     assert_eq!(
         parse_osc7_cwd_snapshot("file:///tmp/work"),
-        Some(Osc7Cwd { authority: String::new(), path: "/tmp/work".into() })
+        Some(Osc7Cwd { authority: String::new(), path: "/tmp/work".into(), uri_path: true })
     );
 }
 
@@ -50,7 +38,11 @@ fn parser_exposes_typed_osc7_snapshot_without_changing_cwd() {
     assert_eq!(parser.cwd(), Some("/home/user"));
     assert_eq!(
         parser.osc7_cwd(),
-        Some(&Osc7Cwd { authority: "remote-host".into(), path: "/home/user".into() })
+        Some(&Osc7Cwd {
+            authority: "remote-host".into(),
+            path: "/home/user".into(),
+            uri_path: true
+        })
     );
     let revision = parser.cwd_revision();
 
@@ -120,7 +112,7 @@ fn osc_semantic_capture_is_bounded_and_recovers() {
         parser.advance(&vec![b'a'; cap]);
         assert!(parser.retained_amount().bytes <= cap);
         parser.advance(b"b");
-        assert!(parser.discarding_oversized_escape);
+        assert!(matches!(parser.raw_osc, Some(super::RawOsc::Refused { .. })));
         assert_eq!(parser.retained_amount().bytes, 0);
         parser.advance(b"\x1b\\X");
         assert_eq!(parser.grid().row(0)[0].ch, 'X');
@@ -546,37 +538,66 @@ fn progress_of(params: &str) -> Option<Option<ProgressReport>> {
     }
 }
 
+/// `9;4` per state and percent: normal with no percent is 0, error and paused with none keep no
+/// percent, a parsed percent is clamped to 100, an unparsable or overflowing one keeps the state
+/// with no percent, and remove and indeterminate ignore it. Extras after the percent are ignored;
+/// only one state digit `0`-`4` makes a report.
 #[test]
-fn osc9_progress_accepts_each_state_and_clamps_the_percent() {
-    // `9;4` maps state digits 0–4, clamps percents over 100, and reads a missing percent as 0.
+fn osc9_progress_matrix() {
+    use ProgressState::{Error, Indeterminate, Normal, Paused};
     let report = |state, percent| Some(Some(ProgressReport { state, percent }));
     assert_eq!(progress_of("0"), Some(None), "0 clears");
-    assert_eq!(progress_of("1;50"), report(ProgressState::Normal, 50));
-    assert_eq!(progress_of("2;25"), report(ProgressState::Error, 25));
-    assert_eq!(progress_of("3"), report(ProgressState::Indeterminate, 0));
-    assert_eq!(progress_of("4;40"), report(ProgressState::Paused, 40));
-    assert_eq!(progress_of("1;150"), report(ProgressState::Normal, 100));
-    assert_eq!(progress_of("1"), report(ProgressState::Normal, 0));
-    assert_eq!(progress_of("1;56;extra"), report(ProgressState::Normal, 56), "extras are ignored");
-    // BEL terminates the same sequence as ST.
-    let bel = program_events(b"\x1b]9;4;1;7\x07");
-    assert_eq!(
-        bel,
-        vec![Seen::Progress(Some(ProgressReport { state: ProgressState::Normal, percent: 7 }))]
-    );
-}
-
-#[test]
-fn osc9_progress_ignores_every_malformed_form() {
-    // A malformed report leaves the state unchanged: fractions are rejected, never rounded.
-    for malformed in ["5", "12", "", "1;56.2", "1;-1", "1;+5", "1;1000", "1;"] {
+    assert_eq!(progress_of("0;50"), Some(None), "remove ignores the percent");
+    for rest in ["", ";", ";50", ";abc", ";99999999999999999999999"] {
+        assert_eq!(progress_of(&format!("3{rest}")), report(Indeterminate, None), "3{rest}");
+    }
+    for (state, digit, absent) in [(Normal, 1, Some(0)), (Error, 2, None), (Paused, 4, None)] {
+        let of = |rest: &str| progress_of(&format!("{digit}{rest}"));
+        assert_eq!(of(""), report(state, absent), "{digit}: absent");
+        assert_eq!(of(";40"), report(state, Some(40)), "{digit}: valid");
+        assert_eq!(of(";150"), report(state, Some(100)), "{digit}: over 100");
+        assert_eq!(of(";1000"), report(state, Some(100)), "{digit}: four digits clamp too");
+        for unparsable in [";", ";abc", ";56.2", ";-1", ";+5", ";99999999999999999999999"] {
+            assert_eq!(of(unparsable), report(state, None), "{digit}{unparsable}");
+        }
+        assert_eq!(of(";56;extra"), report(state, Some(56)), "{digit}: extras are ignored");
+    }
+    for malformed in ["5", "12", "", "x"] {
         assert_eq!(progress_of(malformed), None, "9;4;{malformed}");
     }
+    // BEL terminates the same sequence as ST.
+    let bel = program_events(b"\x1b]9;4;1;7\x07");
+    assert_eq!(bel, vec![Seen::Progress(Some(ProgressReport { state: Normal, percent: Some(7) }))]);
+}
+
+/// Bare `9;N` (no `;` after N) follows Ghostty's table: `5` and `10` are ignored commands, `12`
+/// is a prompt mark, and every other N is notification text, `9;9` included; `9;9;` is an empty
+/// working-directory report instead.
+#[test]
+fn bare_osc9_subcommands_follow_the_table() {
+    for number in 1..=12 {
+        let events = program_events(format!("\x1b]9;{number}\x1b\\").as_bytes());
+        let expected = match number {
+            5 | 10 | 12 => vec![],
+            _ => vec![Seen::Notify { title: None, body: number.to_string() }],
+        };
+        assert_eq!(events, expected, "9;{number}");
+    }
+    let mut parser = Parser::new(Grid::new(20, 2));
+    parser.advance(b"\x1b]9;12\x07");
+    assert!(parser.grid().semantic().anchor.is_some(), "bare 9;12 marks a prompt");
+    parser.advance(b"\x1b]9;9;/tmp\x07");
+    assert_eq!(parser.cwd(), Some("/tmp"));
+    let events = parser.advance(b"\x1b]9;9\x07");
+    assert!(events.iter().any(|event| matches!(event, VtEvent::Notify { .. })), "a notification");
+    assert_eq!(parser.cwd(), Some("/tmp"), "bare 9;9 reports no directory");
+    parser.advance(b"\x1b]9;9;\x07");
+    assert_eq!(parser.cwd(), None, "9;9; is an empty directory report");
 }
 
 #[test]
 fn conemu_subcommands_are_never_notifications() {
-    // `9;<1..=12>` is a ConEmu subcommand: only 4 is implemented, none falls through to text.
+    // `9;<1..=12>;…` is a ConEmu subcommand: only 4 is implemented, none falls through to text.
     assert!(program_events(b"\x1b]9;1;100\x1b\\").is_empty());
     assert!(program_events(b"\x1b]9;3;x\x1b\\").is_empty());
     assert!(program_events(b"\x1b]9;12\x1b\\").is_empty());
@@ -648,7 +669,10 @@ fn zero_padded_program_osc_numbers_are_captured_like_the_literal() {
     assert!(program_events(b"\x1b]09;001;100\x07").is_empty(), "a zero-padded subcommand");
     assert_eq!(
         program_events(b"\x1b]0009;4;1;50\x07"),
-        vec![Seen::Progress(Some(ProgressReport { state: ProgressState::Normal, percent: 50 }))]
+        vec![Seen::Progress(Some(ProgressReport {
+            state: ProgressState::Normal,
+            percent: Some(50)
+        }))]
     );
     // A title OSC with a zero-padded number keeps its own capture.
     let mut parser = Parser::new(Grid::new(80, 24));
@@ -680,7 +704,7 @@ fn program_osc_spellings_the_probe_misses_are_dropped_never_cut() {
         assert_eq!(events, [Seen::Notify { title: None, body: joined.clone() }], "{number}");
     }
     let progress =
-        || Seen::Progress(Some(ProgressReport { state: ProgressState::Normal, percent: 50 }));
+        || Seen::Progress(Some(ProgressReport { state: ProgressState::Normal, percent: Some(50) }));
     assert_eq!(program_events(b"\x1b]9;4;1;50\x07"), [progress()], "BEL");
     assert_eq!(program_events(b"\x1b]9;4;1;50\x1b\\"), [progress()], "ST");
 }
@@ -704,11 +728,16 @@ fn a_notification_past_the_raw_safety_bound_is_refused_whole() {
     assert_eq!(row_text(&parser, 0).trim_end(), "after", "the payload is swallowed, never printed");
 }
 
+/// `777;notify;T` is body `T` with no title (WezTerm), so the text stays visible; `notify;` and a
+/// bare `notify` are ignored, and `notify;T;` keeps its empty body.
 #[test]
-fn osc777_notify_requires_its_body_separator() {
-    // The grammar is `notify;<title>;<body>`: a title with no `;` after it is malformed.
-    assert!(program_events(b"\x1b]777;notify;T\x1b\\").is_empty());
-    assert!(program_events(b"\x1b]777;notify\x07").is_empty());
+fn osc777_notify_without_a_body_is_the_body() {
+    assert_eq!(
+        program_events(b"\x1b]777;notify;T\x1b\\"),
+        vec![Seen::Notify { title: None, body: "T".to_owned() }]
+    );
+    assert!(program_events(b"\x1b]777;notify;\x07").is_empty(), "an empty T");
+    assert!(program_events(b"\x1b]777;notify\x07").is_empty(), "no title field");
     assert_eq!(
         program_events(b"\x1b]777;notify;T;\x07"),
         vec![Seen::Notify { title: Some("T".to_owned()), body: String::new() }],
@@ -723,7 +752,10 @@ fn zero_padded_conemu_subcommands_are_never_notifications() {
     assert!(program_events(b"\x1b]9;0012\x07").is_empty());
     assert_eq!(
         program_events(b"\x1b]9;0004;1;50\x07"),
-        vec![Seen::Progress(Some(ProgressReport { state: ProgressState::Normal, percent: 50 }))]
+        vec![Seen::Progress(Some(ProgressReport {
+            state: ProgressState::Normal,
+            percent: Some(50)
+        }))]
     );
     assert_eq!(
         program_events(b"\x1b]9;0013\x07"),
@@ -736,4 +768,80 @@ fn zero_padded_conemu_subcommands_are_never_notifications() {
 fn ris_reports_a_program_state_reset() {
     // RIS clears program-reported state on the host side; the event carries no grid change.
     assert_eq!(program_events(b"\x1bc"), vec![Seen::Reset]);
+}
+
+/// OSC 1 sets the icon title (the tab name) whole, a `;` included, under BEL or ST; OSC 2 leaves
+/// it, OSC 0 clears it while setting the title, and an empty or bare OSC 1 clears it, as WezTerm.
+#[test]
+fn osc1_sets_the_icon_title_and_osc0_clears_it() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    assert_eq!(parser.icon_title(), None, "a fresh parser has none");
+    parser.advance(b"\x1b]1;~/src;tab\x07");
+    assert_eq!(parser.icon_title(), Some("~/src;tab"), "the payload is kept whole");
+    parser.advance(b"\x1b]2;long window title\x1b\\");
+    assert_eq!(parser.icon_title(), Some("~/src;tab"), "OSC 2 leaves it");
+    assert_eq!(parser.title(), Some("long window title"));
+    parser.advance(b"\x1b]0;both\x07");
+    assert_eq!(parser.icon_title(), None, "OSC 0 clears it");
+    assert_eq!(parser.title(), Some("both"), "and sets the title");
+    for clear in [b"\x1b]1;\x07".as_slice(), b"\x1b]1\x07", b"\x1b]1;\x1b\\", b"\x1b]1\x1b\\"] {
+        parser.advance(b"\x1b]1;name\x1b\\");
+        assert_eq!(parser.icon_title(), Some("name"), "{clear:?}: precondition");
+        parser.advance(clear);
+        assert_eq!(parser.icon_title(), None, "{clear:?} clears it");
+    }
+    parser.advance(b"Z");
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z', "no OSC 1 byte printed");
+}
+
+/// RIS clears the icon title; an over-cap, cancelled or control-bearing OSC 1 changes nothing.
+#[test]
+fn osc1_is_cleared_by_ris_and_refused_whole() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1b]1;name\x07\x1bc");
+    assert_eq!(parser.icon_title(), None, "RIS clears it");
+    parser.advance(b"\x1b]1;kept\x07");
+    let mut over_cap = b"\x1b]1;".to_vec();
+    over_cap.resize(over_cap.len() + super::MAX_SEMANTIC_OSC_BYTES + 1, b'x');
+    over_cap.push(0x07);
+    for refused in [over_cap, b"\x1b]1;cut\x18".to_vec(), b"\x1b]1;a\x01b\x07".to_vec()] {
+        parser.advance(&refused);
+        assert_eq!(parser.icon_title(), Some("kept"), "{} bytes change nothing", refused.len());
+    }
+    parser.advance(b"Z");
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z', "nothing printed");
+}
+
+/// OSC 1 has one bounded owner: a bare `1` cut by CAN, SUB or an ESC that does not complete ST
+/// changes nothing, and noncanonical numbers (`01`, `+1`) pass the same cap and control checks as
+/// the canonical `1;`.
+#[test]
+fn osc1_is_owned_whole_whatever_its_spelling_and_abort() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    for aborted in
+        [b"\x1b]1\x18".as_slice(), b"\x1b]1\x1a", b"\x1b]1\x1b[m", b"\x1b]01\x18", b"\x1b]+1\x1a"]
+    {
+        parser.advance(b"\x1b]1;kept\x07");
+        parser.advance(aborted);
+        assert_eq!(parser.icon_title(), Some("kept"), "{aborted:?} changed it");
+    }
+    for spelling in ["01", "+1", "001"] {
+        parser.advance(format!("\x1b]{spelling};named\x07").as_bytes());
+        assert_eq!(parser.icon_title(), Some("named"), "{spelling}");
+        let mut over_cap = format!("\x1b]{spelling};").into_bytes();
+        over_cap.resize(over_cap.len() + super::MAX_SEMANTIC_OSC_BYTES + 1, b'x');
+        over_cap.push(0x07);
+        let control = format!("\x1b]{spelling};a\x01b\x07").into_bytes();
+        for refused in [over_cap, control] {
+            parser.advance(&refused);
+            assert_eq!(parser.icon_title(), Some("named"), "{spelling}: refused whole");
+        }
+        parser.advance(format!("\x1b]{spelling}\x07").as_bytes());
+        assert_eq!(parser.icon_title(), None, "{spelling}: a bare request clears it");
+    }
+    // A number too long for the owner's probe reaches vte, whose fallback never sets the name.
+    parser.advance(b"\x1b]0000000000001;spoof\x07");
+    assert_eq!(parser.icon_title(), None, "the fallback set it");
+    parser.advance(b"Z");
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z', "nothing printed");
 }

@@ -1,7 +1,7 @@
 //! Pane-divider hit-testing, hover cursors and drag resizing, kept side by
 //! side for the main window and for child windows.
 
-use winit::window::{CursorIcon, WindowId};
+use winit::window::WindowId;
 
 use super::child_window::resize_visible_panes_in_child_for_pointer;
 use super::App;
@@ -34,31 +34,16 @@ impl App {
         })
     }
 
-    pub(super) fn set_splitter_cursor(&self, axis: sonicterm_ui::pane::SplitAxis) {
-        if let Some(main_window) = self.main_window() {
-            let icon = match axis {
-                sonicterm_ui::pane::SplitAxis::Vertical => CursorIcon::ColResize,
-                sonicterm_ui::pane::SplitAxis::Horizontal => CursorIcon::RowResize,
-            };
-            main_window.set_cursor(icon);
-        }
-    }
-
     pub(super) fn refresh_splitter_hover(&mut self, pixel_x: f32, pixel_y: f32) -> bool {
         if self.main().and_then(|window| window.splitter_drag.as_ref()).is_some() {
             // When: splitter_drag is Some, preserve its resize cursor and consume hover routing.
             return true;
         }
         let Some(hit) = self.splitter_hit_at(pixel_x, pixel_y) else {
-            // When: splitter_hit_at returns None, clear any stale splitter hover cursor.
-            let was_splitter = self
-                .main_mut()
-                .map(|window| window.splitter_hover.take().is_some())
-                .unwrap_or(false);
-            if was_splitter {
-                if let Some(main_window) = self.main_window() {
-                    main_window.set_cursor(CursorIcon::Default);
-                }
+            // When: splitter_hit_at returns None, clear any stale splitter hover; the turn's
+            // cursor sync hands the cursor back to the pane.
+            if let Some(window) = self.main_mut() {
+                window.splitter_hover = None;
             }
             return false;
         };
@@ -67,7 +52,6 @@ impl App {
             window.hover_link = false;
             window.splitter_hover = Some(hit.axis);
         }
-        self.set_splitter_cursor(hit.axis);
         true
     }
 
@@ -124,7 +108,6 @@ impl App {
                 active.last_pos = (pixel_x, pixel_y);
             }
         }
-        self.set_splitter_cursor(drag.axis);
         if changed {
             if let Some(main_window) = self.main_window() {
                 crate::app::frame_counters::request_native_redraw(main_window);
@@ -176,22 +159,6 @@ impl App {
         })
     }
 
-    pub(super) fn set_child_splitter_cursor(
-        &self,
-        win_id: WindowId,
-        axis: sonicterm_ui::pane::SplitAxis,
-    ) {
-        if let Some(child) = self.registry.windows.get(&win_id) {
-            if let Some(native_window) = child.window.as_ref() {
-                let icon = match axis {
-                    sonicterm_ui::pane::SplitAxis::Vertical => CursorIcon::ColResize,
-                    sonicterm_ui::pane::SplitAxis::Horizontal => CursorIcon::RowResize,
-                };
-                native_window.set_cursor(icon);
-            }
-        }
-    }
-
     pub(super) fn refresh_child_splitter_hover(
         &mut self,
         win_id: WindowId,
@@ -207,18 +174,8 @@ impl App {
             .map(|child| child.splitter_hover != axis)
             .unwrap_or(false);
         if let Some(child) = self.registry.windows.get_mut(&win_id) {
+            // The stored hover decides the resize cursor at the turn's cursor sync.
             child.splitter_hover = axis;
-        }
-        if let Some(axis) = axis {
-            self.set_child_splitter_cursor(win_id, axis);
-        } else if changed {
-            // When: `changed` and no axis — the pointer just left a divider, so
-            // the resize cursor must be handed back to the default.
-            if let Some(child) = self.registry.windows.get(&win_id) {
-                if let Some(native_window) = child.window.as_ref() {
-                    native_window.set_cursor(CursorIcon::Default);
-                }
-            }
         }
         changed || axis.is_some()
     }
@@ -311,7 +268,6 @@ impl App {
                 child.request_window_redraw();
             }
         }
-        self.set_child_splitter_cursor(win_id, drag.axis);
         true
     }
 }

@@ -506,3 +506,68 @@ fn unwinding_while_row_keys_are_in_use_keeps_the_key_buffer() {
     assert!(row_keys.capacity() >= 64, "the key buffer stays in the scratch with its capacity");
     assert_eq!(row_keys.as_ptr(), warm_pointer, "and keeps its warm allocation");
 }
+
+/// The decoration text of a strikethrough run from `start` to `end` in drawn color `color`.
+fn strike_text(start: u16, end: u16, color: ChromeColor) -> String {
+    format!(
+        "start_col: {start}, end_col: {end}, style: Single, color: Rgb({}, {}, {}), \
+         strikethrough: true",
+        color.r, color.g, color.b
+    )
+}
+
+/// SGR 9 cells record a strikethrough run beside the underline runs, in the foreground their
+/// glyphs draw with; an SGR 58 color stays the underline's and does not color the strike.
+#[test]
+fn struck_cells_record_a_strikethrough_run() {
+    let mut grid = Grid::new(4, 1);
+    for character in ['a', 'b'] {
+        grid.put_char_styled(
+            character,
+            Color::Indexed(1),
+            Color::Default,
+            CellFlags::STRIKETHROUGH,
+            None,
+            UnderlineStyle::Single,
+            Some(Color::Indexed(2)),
+        );
+    }
+    grid.put_char('c', Color::Default, Color::Default, CellFlags::empty());
+    let mut rig = GlyphRig::new(false);
+    let red = hex_to_chrome_color(rig.theme.colors.ansi.red.0.as_str());
+    rig.begin(&grid);
+    let row = rig.emit(&grid, 0, 0);
+    assert!(row.decorations.contains(&strike_text(0, 1, red)), "{}", row.decorations);
+}
+
+/// A struck wide glyph ending at the row's right edge strikes both of its columns, as it does
+/// anywhere else in the row.
+#[test]
+fn a_struck_wide_glyph_at_the_row_edge_strikes_both_columns() {
+    let mut grid = Grid::new(3, 1);
+    grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
+    grid.put_char('\u{4e2d}', Color::Default, Color::Default, CellFlags::STRIKETHROUGH);
+    let mut rig = GlyphRig::new(false);
+    let drawn = ChromeColor::rgb(230, 230, 230);
+    rig.begin(&grid);
+    let row = rig.emit(&grid, 0, 0);
+    assert!(row.decorations.contains(&strike_text(1, 2, drawn)), "{}", row.decorations);
+}
+
+/// An inverse struck cell strikes in the color its glyph draws with, the cell background (here
+/// the theme's), so the bar stays visible against the swapped fill.
+#[test]
+fn an_inverse_struck_cell_strikes_in_its_drawn_foreground() {
+    let mut grid = Grid::new(2, 1);
+    grid.put_char(
+        'a',
+        Color::Indexed(1),
+        Color::Default,
+        CellFlags::STRIKETHROUGH | CellFlags::INVERSE,
+    );
+    let mut rig = GlyphRig::new(false);
+    let drawn = hex_to_chrome_color(rig.theme.colors.background.0.as_str());
+    rig.begin(&grid);
+    let row = rig.emit(&grid, 0, 0);
+    assert!(row.decorations.contains(&strike_text(0, 0, drawn)), "{}", row.decorations);
+}

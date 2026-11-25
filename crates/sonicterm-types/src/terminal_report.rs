@@ -82,6 +82,23 @@ pub fn indexed_rgb(index: u8) -> Option<(u8, u8, u8)> {
     }
 }
 
+/// The color a theme's `#rrggbb` value draws, and so the color a program's query of it answers.
+///
+/// Each two-character channel is read on its own, so a pair that is not hex reads 0 while the
+/// others keep their values; a value that is not six ASCII characters after its leading `#`s
+/// reads black. Every renderer color path and the parser's seeded defaults read through this one
+/// function, so a seeded default always equals the drawn color.
+#[must_use]
+pub fn theme_hex_rgb(hex: &str) -> (u8, u8, u8) {
+    let digits = hex.trim_start_matches('#');
+    if digits.len() != 6 || !digits.is_ascii() {
+        // When: `digits` is not six ASCII bytes, no channel pair can be sliced, so it reads black.
+        return (0, 0, 0);
+    }
+    let channel = |start: usize| u8::from_str_radix(&digits[start..start + 2], 16).unwrap_or(0);
+    (channel(0), channel(2), channel(4))
+}
+
 #[cfg(test)]
 #[path = "terminal_report_tests.rs"]
 mod terminal_report_tests;

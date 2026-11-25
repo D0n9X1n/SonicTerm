@@ -45,9 +45,6 @@ impl App {
     }
 
     /// Build an app that posts user events through `event_loop_proxy`.
-    ///
-    /// The state machine is built here rather than supplied, so callers that
-    /// already own one should hand it in instead.
     #[doc(hidden)]
     pub fn new_with_proxy(
         theme: Theme,
@@ -55,48 +52,31 @@ impl App {
         keymap: Keymap,
         event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
     ) -> Self {
-        Self::new_with_proxy_and_machine(
+        Self::new_with_proxy_and_normalizer(
             theme,
             config,
             keymap,
             event_loop_proxy,
-            sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default()),
-        )
-    }
-
-    /// Build an app around an externally-built
-    /// [`sonicterm_app_core::AppStateMachine`].
-    ///
-    /// The platform shell constructs the machine first and hands it in, so all
-    /// state mutation routes through the reducer the shell already owns rather
-    /// than a second machine built here.
-    pub fn new_with_proxy_and_machine(
-        theme: Theme,
-        config: Config,
-        keymap: Keymap,
-        event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
-        machine: sonicterm_app_core::AppStateMachine,
-    ) -> Self {
-        Self::new_with_proxy_machine_and_normalizer(
-            theme,
-            config,
-            keymap,
-            event_loop_proxy,
-            machine,
             identity_config_normalizer(),
         )
     }
 
     /// Build an app after applying the supplied native capability policy.
-    pub(crate) fn new_with_proxy_machine_and_normalizer(
+    pub(crate) fn new_with_proxy_and_normalizer(
         mut theme: Theme,
         config: Config,
         keymap: Keymap,
         event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
-        machine: sonicterm_app_core::AppStateMachine,
         config_normalizer: ConfigNormalizer,
     ) -> Self {
         let config = Self::normalize_config(&config_normalizer, config);
+        // The process staging is sized once by the first config; each App then sets the limit new
+        // streams read, which a reload changes.
+        let clip_limit = config.terminal.effective_clipboard_write_limit_bytes();
+        let clip_staging = osc52_stream::ClipboardStaging::init_process_default(clip_limit);
+        clip_staging.set_stream_limit(clip_limit);
+        clip_staging.set_read_policy(config.terminal.osc52_read);
+        clip_staging.set_write_policy(config.terminal.osc52);
         theme.apply_accessibility(&config.accessibility);
         // Seed the process-global tab width limits from config before any tab
         // bar is laid out, so configured values take effect on the very first
@@ -154,6 +134,7 @@ impl App {
                 window_rename_target: None,
                 tab_edit_target: None,
                 agent_disconnect: None,
+                pointer_window: None,
                 palette_pointer_capture: None,
                 field_pointer_capture: None,
                 field_owed_releases: Vec::new(),
@@ -220,8 +201,7 @@ impl App {
                 pty_write_log_enabled: event_loop_proxy.is_none(),
                 ..Default::default()
             },
-            #[cfg(target_os = "windows")]
-            pending_osc52_reassert: None,
+            clip_state: osc52_stream::ClipState::new(clip_staging),
             pending_new_window: None,
             reports: Default::default(),
             pending_tear_out: None,
@@ -256,7 +236,6 @@ impl App {
             quit_hold: quit_hold::QuitHold::new(),
             on_resumed: None,
             on_window_ready: None,
-            machine,
         }
     }
 

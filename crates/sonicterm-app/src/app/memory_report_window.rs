@@ -495,16 +495,17 @@ impl App {
             // When: `last_text` is None, nothing has been rendered yet, so there is nothing to copy.
             return false;
         };
-        let copied = self.set_clipboard_text(text);
-        if copied {
-            let message = self.i18n.translate("memory-report-copied");
-            self.show_notification_for_kind(
-                super::FrontmostKind::Child(report_id),
-                sonicterm_ui::overlays::NotificationLevel::Info,
-                message,
-            );
-        }
-        copied
+        // The confirmation shows once the clipboard has taken the text.
+        self.copy_text_then(text, move |app, copied| {
+            if copied {
+                let message = app.i18n.translate("memory-report-copied");
+                app.show_notification_for_kind(
+                    super::FrontmostKind::Child(report_id),
+                    sonicterm_ui::overlays::NotificationLevel::Info,
+                    message,
+                );
+            }
+        })
     }
 
     /// Close the report window through the shared child-window teardown. Never quits the app.
@@ -929,7 +930,7 @@ fn report_window_state(
         band_press_consumed: false,
         caption: Default::default(),
         band_last_press: None,
-        band_edge_cursor: false,
+        native_cursor: Default::default(),
         sel_status: Default::default(),
         ime_discarded_at: None,
         alert_settings: None,

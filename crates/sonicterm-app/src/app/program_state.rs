@@ -1,5 +1,6 @@
 //! Program-reported state outside the grid: `OSC 9;4` progress mirrored to the platform progress
-//! surfaces, and OSC 9 / OSC 777 notifications shown as one coalescing toast.
+//! surfaces, OSC 9 / OSC 777 notifications shown as one coalescing toast, and the OSC 7501 tab
+//! marker with its focus, key and exit lifetimes.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -11,10 +12,17 @@ use sonicterm_ui::status_line::{
 use winit::window::WindowId;
 
 use super::{App, FrontmostKind};
-use crate::taskbar_progress::{ProgressReport, ProgressSurface, TaskbarProgressBackend};
+use crate::taskbar_progress::{
+    ProgressReport, ProgressState, ProgressSurface, TaskbarProgressBackend,
+};
 
 /// At most one delivery per surface per interval; the last value of a burst lands at its end.
 pub(super) const PROGRESS_DELIVERY_INTERVAL: Duration = Duration::from_millis(250);
+/// A report clears this long after the sync that first saw it, so a program killed mid-run leaves
+/// no bar behind (kitty).
+pub(super) const PROGRESS_STALE_AFTER: Duration = Duration::from_secs(60);
+/// A normal report at 100 % clears this long after the sync that first saw it (kitty).
+pub(super) const PROGRESS_DONE_STALE_AFTER: Duration = Duration::from_secs(5);
 /// How long a program toast stays up.
 pub(super) const TOAST_DURATION: Duration = Duration::from_secs(5);
 /// A notification from any pane this soon after a toast appears joins it.
@@ -66,6 +74,9 @@ struct Slot {
 pub(crate) struct ProgramState {
     /// Each pane's active report and the update sequence that set it; the newest wins app-wide.
     reports: HashMap<u64, (ProgressReport, u64)>,
+    /// Each pane's stale-progress deadline and the report sequence it was armed for; a deadline
+    /// clears only that report, never a newer one or another pane's.
+    expiry: HashMap<u64, (u64, Instant)>,
     next_sequence: u64,
     slots: HashMap<ProgressSurface, Slot>,
     /// Each live surface's last delivery, kept across a clear until its interval passes, so a set
@@ -133,17 +144,48 @@ pub(super) fn desired_progress(
 }
 
 impl ProgramState {
-    /// Record `pane_id`'s report, or forget it on `None`.
+    /// Record `pane_id`'s report, or forget it on `None`. A report with no percent keeps the
+    /// pane's last one; with none before, it stays `None`, which every backend shows as 0.
     pub(super) fn note_progress(&mut self, pane_id: u64, report: Option<ProgressReport>) {
         match report {
-            Some(report) => {
+            Some(mut report) => {
+                let last = self.reports.get(&pane_id).and_then(|(last, _)| last.percent);
+                report.percent = report.percent.or(last);
                 self.next_sequence += 1;
                 self.reports.insert(pane_id, (report, self.next_sequence));
             }
             None => {
                 self.reports.remove(&pane_id);
+                self.expiry.remove(&pane_id);
             }
         }
+    }
+
+    /// Arm a deadline for each report without one (`PROGRESS_DONE_STALE_AFTER` after a normal
+    /// report at 100 %, else `PROGRESS_STALE_AFTER`), drop each report whose own deadline passed by
+    /// `now`, and return the next deadline.
+    fn expire_stale(&mut self, now: Instant) -> Option<Instant> {
+        let reports = &self.reports;
+        // A deadline armed for a replaced or removed report is dropped, so it can clear nothing.
+        self.expiry.retain(|pane_id, (sequence, _)| {
+            reports.get(pane_id).is_some_and(|(_, current)| current == sequence)
+        });
+        for (pane_id, (report, sequence)) in reports {
+            let done = report.state == ProgressState::Normal && report.percent == Some(100);
+            let lifetime = if done { PROGRESS_DONE_STALE_AFTER } else { PROGRESS_STALE_AFTER };
+            self.expiry.entry(*pane_id).or_insert((*sequence, now + lifetime));
+        }
+        let expired: Vec<u64> = self
+            .expiry
+            .iter()
+            .filter(|(_, (_, deadline))| *deadline <= now)
+            .map(|(pane_id, _)| *pane_id)
+            .collect();
+        for pane_id in expired {
+            self.reports.remove(&pane_id);
+            self.expiry.remove(&pane_id);
+        }
+        self.expiry.values().map(|(_, deadline)| *deadline).min()
     }
 
     /// Whether nothing is reported and nothing is shown, so a sync has no work.
@@ -247,7 +289,8 @@ impl App {
                 if recorded.len() == RECORDED_DELIVERIES_MAX {
                     recorded.remove(0);
                 }
-                recorded.push((Instant::now(), report.map(|report| report.percent)));
+                // A report with no percent records 0, as every backend shows it.
+                recorded.push((Instant::now(), report.map(|report| report.percent.unwrap_or(0))));
             }
         }
         let recorded = RecordedDeliveries::default();
@@ -305,6 +348,8 @@ impl App {
             .flat_map(|window| window.panes.keys().copied())
             .collect();
         self.program.reports.retain(|pane_id, _| live.contains(pane_id));
+        // Expiry runs before arbitration, so an expired report never wins a surface.
+        let expiry = self.program.expire_stale(now);
         let windows: Vec<WindowProgress> = self
             .registry
             .windows
@@ -328,7 +373,8 @@ impl App {
         self.program.backend = Some(backend);
         let delivered = self.program.delivered - delivered_before;
         self.note_status_line(|counters| counters.taskbar_deliveries += delivered);
-        next
+        // The earlier of the trailing-edge delivery and the next stale-progress expiry.
+        next.into_iter().chain(expiry).min()
     }
 
     /// Clear every surface that shows progress and release the backend, at App shutdown.
@@ -598,6 +644,138 @@ fn native_handle(window: &winit::window::Window) -> Option<isize> {
     }
 }
 
+/// The program-status marker of a tab whose panes are `leaves`: the most urgent record of any of
+/// them, ties going to the most recent change, as kitty ranks them; idle shows nothing.
+pub(super) fn tab_status_marker(
+    leaves: &[u64],
+    panes: &HashMap<u64, super::PaneState>,
+) -> Option<sonicterm_ui::tabs::StatusMarker> {
+    use sonicterm_ui::tabs::StatusMarker;
+    use sonicterm_vt::vt::StatusState;
+    let top = leaves
+        .iter()
+        .filter_map(|pane_id| panes.get(pane_id)?.program_status.top)
+        .max_by_key(|top| (top.state.urgency(), top.changed_at))?;
+    match top.state {
+        StatusState::Blocked => Some(StatusMarker::Blocked),
+        StatusState::Error => Some(StatusMarker::Error),
+        StatusState::Done => Some(StatusMarker::Done),
+        StatusState::Working => Some(StatusMarker::Working(top.progress)),
+        StatusState::Idle => None,
+    }
+}
+
+impl super::PaneState {
+    /// Store `summary` when it is newer than the stored one; returns whether it was stored. A
+    /// worker summary older than an acknowledgment the App already applied is dropped.
+    pub(super) fn store_program_status(
+        &mut self,
+        summary: sonicterm_vt::vt::StatusSummary,
+    ) -> bool {
+        if summary.generation <= self.program_status.generation {
+            // When: `summary` is not newer, it would bring back a record the App already ended.
+            return false;
+        }
+        self.program_status = summary;
+        true
+    }
+
+    /// The user saw the pane: end its done and error records under the parser lock and store the
+    /// new summary. Locks only while the parser's own flag says such a record is held, so a record
+    /// whose summary event is still queued is acknowledged too. Returns whether any ended.
+    pub(super) fn acknowledge_program_status(&mut self) -> bool {
+        if !self.status_unseen.load(std::sync::atomic::Ordering::SeqCst) {
+            // When: `status_unseen` is clear, the parser holds no done or error record to end.
+            return false;
+        }
+        let mut parser = crate::app::frame_counters::lock_parser(&self.parser);
+        let ended = parser.acknowledge_program_status();
+        let summary = parser.program_status_summary();
+        drop(parser);
+        self.store_program_status(summary);
+        ended
+    }
+
+    /// The child exited: end working, blocked and idle records and store the new summary.
+    /// Returns whether any ended.
+    pub(super) fn end_transient_program_status(&mut self) -> bool {
+        let mut parser = crate::app::frame_counters::lock_parser(&self.parser);
+        let ended = parser.end_transient_program_status();
+        let summary = parser.program_status_summary();
+        drop(parser);
+        self.store_program_status(summary);
+        ended
+    }
+}
+
+/// Acknowledge, on its focus edge, the active pane of window `win_id` when it is the frontmost
+/// window: a pane that just gained focus there, including one moved in from another window, sees
+/// its done and error records end. Returns whether any ended.
+pub(super) fn acknowledge_focused_status(
+    window: &mut super::WindowState,
+    win_id: WindowId,
+    frontmost: bool,
+) -> bool {
+    let focused = frontmost
+        .then(|| window.tab_states.get(window.tabs.active_index()).map(|tab| tab.active_pane))
+        .flatten();
+    let mut ended = false;
+    for (pane_id, pane) in window.panes.iter_mut() {
+        let now_focused = (Some(*pane_id) == focused).then_some(win_id);
+        if now_focused.is_some() && pane.status_focused != now_focused {
+            ended |= pane.acknowledge_program_status();
+        }
+        pane.status_focused = now_focused;
+    }
+    ended
+}
+
+impl App {
+    /// Store a pane's OSC 7501 summary from its VT worker and redraw the window holding it, so the
+    /// owning tab's marker follows even when the pane's split or tab is not shown. Advisory only:
+    /// nothing is focused, typed or notified.
+    pub(super) fn note_program_status(
+        &mut self,
+        pane_id: u64,
+        summary: sonicterm_vt::vt::StatusSummary,
+    ) {
+        let stored =
+            self.registry.pane_mut(pane_id).is_some_and(|pane| pane.store_program_status(summary));
+        if stored {
+            self.redraw_window_of_pane(pane_id);
+        }
+    }
+
+    /// Ask the window holding `pane_id` for a frame, so its tab markers are read again.
+    pub(super) fn redraw_window_of_pane(&self, pane_id: u64) {
+        if let Some(window) =
+            self.registry.window_of_pane(pane_id).and_then(|id| self.registry.windows.get(&id))
+        {
+            window.request_window_redraw();
+        }
+    }
+
+    /// Settle what one dispatched event changed: tab visits and the frontmost window's focused
+    /// pane. A focus move (a split, a tab or a closed pane) is acknowledged on the event that made
+    /// it, so a pane focused and left again before the next redraw still sees its records end.
+    pub(super) fn after_dispatch(&mut self) {
+        self.acknowledge_tab_activations();
+        // Only the frontmost window has a focused pane; others lost theirs on their blur.
+        if let Some(win_id) = self.registry.frontmost_window {
+            self.acknowledge_focused_status_in(win_id);
+        }
+    }
+
+    /// Acknowledge focus in window `win_id`: after an event, and before its markers are read for a
+    /// frame.
+    pub(super) fn acknowledge_focused_status_in(&mut self, win_id: WindowId) {
+        let frontmost = self.registry.frontmost_window == Some(win_id);
+        if let Some(window) = self.registry.windows.get_mut(&win_id) {
+            acknowledge_focused_status(window, win_id, frontmost);
+        }
+    }
+}
+
 /// Whether nothing of a window is drawn: the platform reported it covered, the presenter found
 /// its surface occluded, or it is minimized (`None` where the platform cannot tell).
 pub(super) fn window_hidden(
@@ -615,3 +793,7 @@ mod program_state_tests;
 #[cfg(test)]
 #[path = "program_state_occasion_tests.rs"]
 mod program_state_occasion_tests;
+
+#[cfg(test)]
+#[path = "program_state_status_tests.rs"]
+mod program_state_status_tests;

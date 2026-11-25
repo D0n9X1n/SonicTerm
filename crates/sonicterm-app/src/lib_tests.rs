@@ -40,16 +40,46 @@ fn headless_app_defaults_to_unprivileged() {
 struct CountingAllocator;
 
 thread_local! {
+    static FREE_PROBE: std::cell::Cell<Option<(usize,fn())>> = const {std::cell::Cell::new(None)};
     /// Whether this thread counts its allocations; const-initialized with no destructor.
     static COUNTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The allocations this thread counted since its last [`CountAllocations::start`].
     static COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Bytes this thread allocated and has not freed since its last start; a block allocated
+    /// before the start lowers it to no less than zero when freed.
+    static LIVE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The most [`LIVE_BYTES`] held at once since the last start.
+    static PEAK_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Count one allocation if this thread is counting; a thread in TLS teardown is never counted.
-fn note_allocation() {
-    if COUNTING.try_with(std::cell::Cell::get).unwrap_or(false) {
+/// Invoke an allocation-free probe once on this thread when this exact block is deallocated.
+pub(crate) fn watch_free(address: usize, probe: fn()) {
+    FREE_PROBE.set(Some((address, probe)));
+}
+
+/// Whether this thread counts; a thread in TLS teardown never does.
+fn counting() -> bool {
+    COUNTING.try_with(std::cell::Cell::get).unwrap_or(false)
+}
+
+/// Count one allocation of `byte_count` bytes if this thread is counting, raising its peak.
+fn note_allocation(byte_count: usize) {
+    if counting() {
         let _ = COUNT.try_with(|count| count.set(count.get() + 1));
+        let live = LIVE_BYTES.try_with(|live| {
+            live.set(live.get().saturating_add(byte_count));
+            live.get()
+        });
+        if let Ok(live) = live {
+            let _ = PEAK_BYTES.try_with(|peak| peak.set(peak.get().max(live)));
+        }
+    }
+}
+
+/// Note that `byte_count` bytes were freed if this thread is counting.
+fn note_free(byte_count: usize) {
+    if counting() {
+        let _ = LIVE_BYTES.try_with(|live| live.set(live.get().saturating_sub(byte_count)));
     }
 }
 
@@ -58,20 +88,29 @@ fn note_allocation() {
 unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
     // SAFETY: the caller's `layout` contract is forwarded unchanged to `System::alloc`.
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-        note_allocation();
+        note_allocation(layout.size());
         // SAFETY: `layout` satisfies `GlobalAlloc::alloc`'s contract and is forwarded unchanged.
         unsafe { std::alloc::System.alloc(layout) }
     }
 
     // SAFETY: the caller's `layout` contract is forwarded unchanged to `System::alloc_zeroed`.
     unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
-        note_allocation();
+        note_allocation(layout.size());
         // SAFETY: `layout` satisfies `GlobalAlloc::alloc_zeroed`'s contract and is forwarded unchanged.
         unsafe { std::alloc::System.alloc_zeroed(layout) }
     }
 
     // SAFETY: `block` came from this allocator, which is `System` underneath, with this `layout`.
     unsafe fn dealloc(&self, block: *mut u8, layout: std::alloc::Layout) {
+        note_free(layout.size());
+        let _ = FREE_PROBE.try_with(|watch| {
+            if let Some((address, probe)) = watch.get() {
+                if block as usize == address {
+                    watch.set(None);
+                    probe();
+                }
+            }
+        });
         // SAFETY: `block` was returned by `System` through this allocator with this `layout`.
         unsafe { std::alloc::System.dealloc(block, layout) }
     }
@@ -83,7 +122,9 @@ unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
         layout: std::alloc::Layout,
         new_size: usize,
     ) -> *mut u8 {
-        note_allocation();
+        // A move may hold both blocks at once, so the new size is counted before the old is freed.
+        note_allocation(new_size);
+        note_free(layout.size());
         // SAFETY: `block` is a live `System` block of `layout`; `new_size` is the caller's valid request.
         unsafe { std::alloc::System.realloc(block, layout, new_size) }
     }
@@ -101,12 +142,19 @@ impl CountAllocations {
     /// Reset this thread's count and start counting.
     pub(crate) fn start() -> Self {
         COUNT.with(|count| count.set(0));
+        LIVE_BYTES.with(|live| live.set(0));
+        PEAK_BYTES.with(|peak| peak.set(0));
         Self { previous: COUNTING.with(|counting| counting.replace(true)) }
     }
 
     /// The allocations this thread counted since [`CountAllocations::start`].
     pub(crate) fn count(&self) -> u64 {
         COUNT.with(std::cell::Cell::get)
+    }
+
+    /// The most bytes this thread held at once from allocations made since the start.
+    pub(crate) fn peak_bytes(&self) -> usize {
+        PEAK_BYTES.with(std::cell::Cell::get)
     }
 }
 
@@ -115,6 +163,19 @@ impl Drop for CountAllocations {
     fn drop(&mut self) {
         COUNTING.with(|counting| counting.set(self.previous));
     }
+}
+
+/// The counting allocator tracks the bytes a counting thread holds: its peak is the most held at
+/// once since the scope started, so freeing one buffer before allocating another never adds them.
+#[test]
+fn counting_allocator_tracks_peak_bytes() {
+    let counter = CountAllocations::start();
+    let first = std::hint::black_box(vec![0_u8; 1000]);
+    let second = std::hint::black_box(vec![0_u8; 500]);
+    drop(first);
+    let third = std::hint::black_box(vec![0_u8; 200]);
+    assert_eq!(counter.peak_bytes(), 1500);
+    drop((second, third));
 }
 
 /// The counting allocator counts only while a thread enabled it, and the scope restores the setting.

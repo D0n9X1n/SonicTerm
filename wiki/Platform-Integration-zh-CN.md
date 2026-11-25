@@ -24,7 +24,7 @@ flowchart TD
 终端解析位于 `sonicterm-vt`；本地 PTY/ConPTY 封装在
 `sonicterm-io::PtyHandle` 后；渲染位于 `sonicterm-gpu`。
 
-三个二进制共用诊断、配置、日志、资源、状态机和 shell 启动流程；准确顺序见
+三个二进制共用诊断、配置、日志、资源和 shell 启动流程；准确顺序见
 [运行时生命周期](Runtime-Lifecycle-zh-CN)。用户状态位于 `~/.sonicterm`；打包资源由
 `sonicterm-cfg::assets` 查找。
 
@@ -417,6 +417,8 @@ Orca 通过 D-Bus 上的 AT-SPI 访问每个终端窗口的 accesskit 适配器�
 
 在两个整个应用范围的位置上，显示的是任意终端窗口中任意窗格最近更新的有效报告。
 该窗格结束报告或关闭后，显示次近的报告；没有报告或没有终端窗口时清除。
+报告过期时也会自行结束：窗格最后一次报告 60 秒后，或百分之百的正常报告 5 秒后（见
+[终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）。
 重新加载关闭此选项会立即清除所有位置，退出时也会在应用结束前清除。
 
 每个位置只有一个最新值槽位，从不排队；每 250 ms 最多发送一次，并在时间段结束时发送最后的值，
@@ -572,6 +574,44 @@ socket 或发现记录；被强制终止的 SonicTerm 会留下它们，下次�
 擦除，或因调整大小、切换屏幕而丢失的文本可能看不到，这些情况下 `missed_output: false` 也不能证明没有遗漏。
 关闭服务器、修改 `control`、断开连接或超过 10 s 截止时间，都会在事件循环执行前丢弃已排队的请求，并以
 `revoked` 结束正在进行的等待。窗格文本是不可信输入：服务器告知 agent 从不执行其中的指令。
+
+## 剪贴板写入（OSC 5522 表示）
+
+OSC 5522 提交（见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）发布系统能保存的每种表示，省略其余表示：
+
+| 系统 | 保存 | 发布 |
+| --- | --- | --- |
+| macOS | 文本为 `public.utf8-plain-text`，`text/html` 为 `public.html`，`image/png` 为 `public.png`，其他 MIME 名称使用 `UTType typeWithMIMEType:` 给出的统一类型：有系统类型时用系统类型，否则用系统派生的动态 `dyn.*` 类型。所有项都是本地 `file:` URI（主机为空或解码后为 `localhost`）的 `text/uri-list` 为每个文件一个 `public.file-url` 项；单个其他语法有效的绝对 URI 为 `public.url`（拒绝而不修复有误的转义或组成部分）；两者混合、多个其他 URL 或含非 URI 行的列表被省略。 | 一个 `NSPasteboardItem` 携带所有类型（以及第一个文件 URL），每个后续文件再各占一项，然后在事件循环线程上调用 `clearContents` 和 `writeObjects`，因此变更计数只增加一次。无法暂存的类型不会改动剪贴板；`writeObjects` 被拒绝时回复 `EIO`。与其他类型并存的文本保持字节不变；只有文本时照旧写入。超过 512 KiB 的提供与其他程序写入一样以 `EFBIG` 拒绝。 |
+| Windows | 文本为 `CF_UNICODETEXT`（UTF-16；无效 UTF-8 变为 U+FFFD），`text/html` 为注册格式 `HTML Format`（CF_HTML：`Version:0.9` 头部，其中 `StartHTML`、`EndHTML`、`StartFragment` 与 `EndFragment` 为十位字节偏移，片段包在带片段注释的 `<html><body>` 中），`image/png` 只用注册格式 `PNG`（不转换为 `CF_DIB`），每项都是指向驱动器或 UNC 路径的 `file:` URI 时 `text/uri-list` 为 `CF_HDROP`，其他 MIME 名称用 `RegisterClipboardFormatW` 以该名称注册的格式。注册名称在会话内全局且永不释放，因此每个进程至多注册 128 个不同的自定义名称；之后的新名称被省略。空的 PNG 或自定义负载被省略。多个名称（包括仅大小写不同的名称）注册为同一格式 ID 时，只发布第一份表示。 | 修改时工作线程为本次修改创建仅消息窗口，关闭剪贴板后立即销毁该窗口。Windows 持有已提交的数据块，后续复制无需向已停等的工作线程发消息；读取不取得所有权。在工作线程上，每个数据块都在 `OpenClipboard`（最多 10 次，间隔 10 毫秒）之前分配并填充，然后在同一会话中调用 `EmptyClipboard`，并对每个数据块调用一次 `SetClipboardData`。任何数据块被拒绝时，其余数据块被释放，剪贴板在 `CloseClipboard` 之前再次清空，因此没有程序看到部分提供，写入回复 `EIO`。分配失败，或剪贴板始终被其他进程占用时，保留原剪贴板并回复 `EIO`。 |
+| Linux（X11 或 XWayland） | CLIPBOARD 与 PRIMARY 均按原字节提供文本，目标为 `UTF8_STRING`、`text/plain;charset=utf-8`、`text/plain` 和 `TEXT`。只有 UTF-8 文本能表示为 Latin-1 图形字符、制表符和换行符时，才增加以 Latin-1 编码的 `STRING`。HTML、PNG、URI 列表和自定义 MIME 类型以原 MIME 名称作为原子。每进程至多接纳 256 个数据原子名称（含八个固定目标），超出的名称在创建原子前省略。 | 选区所有者线程暂存程序的全部表示，在第一次请求所有权前检查一次写入绑定，随后用服务器时间戳调用 `SetSelectionOwner`，再用 `GetSelectionOwner` 确认窗口。每个选区独立确认。如果 CLIPBOARD 已确认而 PRIMARY 被拒绝，系统写入失败（需要状态回复时为 `EIO`），但窗口继续提供 CLIPBOARD 的数据，原有的 arboard 份额继续计费，直到 arboard 自身替换对应的选区；服务器确认不能证明 arboard 已释放缓冲区。用户复制和仅含有效 UTF-8 文本的写入仍走 arboard。不支持没有 XWayland 的原生 Wayland。 |
+
+macOS 和 Windows 每次最多转换 256 个 URI 项。数量超限或任一文件 URI 无效时，省略整个 URI 列表表示，不截取前缀。Windows 只接受绝对驱动器路径和 UNC 路径。
+
+OSC 5522 写入只针对一个位置。OSC 52 的 `cp` 写入依次操作两个选区；不存在跨选区的事务或回滚。
+
+除数据外，所有者还提供 `TARGETS` 和取得选区时的 `TIMESTAMP`。单次服务器请求容不下的值通过 `INCR` 传输，
+每块不超过 256 KiB，且能放进一次请求。每份提供最多同时接纳八个请求者，每块限时五秒。`SelectionClear`
+停止在失去的选区上接纳新请求；已接纳的传输保留原字节直至完成或超时。仍持有的提供在一小时后过期。
+
+## 剪贴板读取
+
+票据允许的 OSC 52 读取（见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）在一次性的读取线程上运行，
+同一时间只有一个。该线程持有票据及其应答预算租约，直到系统调用返回为止；即使已过截止时间、事件循环
+已经以空应答回复，也不例外。各系统在文本复制进 SonicTerm 之前先限制读取：
+
+| 系统 | 系统调用 | 上限 |
+| --- | --- | --- |
+| macOS | `NSPasteboard` 的 `dataForType(NSPasteboardTypeString)` | 每个目标 2 秒；长度超过上限的值在复制进 Rust 之前按长度拒绝。AppKit 会像任何粘贴一样，在 SonicTerm 能测量之前先把整个值实体化，因此这次分配不受 SonicTerm 限制。 |
+| Windows | `OpenClipboard`（最多 10 次，间隔 10 毫秒），然后 `GetClipboardData(CF_UNICODETEXT)`；若无 Unicode 文本，则在大小限制内将注册的 `text/plain` 作为 UTF-8 读取 | 每个目标 2 秒，涵盖延迟渲染；`GlobalSize` 表明放不进上限的数据块在 `GlobalLock` 之前即被拒绝，转换超过上限即停止。 |
+| Linux（X11） | 以 `UTF8_STRING` 对 `CLIPBOARD` 或 `PRIMARY` 调用 `ConvertSelection`，明确被拒后在同一时限内依次改试 `STRING`（Latin-1）、`text/plain;charset=utf-8`、`text/plain` 和 `TEXT` | 等待 `SelectionNotify` 2 秒；文本应答必须是上限之内、格式为 8 的文本类型；`INCR` 传输在删除声明之前按其声明的大小拒绝，因此从不向所有者请求分块；每个分块最多等 2 秒，总计 5 秒，每个事件之前都检查。没有 X 服务器时读取不受支持，以空应答回复。 |
+
+OSC 5522 读取文本以外的类型时经过同一系统层，每个类型上限 8 MiB；剪贴板没有的类型被省略：
+
+| 系统 | 系统调用 | 上限 |
+| --- | --- | --- |
+| macOS | 对列表中首个匹配 MIME 名称的系统类型或该 MIME 映射到的类型（`public.html`、`public.png` 或自定义名称的统一类型）调用 `dataForType`；`text/uri-list` 以 CRLF 连接每项的 `public.file-url`（否则 `public.url`），最多 256 个剪贴板项，超出则拒绝整个列表 | 长度超过上限的值在复制进 Rust 之前按长度拒绝 |
+| Windows | 经 `EnumClipboardFormats`（至多检查 64 个）按注册名称或列出的别名找到的格式（`text/rtf` 对应 `Rich Text Format`，`image/jpeg` 对应 `JFIF`），因此读取从不注册名称；`text/uri-list` 读取 `CF_HDROP` | `GlobalSize` 在 `GlobalLock` 之前决定：超过上限的数据块被拒绝（`CF_HDROP` 为上限的两倍）。CF_HTML 以其片段提供；`CF_HDROP` 最多提供 256 个 `file:` URI；先校验整个列表、双 NUL 终止符和转义后的字节数，再分配回复缓冲区。MIME 类型及子类型查找不区分 ASCII 大小写，原生转换也遵循此规则。`CF_HDROP` 等标准格式即使不在枚举上限内也可直接请求，仍需通过原生大小检查。若首选 Windows 格式不存在，OSC 5522 以原始 MIME 字节读取注册名为 `text/html`、`image/png`、`text/uri-list` 或 `text/plain` 的数据块，不做系统格式转换。以 MIME 名称注册的数据块、`PNG` 或自定义数据块按其 `GlobalSize` 提供，可能包含数据之后的分配余量。 |
+| Linux（X11） | 以已有的区分大小写的 MIME 原子为目标调用 `ConvertSelection`，不为未知名称创建原子 | 仅接受所请求类型的格式 8 字节，直接读取或通过 `INCR` 传输，大小和时限检查与文本相同 |
 
 ## 平台矩阵
 

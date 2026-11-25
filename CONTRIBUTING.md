@@ -56,7 +56,7 @@ docs:         add config schema
 chore(ci):    cache cargo registry
 ```
 
-Scope is the crate or component (`app-core`, `gpu`, `mac`, `windows`, `linux`,
+Scope is the crate or component (`app`, `gpu`, `mac`, `windows`, `linux`,
 `types`, `ci`, `assets`, ...). This drives the auto-generated changelog at release time.
 
 ## Code style

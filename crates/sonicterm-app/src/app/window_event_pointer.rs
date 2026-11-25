@@ -1,49 +1,33 @@
 //! Source-owned terminal pointer gesture and protocol routing.
 
 use super::*;
+use crate::app::input_dispatch::MotionProfile;
 
-/// Encode one pane-local pointer report in SGR or classic X10 form.
+/// Encode one pane-local pointer report at zero-based cell (`row`, `col`) and pane pixel `pixel`
+/// in `format`.
 pub(in crate::app) fn pointer_report_bytes(
-    sgr: bool,
+    format: MouseFormat,
     kind: PointerReportKind,
     modifiers: ModifiersState,
     row: u16,
     col: u16,
+    pixel: (i32, i32),
 ) -> Vec<u8> {
-    let modifier_bits = crate::app::secondary_button::pointer_modifier_bits(modifiers);
-    let base: u32 = match kind {
+    let button = match kind {
         PointerReportKind::LeftPress | PointerReportKind::LeftRelease => 0,
         PointerReportKind::HeldLeftMotion => 32,
         PointerReportKind::NoButtonMotion => 35,
     };
-    let button_code = base + modifier_bits;
-    let col = u32::from(col) + 1;
-    let row = u32::from(row) + 1;
-    if sgr {
-        let terminator = match kind {
-            PointerReportKind::LeftRelease => 'm',
-            PointerReportKind::LeftPress
-            | PointerReportKind::HeldLeftMotion
-            | PointerReportKind::NoButtonMotion => 'M',
-        };
-        format!("\x1b[<{button_code};{col};{row}{terminator}").into_bytes()
-    } else {
-        // When: `sgr` is false, legacy release uses no-button base 3 while other events retain `button_code`.
-        let legacy_button_code = match kind {
-            PointerReportKind::LeftRelease => 3 + modifier_bits,
-            PointerReportKind::LeftPress
-            | PointerReportKind::HeldLeftMotion
-            | PointerReportKind::NoButtonMotion => button_code,
-        };
-        vec![
-            0x1b,
-            b'[',
-            b'M',
-            (legacy_button_code + 32).min(255) as u8,
-            (col.min(223) + 32) as u8,
-            (row.min(223) + 32) as u8,
-        ]
-    }
+    crate::app::mouse_report::encode_mouse_report(
+        format,
+        crate::app::mouse_report::MouseReport {
+            button,
+            modifiers: crate::app::secondary_button::pointer_modifier_bits(modifiers),
+            release: kind == PointerReportKind::LeftRelease,
+            cell: (row, col),
+            pixel,
+        },
+    )
 }
 
 /// Return an existing terminal press's destinations only for repeat events.
@@ -55,11 +39,13 @@ pub(in crate::app) fn terminal_repeat_targets(
     repeat.then(|| pressed_keys.get(&physical_key).cloned()).flatten()
 }
 
-/// Choose and latch the owner of a left-button grid press.
+/// Choose and latch the owner of a left-button grid press with the press-time `tracking`, `format`
+/// and screen (`is_alt`).
 pub(in crate::app) fn begin_pointer_gesture(
     cell: PointerCell,
     tracking: MouseTracking,
-    sgr: bool,
+    format: MouseFormat,
+    is_alt: bool,
     modifiers: ModifiersState,
     ui_consumed: bool,
 ) -> Option<PointerGesture> {
@@ -70,19 +56,27 @@ pub(in crate::app) fn begin_pointer_gesture(
     let owner = match (tracking, modifiers.shift_key()) {
         (MouseTracking::Off, _) | (_, true) => PointerGestureOwner::Local,
         (MouseTracking::Button | MouseTracking::ButtonMotion | MouseTracking::AnyMotion, false) => {
-            PointerGestureOwner::Terminal { tracking, sgr }
+            PointerGestureOwner::Terminal { tracking, format, is_alt }
         }
     };
-    Some(PointerGesture { owner, press_pane: cell.pane_id, last_cell: cell, anchor: None })
+    Some(PointerGesture {
+        owner,
+        press_pane: cell.pane_id,
+        last_cell: cell,
+        anchor: None,
+        prompt: None,
+    })
 }
 
 impl WindowState {
-    /// Begin one grid press from this window's live modifier state.
+    /// Begin one grid press from this window's live modifier state, latching the press-time
+    /// `tracking`, `format` and screen (`is_alt`) its held motion is stamped with.
     pub(in crate::app) fn begin_pointer_press(
         &mut self,
         cell: PointerCell,
         tracking: MouseTracking,
-        sgr: bool,
+        format: MouseFormat,
+        is_alt: bool,
     ) -> Option<Vec<u8>> {
         let gesture = if self.copy_mode.as_ref().is_some_and(CopyModeState::is_read_only) {
             // READONLY selects local ownership only at the press; an earlier terminal hold keeps its route.
@@ -91,49 +85,55 @@ impl WindowState {
                 press_pane: cell.pane_id,
                 last_cell: cell,
                 anchor: None,
+                prompt: None,
             })
         } else {
             // When: copy_mode is not READONLY, retain the normal Shift and tracking ownership decision.
-            begin_pointer_gesture(cell, tracking, sgr, self.modifiers, false)
+            begin_pointer_gesture(cell, tracking, format, is_alt, self.modifiers, false)
         };
         self.pointer_gesture = gesture;
-        let PointerGestureOwner::Terminal { sgr, .. } = gesture?.owner else {
+        let PointerGestureOwner::Terminal { format, .. } = gesture?.owner else {
             // When: `gesture.owner` is Local, preserve the selection and emit no terminal report.
             return None;
         };
         self.selection = None;
         Some(pointer_report_bytes(
-            sgr,
+            format,
             PointerReportKind::LeftPress,
             self.modifiers,
             cell.row,
             cell.col,
+            cell.pixel,
         ))
     }
 }
 
-/// Route motion for an already-latched left-button gesture.
+/// Route motion for an already-latched left-button gesture. `press_pixel` is the pointer measured
+/// from the press pane's origin wherever it is, so 1016 reports a drag past the pane's edge.
 pub(in crate::app) fn route_pressed_pointer_motion(
     gesture: &mut PointerGesture,
     cell: Option<PointerCell>,
+    press_pixel: (i32, i32),
     modifiers: ModifiersState,
 ) -> PointerMotionRoute {
-    let PointerGestureOwner::Terminal { tracking, sgr } = gesture.owner else {
+    let PointerGestureOwner::Terminal { tracking, format, .. } = gesture.owner else {
         // When: local selection owns the gesture, current parser/modifier state cannot steal it.
         return PointerMotionRoute::Local;
     };
     if let Some(cell) = cell.filter(|cell| cell.pane_id == gesture.press_pane) {
         gesture.last_cell = cell;
     }
+    gesture.last_cell.pixel = press_pixel;
     if tracking == MouseTracking::Button {
         // When: Button mode reports transitions only, suppress held motion.
         return PointerMotionRoute::None;
     }
     PointerMotionRoute::Report {
         pane_id: gesture.press_pane,
-        sgr,
+        format,
         row: gesture.last_cell.row,
         col: gesture.last_cell.col,
+        pixel: gesture.last_cell.pixel,
         modifiers,
     }
 }
@@ -241,17 +241,30 @@ pub(in crate::app) fn pointer_scrollbar_content_rect(
 pub(in crate::app) fn no_button_motion_report(
     cell: PointerCell,
     tracking: MouseTracking,
-    sgr: bool,
+    format: MouseFormat,
     modifiers: ModifiersState,
     ui_consumed: bool,
 ) -> Option<PointerMotionRoute> {
     (!ui_consumed && tracking == MouseTracking::AnyMotion).then_some(PointerMotionRoute::Report {
         pane_id: cell.pane_id,
-        sgr,
+        format,
         row: cell.row,
         col: cell.col,
+        pixel: cell.pixel,
         modifiers,
     })
+}
+
+impl PointerGesture {
+    /// The profile a terminal-owned gesture's held motion is stamped with: its press-time
+    /// tracking, format and screen, with the button held; `None` for a local gesture.
+    pub(in crate::app) fn held_profile(&self) -> Option<MotionProfile> {
+        let PointerGestureOwner::Terminal { tracking, format, is_alt } = self.owner else {
+            // When: owner is Local, the gesture reports nothing to the terminal.
+            return None;
+        };
+        Some(MotionProfile { tracking, format, is_alt, held: true })
+    }
 }
 
 /// Consume a left-button gesture and return its terminal release route, if any.
@@ -260,15 +273,16 @@ pub(in crate::app) fn take_pointer_release(
     modifiers: ModifiersState,
 ) -> Option<PointerMotionRoute> {
     let gesture = gesture.take()?;
-    let PointerGestureOwner::Terminal { sgr, .. } = gesture.owner else {
+    let PointerGestureOwner::Terminal { format, .. } = gesture.owner else {
         // When: local selection owns the gesture, release stays entirely local.
         return None;
     };
     Some(PointerMotionRoute::Report {
         pane_id: gesture.press_pane,
-        sgr,
+        format,
         row: gesture.last_cell.row,
         col: gesture.last_cell.col,
+        pixel: gesture.last_cell.pixel,
         modifiers,
     })
 }
@@ -291,11 +305,11 @@ pub(in crate::app) fn pointer_route_bytes(
     route: PointerMotionRoute,
     kind: PointerReportKind,
 ) -> Option<(u64, Vec<u8>)> {
-    let PointerMotionRoute::Report { pane_id, sgr, row, col, modifiers } = route else {
+    let PointerMotionRoute::Report { pane_id, format, row, col, pixel, modifiers } = route else {
         // When: `route` is Local or None, ownership or mode suppressed the terminal report.
         return None;
     };
-    Some((pane_id, pointer_report_bytes(sgr, kind, modifiers, row, col)))
+    Some((pane_id, pointer_report_bytes(format, kind, modifiers, row, col, pixel)))
 }
 
 /// The pane and cell under a point from pane rectangles on a uniform `cell_size` grid.
@@ -333,34 +347,23 @@ pub(in crate::app) fn wheel_route(tracking: MouseTracking, is_alt: bool) -> Whee
     }
 }
 
-/// Encode `count` mouse-wheel reports for an app that has mouse tracking on.
-/// Wheel buttons per xterm: 64 = up, 65 = down (press only, no release).
-/// `sgr` true → SGR encoding `ESC[<Btn;col;row M` (1-based, unbounded).
-/// `sgr` false → legacy X10 `ESC[M` + 3 bytes (button+32, col+32, row+32),
-/// each byte clamped to the classic 223 ceiling (col/row+32 ≤ 255).
-/// `col`/`row` are 1-based cell coordinates of the cell under the cursor.
+/// Encode `count` mouse-wheel reports in `format` at zero-based cell `cell` (row, column) and pane
+/// pixel `pixel`. Wheel buttons per xterm: 64 up, 65 down, a press with no release.
 pub(in crate::app) fn wheel_report_bytes(
-    sgr: bool,
+    format: MouseFormat,
     up: bool,
-    col: u32,
-    row: u32,
+    cell: (u16, u16),
+    pixel: (i32, i32),
     count: usize,
 ) -> Vec<u8> {
-    let btn: u32 = if up { 64 } else { 65 };
-    let mut out = Vec::new();
-    for _ in 0..count {
-        if sgr {
-            out.extend_from_slice(format!("\x1b[<{btn};{col};{row}M").as_bytes());
-        } else {
-            // When: sgr is false, clamp each legacy X10 coordinate to one byte.
-            // X10: parameters are value+32, capped so col/row+32 fit a byte.
-            let button_byte = (btn + 32).min(255) as u8;
-            let column_byte = (col.min(223) + 32) as u8;
-            let row_byte = (row.min(223) + 32) as u8;
-            out.extend_from_slice(&[0x1b, b'[', b'M', button_byte, column_byte, row_byte]);
-        }
-    }
-    out
+    let report = crate::app::mouse_report::MouseReport {
+        button: if up { 64 } else { 65 },
+        modifiers: 0,
+        release: false,
+        cell,
+        pixel,
+    };
+    crate::app::mouse_report::encode_mouse_report(format, report).repeat(count)
 }
 
 impl App {

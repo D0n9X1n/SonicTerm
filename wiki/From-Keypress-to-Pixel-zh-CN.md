@@ -136,10 +136,9 @@ flowchart LR
     write --> pane["存活 PaneState / PtyHandle"] --> queue["有界输入队列"]
 ```
 
-原生输入和广播路径不再构建临时状态机。显式的 `AppIntent::PtyWrite` 与
-`AppEffect::PtyWrite` 按指定窗格 id 进入同一个有界写入边界。以窗口为目标的兼容输入会解析
-该存活窗口的活动窗格，不使用零哨兵，也不猜测最前窗口；该窗口处于 READONLY 模式时，这类输入
-会被丢弃。目标缺失时，不会把字节转给另一终端。
+原生输入和广播的每个目标都带着窗格 id 进入这个边界。以窗口为目标的输入（输入法提交或粘贴）
+会解析该存活窗口的活动窗格，不使用零哨兵，也不猜测最前窗口；该窗口处于 READONLY 模式时，这类
+输入会被丢弃。目标缺失时，不会把字节转给另一终端。
 
 `PtyHandle::send_input_nonblocking` 使用 `try_send`：
 
@@ -373,7 +372,7 @@ wgpu 绘制前：
 | --- | --- |
 | 键盘与输入法路由 | `crates/sonicterm-app/src/app/{window_event,window_keyboard}.rs` |
 | 按键编码 | `crates/sonicterm-app/src/app/key_encoding.rs` |
-| 意图/效果 PTY 边界 | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine}.rs`、`crates/sonicterm-app/src/app/{effects,input_dispatch}.rs` |
+| PTY 写入边界 | `crates/sonicterm-app/src/app/input_dispatch.rs` |
 | PTY 队列与线程 | `crates/sonicterm-io/src/pty.rs` |
 | VT 工作线程与重绘合并 | `crates/sonicterm-app/src/app/{spawn_pane,child_tabs,child_window,child_window_redraw,redraw_target}.rs` |
 | VT 解析 | `crates/sonicterm-vt/src/vt.rs` |

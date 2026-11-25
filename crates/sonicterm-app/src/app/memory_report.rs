@@ -585,6 +585,17 @@ impl MemoryReport {
                     )
                 ),
             );
+            push_line(
+                text,
+                &format!(
+                    "    {}",
+                    columns(
+                        "program status / user vars",
+                        38,
+                        &format_amount(retention.program_metadata)
+                    )
+                ),
+            );
         }
         push_line(text, "");
     }

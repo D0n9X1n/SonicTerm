@@ -50,12 +50,37 @@ fn decrqm_reports_only_the_selected_mouse_mode() {
     assert_eq!(reply_to(&mut parser, b"\x1b[?1000$p"), b"\x1b[?1000;2$y");
 }
 
-/// A mode the parser does not store answers 0 (not recognized), so a program that probes it, such
-/// as for SGR pixel mouse 1016, falls back at once instead of waiting out a timeout; nothing changes.
+/// Each mouse encoding mode reports 1 while it is the active format and 2 otherwise, so a program
+/// that probes 1005, 1006, 1015 or 1016 learns which one its reports use.
+#[test]
+fn decrqm_reports_the_active_mouse_encoding() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    let modes = [1005u16, 1006, 1015, 1016];
+    for active in modes {
+        parser.advance(format!("\x1b[?{active}h").as_bytes());
+        for mode in modes {
+            let state = if mode == active { 1 } else { 2 };
+            let query = format!("\x1b[?{mode}$p");
+            assert_eq!(
+                reply_to(&mut parser, query.as_bytes()),
+                format!("\x1b[?{mode};{state}$y").as_bytes(),
+                "{active} active, {mode} asked"
+            );
+        }
+    }
+    parser.advance(b"\x1b[?1015l");
+    for mode in modes {
+        let query = format!("\x1b[?{mode}$p");
+        assert_eq!(reply_to(&mut parser, query.as_bytes()), format!("\x1b[?{mode};2$y").as_bytes());
+    }
+}
+
+/// A mode the parser does not store answers 0 (not recognized), so a program that probes it falls
+/// back at once instead of waiting out a timeout; nothing changes.
 #[test]
 fn decrqm_answers_zero_for_modes_it_does_not_store() {
     let mut parser = Parser::new(Grid::new(8, 2));
-    for mode in [6u16, 12, 25, 66, 1005, 1015, 1016, 1048, 2048, 4242] {
+    for mode in [6u16, 12, 25, 66, 1048, 2048, 4242] {
         let query = format!("\x1b[?{mode}$p");
         assert_eq!(reply_to(&mut parser, query.as_bytes()), format!("\x1b[?{mode};0$y").as_bytes());
     }
@@ -161,4 +186,44 @@ fn cell_size_report_uses_the_host_cell_size() {
     for ignored in [&b"\x1b[14t"[..], b"\x1b[18t", b"\x1b[14;2t", b"\x1b[16;1t"] {
         assert_eq!(reply_to(&mut parser, ignored), b"", "{ignored:?}");
     }
+}
+
+/// Contract: DECSET 5522 (paste events) is stored per parser and advertised: DECRQM answers 1
+/// while set and 2 while reset; DECRST and RIS reset it.
+#[test]
+fn decrqm_reports_after_6c() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    assert!(!parser.paste_events_enabled(), "a fresh parser has the mode reset");
+    assert_eq!(reply_to(&mut parser, b"\x1b[?5522$p"), b"\x1b[?5522;2$y");
+    parser.advance(b"\x1b[?5522h");
+    assert!(parser.paste_events_enabled());
+    assert_eq!(reply_to(&mut parser, b"\x1b[?5522$p"), b"\x1b[?5522;1$y");
+    parser.advance(b"\x1b[?5522l");
+    assert!(!parser.paste_events_enabled(), "DECRST resets it");
+    assert_eq!(reply_to(&mut parser, b"\x1b[?5522$p"), b"\x1b[?5522;2$y");
+    parser.advance(b"\x1b[?5522h\x1bc");
+    assert!(!parser.paste_events_enabled(), "RIS resets it");
+}
+
+/// Contract: the lock-free paste-events snapshot carries the set bit and a count of every set to
+/// reset transition, so a host that sees one word after DECRST then DECSET in the same batch still
+/// knows a reset happened; a DECRST while reset and a RIS while reset count nothing.
+#[test]
+fn paste_events_snapshot_counts_each_reset() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    let fresh = parser.paste_events_snapshot();
+    assert_eq!(fresh & 1, 0, "reset at start");
+    parser.advance(b"\x1b[?5522h");
+    let set = parser.paste_events_snapshot();
+    assert_eq!(set, fresh | 1, "DECSET sets only the set bit");
+    parser.advance(b"\x1b[?5522l\x1b[?5522h");
+    let again = parser.paste_events_snapshot();
+    assert_eq!(again & 1, 1);
+    assert_ne!(again, set, "a reset then set in one batch still moves the word");
+    parser.advance(b"\x1bc");
+    let after_ris = parser.paste_events_snapshot();
+    assert_eq!(after_ris & 1, 0);
+    assert_ne!(after_ris >> 1, again >> 1, "RIS of a set mode counts a reset");
+    parser.advance(b"\x1b[?5522l\x1bc");
+    assert_eq!(parser.paste_events_snapshot(), after_ris, "no transition while reset");
 }

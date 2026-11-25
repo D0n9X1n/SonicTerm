@@ -144,8 +144,19 @@ cursor_blink = false
 cursor_shape = "block"
 # Cursor movement: "none" jumps, "smooth" glides to the new cell over 90 ms.
 cursor_animation = "none"
-# Programs may set the clipboard with OSC 52: "allow" or "deny".
+# Programs may set the clipboard with OSC 52: "allow", "ask" or "deny".
+# "ask" writes only after you choose Allow on a consent page; Deny or 2 minutes
+# without an answer drops the write.
 osc52 = "allow"
+# Programs may ask for the clipboard with OSC 52 reads: "ask", "allow" or "deny".
+# "allow" sends the clipboard's text; "ask" sends it only after you choose Allow on a
+# consent page, and answers empty on Deny or after 2 minutes; "deny" stays silent.
+osc52_read = "ask"
+# Most decoded bytes one OSC 52 write may hold in memory (at most 536870912).
+clipboard_write_limit_bytes = {clipboard_write_limit_bytes}
+# A plain click in a shell prompt moves its cursor there: "any-prompt" (every
+# OSC 133 prompt), "declared" (only prompts that ask for it) or "off".
+click_to_move = "any-prompt"
 
 [logging]
 # Logs are written to {config_dir}/logs/sonicterm.log.
@@ -200,6 +211,8 @@ strong_focus = false
 # Desktop notification for long-running commands.
 long_command = false
 threshold_secs = 10
+# Append the command's text (from shell integration) to that notification.
+long_command_cmdline = false
 
 [status_line]
 # A strip with SonicTerm's own state: memory, modes, scroll position,
@@ -243,6 +256,9 @@ isolation = "shared"
 # Panes create_pane may open a helper beside under control = "agent":
 # "any" (every pane) or "agent" (only panes the agent may control).
 create_anchor = "any"
+# Let list_panes include program status ids, apps, titles and messages
+# (OSC 7501) for panes the agent may read. Off lists typed status only.
+program_status_text = false
 "#,
         config_dir = default_config_dir()
             .map(|dir| dir.display().to_string())
@@ -268,6 +284,7 @@ create_anchor = "any"
         term_program = cfg.terminal.term_program,
         scrollback = cfg.terminal.scrollback,
         clickable_path_max_chars = cfg.terminal.clickable_path_max_chars,
+        clipboard_write_limit_bytes = cfg.terminal.clipboard_write_limit_bytes,
         tab_min_width = cfg.tab_min_width,
         tab_max_width = cfg.tab_max_width,
     )

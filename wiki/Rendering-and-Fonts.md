@@ -357,8 +357,12 @@ wins; otherwise underline uses foreground color. GPU line endpoints travel in
 geometry parameters separate from HSV color transforms, so a curly underline's
 shape cannot alter its resolved color.
 
-The parser stores blink, hidden, and strikethrough flags. The current terminal
-renderer has no flag-specific draw branch for those three.
+Strikethrough (SGR 9) draws one bar through the middle of each struck run, as thick as a
+single underline and in the color the struck glyphs draw with: the cell foreground after
+inverse, dim and the pane's program colors, so an inverse cell's bar stays visible. SGR 58 colors
+only underlines. A run reaching the row's right edge covers a wide glyph's both columns. The
+parser also stores blink and
+hidden flags; the current terminal renderer has no flag-specific draw branch for those two.
 
 ### Rasterization
 
@@ -982,9 +986,11 @@ damaged through the ink-padded strips of the slots that draw the dirty live rows
 
 The command badge's hash covers the status kind and the drawn badge, so a running
 tab does not repaint the band every second, but a change of kind, such as Idle to
-Running before any badge is drawn, repaints it once. A block cursor recolors whole glyph
-instances, which can be taller than the cursor row plus its pad, so after
-assembly the damage also covers the recolored glyphs: both the previous and the
+Running before any badge is drawn, repaints it once. A block cursor recolors only the part of
+each text glyph inside its cell's columns, cutting a glyph that crosses the cell's left or right
+edge, at the glyph's full height, and a color glyph whole; either can be taller than the cursor
+row plus its pad, so
+after assembly the damage also covers the recolored glyphs: both the previous and the
 current bounds whenever the recolor changed, and the current bounds when only the
 cursor or focus class is set. Recolor bounds that are not finite add the active
 pane, and tab-title ink that is not finite adds the surface. The cursor-shape,

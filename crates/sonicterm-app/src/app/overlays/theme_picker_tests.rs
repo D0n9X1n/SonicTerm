@@ -254,3 +254,42 @@ fn closing_the_picker_window_restores_the_original_theme() {
     assert!(!app.interaction.command_palette.is_open());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Feed `request` to the child window's only pane parser and return its reply bytes.
+fn pane_reply(app: &App, child: winit::window::WindowId, request: &[u8]) -> Vec<u8> {
+    let pane = app.registry.windows[&child].panes.values().next().expect("the child has a pane");
+    let mut parser = pane.parser.lock();
+    let mut reply = Vec::new();
+    let mut remaining = request;
+    while !remaining.is_empty() {
+        let (consumed, _, replies) = parser.advance_with_replies(remaining);
+        reply.extend(replies);
+        remaining = &remaining[consumed..];
+    }
+    reply
+}
+
+/// A program's color override survives the picker's preview, cancel and pick, while a color the
+/// program did not set follows each of them: the pane's default background reads the previewed,
+/// restored and picked theme in turn, and its foreground keeps the program's color throughout.
+#[test]
+fn picker_transitions_keep_overrides_and_move_unset_defaults() {
+    let (mut app, child, dir) = picker_app("overrides");
+    let _ = pane_reply(&app, child, b"\x1b]10;#010203\x07");
+    let fg_override = b"\x1b]10;rgb:0101/0202/0303\x07".to_vec();
+    let background = |app: &App| pane_reply(app, child, b"\x1b]11;?\x07\x1b]10;?\x07");
+    let mine = [b"\x1b]11;rgb:2020/2020/2020\x07".to_vec(), fg_override.clone()].concat();
+    let paper = [b"\x1b]11;rgb:fafa/fafa/fafa\x07".to_vec(), fg_override.clone()].concat();
+    assert!(app.run_action_for_window(&Action::ChooseTheme, child));
+    app.interaction.command_palette.input_str("paper");
+    app.preview_picker();
+    assert_eq!(background(&app), paper, "the preview moves only the unset default");
+    app.command_palette_handle_logical_key(&Key::Named(NamedKey::Escape));
+    assert_eq!(background(&app), mine, "cancel restores the unset default only");
+    assert!(app.run_action_for_window(&Action::ChooseTheme, child));
+    app.interaction.command_palette.input_str("paper");
+    app.preview_picker();
+    app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
+    assert_eq!(background(&app), paper, "the pick keeps the override over the new default");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

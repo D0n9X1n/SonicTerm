@@ -1,0 +1,187 @@
+//! A pane's colors: the window theme under the colors its program set with OSC 4, 10-12, 17, 19
+//! and 21.
+//!
+//! Every cell color path resolves through [`PaneColors`], so a pane's glyphs, inverse and dim
+//! cells, backgrounds, decorations and cursor agree. A pane without program colors carries no
+//! overrides and resolves exactly as the theme does, with no extra work.
+
+use super::*;
+use sonicterm_types::{ColorOverrides, DynamicColor, Rgb};
+use std::hash::{Hash, Hasher};
+
+/// The theme and, while its program set any, a pane's color overrides.
+#[derive(Clone, Copy)]
+pub struct PaneColors<'frame> {
+    theme: &'frame Theme,
+    overrides: Option<&'frame ColorOverrides>,
+}
+
+impl<'frame> From<&'frame Theme> for PaneColors<'frame> {
+    fn from(theme: &'frame Theme) -> Self {
+        Self { theme, overrides: None }
+    }
+}
+
+/// An 8-bit override as an opaque chrome color.
+fn chrome((red, green, blue): Rgb) -> ChromeColor {
+    ChromeColor::rgb(red, green, blue)
+}
+
+impl<'frame> PaneColors<'frame> {
+    /// The colors of a pane drawn with `theme` under `overrides`.
+    #[must_use]
+    pub fn new(theme: &'frame Theme, overrides: Option<&'frame ColorOverrides>) -> Self {
+        Self { theme, overrides }
+    }
+
+    fn dynamic(&self, target: DynamicColor) -> Option<ChromeColor> {
+        self.overrides.and_then(|overrides| overrides.dynamic(target)).map(chrome)
+    }
+
+    /// The pane's default foreground: the program's, else the theme's.
+    #[must_use]
+    pub fn foreground(&self) -> ChromeColor {
+        self.dynamic(DynamicColor::Foreground)
+            .unwrap_or_else(|| hex_to_chrome_color(self.theme.colors.foreground.0.as_str()))
+    }
+
+    /// The pane's default background: the program's, else the theme's.
+    #[must_use]
+    pub fn background(&self) -> ChromeColor {
+        self.dynamic(DynamicColor::Background)
+            .unwrap_or_else(|| hex_to_chrome_color(self.theme.colors.background.0.as_str()))
+    }
+
+    /// The foreground a default-colored glyph draws with: the program's, else `theme_default`,
+    /// the renderer's precomputed theme foreground.
+    #[must_use]
+    pub fn default_foreground(&self, theme_default: ChromeColor) -> ChromeColor {
+        self.dynamic(DynamicColor::Foreground).unwrap_or(theme_default)
+    }
+
+    /// Palette entry `index`: the program's, else the theme's.
+    #[must_use]
+    pub fn indexed(&self, index: u8) -> Option<ChromeColor> {
+        self.overrides
+            .and_then(|overrides| overrides.palette(index))
+            .map(chrome)
+            .or_else(|| indexed(index, self.theme))
+    }
+
+    /// The cursor fill: the program's OSC 12 color, else `theme_cursor`, both opaque premultiplied
+    /// linear.
+    #[must_use]
+    pub fn cursor_rgba(&self, theme_cursor: [f32; 4]) -> [f32; 4] {
+        self.dynamic(DynamicColor::Cursor).map_or(theme_cursor, chrome_color_to_linear_rgba)
+    }
+
+    /// The selection highlight: the program's OSC 17 color at the opacity of `theme_highlight`,
+    /// the renderer's premultiplied theme highlight, else `theme_highlight` itself.
+    #[must_use]
+    pub fn selection_rgba(&self, theme_highlight: [f32; 4]) -> [f32; 4] {
+        let selection = self
+            .overrides
+            .and_then(|overrides| overrides.dynamic(DynamicColor::SelectionBackground));
+        let Some((red, green, blue)) = selection else {
+            // When: the program set no selection background, the theme highlight is drawn.
+            return theme_highlight;
+        };
+        let alpha = theme_highlight[3];
+        let lut = crate::color::srgb_u8_to_linear_lut();
+        [
+            lut[usize::from(red)] * alpha,
+            lut[usize::from(green)] * alpha,
+            lut[usize::from(blue)] * alpha,
+            alpha,
+        ]
+    }
+
+    /// The color selected glyphs draw with: the program's OSC 19 color, opaque premultiplied
+    /// linear; `None` without one, so selected glyphs keep their own colors.
+    #[must_use]
+    pub fn selection_foreground_rgba(&self) -> Option<[f32; 4]> {
+        self.dynamic(DynamicColor::SelectionForeground).map(chrome_color_to_linear_rgba)
+    }
+
+    /// The glyph under a block cursor: the program's OSC 21 `cursor_text`, else `theme_cursor_text`,
+    /// both opaque premultiplied linear.
+    #[must_use]
+    pub fn cursor_text_rgba(&self, theme_cursor_text: [f32; 4]) -> [f32; 4] {
+        self.dynamic(DynamicColor::CursorText)
+            .map_or(theme_cursor_text, chrome_color_to_linear_rgba)
+    }
+
+    /// The fill under the pane's default-background cells when the program set a background,
+    /// premultiplied at the window's background `opacity` as the theme clear is.
+    #[must_use]
+    pub fn background_fill(&self, opacity: f32) -> Option<[f32; 4]> {
+        let (red, green, blue) = self.overrides?.dynamic(DynamicColor::Background)?;
+        let alpha = opacity.clamp(0.0, 1.0);
+        let lut = crate::color::srgb_u8_to_linear_lut();
+        Some([
+            lut[usize::from(red)] * alpha,
+            lut[usize::from(green)] * alpha,
+            lut[usize::from(blue)] * alpha,
+            alpha,
+        ])
+    }
+
+    /// The row-cache style revision for this pane: `base` without overrides or while their
+    /// generation never moved (every held override equals the color already drawn), else `base`
+    /// mixed with the override generation, so a cached row never replays another color state.
+    #[must_use]
+    pub fn style_rev(&self, base: u64) -> u64 {
+        let Some(overrides) = self.overrides.filter(|overrides| overrides.generation() != 0) else {
+            // When: no `overrides` changed a drawn color, the pane shares the theme rows.
+            return base;
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (base, overrides.generation()).hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+/// Accumulates the frame key's color identity one pane at a time, inside a pass over the panes
+/// the frame already makes.
+#[derive(Default)]
+pub struct PaneColorsDigest {
+    hasher: Option<std::collections::hash_map::DefaultHasher>,
+}
+
+impl PaneColorsDigest {
+    /// Add pane `pane_id` drawn under `overrides`; only a store whose generation moved counts,
+    /// since one that never moved draws exactly as the theme does.
+    pub fn add(&mut self, pane_id: u64, overrides: Option<&ColorOverrides>) {
+        let Some(generation) =
+            overrides.map(ColorOverrides::generation).filter(|generation| *generation != 0)
+        else {
+            // When: the pane has no overrides or none changed a drawn color, it adds nothing.
+            return;
+        };
+        (pane_id, generation).hash(self.hasher.get_or_insert_with(Default::default));
+    }
+
+    /// The identity: 0 while no pane counted, else a digest of each counted pane's id and
+    /// generation, so any drawn color change repaints the whole window.
+    #[must_use]
+    pub fn finish(&self) -> u64 {
+        self.hasher.as_ref().map_or(0, Hasher::finish)
+    }
+}
+
+/// The frame key's color identity of `panes`, as [`PaneColorsDigest`] accumulates it.
+#[cfg(test)]
+#[must_use]
+pub fn pane_colors_identity<'frame>(
+    panes: impl IntoIterator<Item = (u64, Option<&'frame ColorOverrides>)>,
+) -> u64 {
+    let mut digest = PaneColorsDigest::default();
+    for (pane_id, overrides) in panes {
+        digest.add(pane_id, overrides);
+    }
+    digest.finish()
+}
+
+#[cfg(test)]
+#[path = "core_pane_colors_tests.rs"]
+mod core_pane_colors_tests;

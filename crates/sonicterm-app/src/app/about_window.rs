@@ -167,16 +167,17 @@ impl App {
             // When: `view` is None, nothing has been shown yet, so there is nothing to copy.
             return false;
         };
-        let copied = self.set_clipboard_text(text);
-        let (level, key) = if copied {
-            (sonicterm_ui::overlays::NotificationLevel::Info, "about-copied")
-        } else {
-            // When: copied is false, the clipboard refused the text, so the warning says so.
-            (sonicterm_ui::overlays::NotificationLevel::Warning, "about-copy-failed")
-        };
-        let message = self.i18n.translate(key);
-        self.show_notification_for_kind(super::FrontmostKind::Child(about_id), level, message);
-        copied
+        // The notification reports the clipboard's actual result, once it has answered.
+        self.copy_text_then(text, move |app, copied| {
+            let (level, key) = if copied {
+                (sonicterm_ui::overlays::NotificationLevel::Info, "about-copied")
+            } else {
+                // When: copied is false, the clipboard refused the text, so the warning says so.
+                (sonicterm_ui::overlays::NotificationLevel::Warning, "about-copy-failed")
+            };
+            let message = app.i18n.translate(key);
+            app.show_notification_for_kind(super::FrontmostKind::Child(about_id), level, message);
+        })
     }
 
     /// Close the About window through the shared child-window teardown. Never quits the app.

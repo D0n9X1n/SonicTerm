@@ -159,7 +159,7 @@ pub use child_window::{
 mod child_window_pointer;
 mod child_window_redraw;
 mod command_events;
-use command_events::{append_bounded_command_events, notify_command_done};
+use command_events::append_bounded_command_events;
 pub use command_events::{poll_command_events_for_child_window, poll_command_events_for_tab_state};
 mod config_apply;
 mod dispatch_timeline;
@@ -191,8 +191,6 @@ pub use echo_watch::{
     ArmOutcome, ArmToken, EchoAppearance, EchoDelivery, EchoDeliveryOutcome, EchoPublication,
     EchoRowIdentity, EchoTrace, EchoWatchTarget, TakeOutcome,
 };
-mod effects;
-use effects::close_owner;
 mod config_state;
 mod event_loop;
 mod fg_probe;
@@ -246,6 +244,7 @@ mod memory_report_queues;
 mod memory_report_window;
 pub mod memory_snapshot;
 mod misc;
+mod mouse_report;
 mod native_title;
 mod native_title_font;
 pub mod os_drag;
@@ -269,6 +268,7 @@ use pane_refresh::{propagate_theme_to_pane_parsers, update_terminal_ime_cursor_a
 mod pane_state;
 mod pane_target;
 mod perf_control;
+mod pointer_cursor;
 pub use perf_control::{
     PerfControlOutcomeV1, PerfControlPauseV1, PerfControlPhaseV1, PerfControlStopV1,
 };
@@ -294,6 +294,7 @@ const _: () = {
 };
 mod privilege;
 mod program_state;
+mod prompt_click;
 use privilege::refresh_window_tab_privileges;
 mod quit_hold;
 mod reaper_driver;
@@ -338,6 +339,23 @@ pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
 mod shared_gpu;
 pub(crate) use shared_gpu::{font_fallback_waker, gpu_device_state_waker};
+mod clipboard_worker;
+mod kitty_clipboard_offer;
+mod kitty_clipboard_read;
+mod kitty_clipboard_tx;
+mod osc52_read;
+mod osc52_read_consent;
+mod osc52_read_grants;
+mod osc52_read_paste;
+mod osc52_read_pipeline;
+mod osc52_read_source;
+mod osc52_read_ticket;
+#[cfg(any(test, target_os = "linux"))]
+mod osc52_read_x11;
+#[cfg(target_os = "linux")]
+#[path = "osc52_read_x11_native.rs"]
+mod osc52_read_x11_native;
+mod osc52_stream;
 mod reply_delivery;
 mod report_windows;
 mod spawn_pane;
@@ -356,6 +374,9 @@ mod test_hooks_media;
 mod test_hooks_overlays;
 mod test_hooks_owners;
 mod test_hooks_panes;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use test_hooks_panes::TestReplyPane;
 mod test_hooks_windows;
 mod text_edit;
 #[doc(hidden)]
@@ -394,21 +415,6 @@ use window_setup::{
 use window_setup::{dpi_transition_inner_size, dpi_transition_size_scale};
 use window_state::TopologyChange;
 pub use window_state::{SplitterDragState, WindowRole, WindowState};
-
-/// Delay allowing a failing Windows clipboard helper to release its open handle.
-#[cfg(target_os = "windows")]
-const OSC52_CLIPBOARD_REASSERT_DELAY: Duration = Duration::from_millis(150);
-
-#[cfg(target_os = "windows")]
-#[derive(Debug)]
-pub(super) struct PendingOsc52Reassert {
-    /// Clipboard text to restore after the helper releases the clipboard.
-    text: String,
-    /// Clipboard value observed before the OSC write.
-    previous_text: Option<String>,
-    /// Event-loop deadline for the one permitted reassertion.
-    due: Instant,
-}
 
 #[doc(hidden)]
 pub struct App {
@@ -470,9 +476,8 @@ pub struct App {
     // split-borrow the fields disjointly; taking two `main_*_mut()` accessors
     // together is a double borrow of the same map entry.
     pub(super) clipboard: Option<Clipboard>,
-    #[cfg(target_os = "windows")]
-    /// One delayed OSC 52 write that survives a failing clipboard helper's cleanup.
-    pub(super) pending_osc52_reassert: Option<PendingOsc52Reassert>,
+    /// Program clipboard writes: the shared staging, its charge, and retained native copies.
+    pub(in crate::app) clip_state: osc52_stream::ClipState,
     // `App`-level DPI and hovered_url fields deleted — both
     // now live exclusively on `WindowState`. Readers go through
     // `self.main()?.dpi_scale` / `self.main()?.hovered_url`
@@ -615,8 +620,6 @@ pub struct App {
     /// window. Windows uses this slot to install the muda menubar,
     /// which requires the HWND at install time. Unused on macOS.
     pub(super) on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
-    /// Compatibility reducer observations; live topology decisions and native effect targets belong to App.
-    pub(crate) machine: sonicterm_app_core::AppStateMachine,
 }
 
 impl App {

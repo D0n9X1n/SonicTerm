@@ -331,7 +331,7 @@ pub fn recolor_cursor_glyphs(
         record.note_unbounded();
         return record;
     }
-    recolor_span(glyphs, target, sw, sh, bg_rgba, &mut record);
+    recolor_span(glyphs, target, sw, sh, bg_rgba, &mut record, None);
     record
 }
 
@@ -516,6 +516,11 @@ pub(crate) fn ndc_rect_px([gx, gy, gw, gh]: [f32; 4], sw: f32, sh: f32) -> (f32,
 
 /// Recolor every glyph in `glyphs` that lies at least 20% inside `target`, noting each
 /// recolored glyph, and any non-finite glyph, in `record`.
+///
+/// With `cut`, the slice's offset in the main glyph list and the list of cut parts, a text glyph
+/// crossing `target`'s left or right edge is cut there: only its part in `target`'s columns, at
+/// the glyph's full height, is recolored and noted, and its outside parts are pushed with its
+/// index. A color glyph ignores its color and is never cut.
 fn recolor_span(
     glyphs: &mut [GlyphInstance],
     target: (f32, f32, f32, f32),
@@ -523,8 +528,9 @@ fn recolor_span(
     sh: f32,
     bg_rgba: [f32; 4],
     record: &mut RecolorRecord,
+    mut cut: Option<(usize, &mut Vec<(usize, GlyphInstance)>)>,
 ) {
-    for glyph in glyphs.iter_mut() {
+    for (offset, glyph) in glyphs.iter_mut().enumerate() {
         let glyph_rect = glyph_rect_px(glyph, sw, sh);
         if !finite_rect(glyph_rect) {
             // When: `finite_rect` rejects `glyph_rect`, the glyph is never recolored (the strict
@@ -539,8 +545,23 @@ fn recolor_span(
         // overhang from the previous glyph (common with italic/script fonts)
         // should not recolor the whole glyph to background and make it vanish.
         if aabb_intersects(target, glyph_rect) && overlap >= glyph_area * 0.20 {
-            glyph.color = bg_rgba;
-            record.note_glyph(glyph, glyph_rect);
+            match cut.as_mut() {
+                Some((base, parts)) if glyph.flags[0] < 0.5 => {
+                    let outside =
+                        recolor_glyph_part(glyph, target, (sw, sh), bg_rgba, CutEdges::Columns);
+                    parts.extend(outside.into_iter().flatten().map(|part| (*base + offset, part)));
+                    // Only the recolored part changed, as its outside parts draw as before; a glyph
+                    // with no pixel centre in the snapped target kept its color and is not noted.
+                    if glyph.color.map(f32::to_bits) == bg_rgba.map(f32::to_bits) {
+                        record.note_glyph(glyph, glyph_rect_px(glyph, sw, sh));
+                    }
+                }
+                _ => {
+                    // Without a `cut` list, or for a color glyph, the whole glyph is recolored.
+                    glyph.color = bg_rgba;
+                    record.note_glyph(glyph, glyph_rect);
+                }
+            }
         }
     }
 }
@@ -594,12 +615,16 @@ impl RowGlyphSpan {
 /// Recolor the main glyph list's glyphs under `(cell_x, cell_y, cell_w, cell_h)`, scanning
 /// only rows whose ink meets the target plus every glyph outside the recorded rows.
 ///
-/// Recolors exactly what [`recolor_cursor_glyphs`] over the whole list would, and returns the
-/// same record with the number of glyphs examined.
+/// Without `clip_to_columns`, recolors exactly what [`recolor_cursor_glyphs`] over the whole list
+/// would, and returns the same record with the number of glyphs examined. With it, as a block
+/// cursor draws, a text glyph crossing the target's left or right edge is cut there: only its part
+/// in the target's columns is recolored and recorded, at the glyph's full height so ink rising
+/// above or hanging below the row keeps its repaint, its outside parts keep their color right after
+/// it, and every row span in `rows` moves to cover its glyphs again.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn recolor_cursor_glyphs_in(
-    glyphs: &mut [GlyphInstance],
-    rows: &[RowGlyphSpan],
+    glyphs: &mut Vec<GlyphInstance>,
+    rows: &mut [RowGlyphSpan],
     cell_x: f32,
     cell_y: f32,
     cell_w: f32,
@@ -607,6 +632,7 @@ pub(crate) fn recolor_cursor_glyphs_in(
     sw: f32,
     sh: f32,
     bg_rgba: [f32; 4],
+    clip_to_columns: bool,
 ) -> RecolorOutcome {
     let mut outcome = RecolorOutcome::default();
     if sw <= 0.0 || sh <= 0.0 {
@@ -619,26 +645,36 @@ pub(crate) fn recolor_cursor_glyphs_in(
         outcome.record.note_unbounded();
         return outcome;
     }
+    // The outside parts of the glyphs cut at the target's edge, each with its glyph's index, kept
+    // aside so the glyph indices the rows record stay valid until the parts are placed.
+    let mut cut_parts: Vec<(usize, GlyphInstance)> = Vec::new();
     let record = &mut outcome.record;
     let total = glyphs.len();
     let mut visited = 0;
     let mut next = 0;
-    for row in rows {
+    for row in rows.iter() {
         // Rows are recorded in emission order and never overlap; clamping keeps a stale span
         // from indexing past the list.
         let start = row.glyphs.start.clamp(next, total);
         let end = row.glyphs.end.clamp(start, total);
-        recolor_span(&mut glyphs[next..start], target, sw, sh, bg_rgba, record);
+        let parts = clip_to_columns.then_some((next, &mut cut_parts));
+        recolor_span(&mut glyphs[next..start], target, sw, sh, bg_rgba, record, parts);
         visited += start - next;
         if row.ink_px.is_some_and(|ink| ink_meets(ink, target)) {
             // The row's ink union meets the target, so one of its glyphs may; scan them all.
-            recolor_span(&mut glyphs[start..end], target, sw, sh, bg_rgba, record);
+            let parts = clip_to_columns.then_some((start, &mut cut_parts));
+            recolor_span(&mut glyphs[start..end], target, sw, sh, bg_rgba, record, parts);
             visited += end - start;
         }
         next = end;
     }
-    recolor_span(&mut glyphs[next..], target, sw, sh, bg_rgba, record);
+    let parts = clip_to_columns.then_some((next, &mut cut_parts));
+    recolor_span(&mut glyphs[next..], target, sw, sh, bg_rgba, record, parts);
     outcome.visited = visited + (total - next);
+    if !cut_parts.is_empty() {
+        // Some glyph was cut: its outside parts join the list after it and the rows move.
+        place_cut_parts(glyphs, rows, cut_parts);
+    }
     outcome
 }
 
@@ -648,6 +684,209 @@ pub(crate) fn recolor_cursor_glyphs_in(
 fn ink_meets(ink: [f32; 4], target: (f32, f32, f32, f32)) -> bool {
     let (tx, ty, tw, th) = target;
     tx < ink[2] && tx + tw > ink[0] && ty < ink[3] && ty + th > ink[1]
+}
+
+/// A cut closer than this to a glyph edge, in surface pixels, is treated as that edge, so a glyph
+/// already aligned to the selected cells is recolored whole rather than split into a sliver.
+const CUT_EPSILON_PX: f32 = 1.0 / 64.0;
+
+/// Draw the parts of the glyphs of `rows[pane]` (the owning pane's rows) that lie inside the
+/// selected cells `targets` (surface-pixel rectangles) in `color`, and return the number of
+/// glyphs examined.
+///
+/// A glyph wholly inside a target is recolored in place. A glyph crossing a target's edge, such as
+/// a ligature, a wide glyph or one that overhangs its cell, is cut at that edge: the inside part
+/// takes `color` and each outside part keeps its own color, each keeping the atlas coordinates of
+/// the pixels it covers, so only the selected cells' ink changes. Edges are snapped to the pixel
+/// boundary where the highlight's rows and columns begin, so the parts tile the glyph on both
+/// presenters. The outside parts are placed right after the glyph they were cut from, so every
+/// glyph keeps its paint order, and every row span in `rows` is moved to cover its glyphs again.
+/// Only glyphs of the owning pane's rows, and parts cut from them, are read, so a neighbour's
+/// overhang is never recolored. A color glyph ignores its color and keeps its pixels, so it is
+/// never cut.
+pub(crate) fn recolor_selected_cells(
+    glyphs: &mut Vec<GlyphInstance>,
+    rows: &mut [RowGlyphSpan],
+    pane: std::ops::Range<usize>,
+    targets: impl IntoIterator<Item = (f32, f32, f32, f32)>,
+    (sw, sh): (f32, f32),
+    color: [f32; 4],
+) -> usize {
+    if sw <= 0.0 || sh <= 0.0 {
+        // When: `sw` or `sh` is nonpositive, no glyph rectangle can be reconstructed.
+        return 0;
+    }
+    // Each outside part with the index of the glyph it was cut from, kept aside so the glyph
+    // indices the rows record stay valid until the parts are placed.
+    let mut cut_parts: Vec<(usize, GlyphInstance)> = Vec::new();
+    let mut visited = 0;
+    for target in targets.into_iter().filter(|target| finite_rect(*target)) {
+        // Parts an earlier target cut lie outside it and may lie inside this one.
+        let earlier_cuts = cut_parts.len();
+        for row in rows.get(pane.clone()).unwrap_or_default() {
+            if !row.ink_px.is_some_and(|ink| ink_meets(ink, target)) {
+                // When: the row's ink misses `target`, none of its glyphs can lie inside it.
+                continue;
+            }
+            for index in row.glyphs.clone() {
+                visited += 1;
+                let glyph = &mut glyphs[index];
+                let parts = recolor_glyph_part(glyph, target, (sw, sh), color, CutEdges::All);
+                cut_parts.extend(parts.into_iter().flatten().map(|part| (index, part)));
+            }
+        }
+        for part_index in 0..earlier_cuts {
+            visited += 1;
+            let origin = cut_parts[part_index].0;
+            let part = &mut cut_parts[part_index].1;
+            let parts = recolor_glyph_part(part, target, (sw, sh), color, CutEdges::All);
+            cut_parts.extend(parts.into_iter().flatten().map(|part| (origin, part)));
+        }
+    }
+    if !cut_parts.is_empty() {
+        // Some glyph was cut: its outside parts join the list after it and the rows move.
+        place_cut_parts(glyphs, rows, cut_parts);
+    }
+    visited
+}
+
+/// Insert each of `cut_parts` right after the glyph it was cut from, in one pass from the end of
+/// `glyphs`, and move every span of `rows` by the parts inserted before each of its bounds.
+fn place_cut_parts(
+    glyphs: &mut Vec<GlyphInstance>,
+    rows: &mut [RowGlyphSpan],
+    mut cut_parts: Vec<(usize, GlyphInstance)>,
+) {
+    // A stable sort keeps the parts of one glyph in the order they were cut.
+    cut_parts.sort_by_key(|(origin, _)| *origin);
+    let origins: Vec<usize> = cut_parts.iter().map(|(origin, _)| *origin).collect();
+    let old_len = glyphs.len();
+    glyphs.resize(old_len + cut_parts.len(), cut_parts[0].1);
+    // From the end: `read` bounds the glyphs not yet moved, `write` the slots not yet filled.
+    let (mut read, mut write) = (old_len, glyphs.len());
+    for (origin, part) in cut_parts.into_iter().rev() {
+        let tail = read - (origin + 1);
+        glyphs.copy_within(origin + 1..read, write - tail);
+        write -= tail + 1;
+        read = origin + 1;
+        glyphs[write] = part;
+    }
+    // A glyph at `bound` moves up by the parts of every glyph before it, so a span keeps its own
+    // glyphs and their parts.
+    let moved = |bound: usize| bound + origins.partition_point(|origin| *origin < bound);
+    for row in rows {
+        row.glyphs = moved(row.glyphs.start)..moved(row.glyphs.end);
+    }
+}
+
+/// Snap a selection edge to the pixel boundary where its first covered row or column begins
+/// (`ceil(edge - 0.5)`, the pixel-centre rule both presenters fill by), so a cut and the highlight
+/// agree on every pixel; a whole-pixel edge is unchanged.
+fn snap_selection_edge(edge: f32) -> f32 {
+    (edge - 0.5).ceil()
+}
+
+/// Which of a target's edges cut a glyph that crosses them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CutEdges {
+    /// Every edge: a selection recolors only the selected cells' rows and columns.
+    All,
+    /// The left and right edges only: a block cursor recolors its columns of a glyph at the
+    /// glyph's full height, so ink above or below the cursor row takes the cursor text color.
+    Columns,
+}
+
+/// Recolor the part of `glyph` inside `target` (or, by `edges`, inside its columns) to `color`
+/// and return the parts outside it, each with the glyph's own color (at most four bands); nothing
+/// changes for a color glyph or one that misses `target`.
+fn recolor_glyph_part(
+    glyph: &mut GlyphInstance,
+    target: (f32, f32, f32, f32),
+    (sw, sh): (f32, f32),
+    color: [f32; 4],
+    edges: CutEdges,
+) -> [Option<GlyphInstance>; 4] {
+    let original = *glyph;
+    let (left, top, width, height) = glyph_rect_px(&original, sw, sh);
+    let mut bands = [None; 4];
+    if original.flags[0] >= 0.5
+        || !finite_rect((left, top, width, height))
+        || !aabb_intersects(target, (left, top, width, height))
+    {
+        // When: a color glyph ignores `color`, and a glyph missing `target` has nothing inside it.
+        return bands;
+    }
+    let (right, bottom) = (left + width, top + height);
+    let (target_left, target_top, target_width, target_height) = target;
+    // Each cut is the target's snapped edge when it lies inside the glyph, else the glyph's own
+    // edge.
+    let cut = |edge: f32, low: f32, high: f32| {
+        let edge = snap_selection_edge(edge);
+        if edge <= low + CUT_EPSILON_PX {
+            // The target edge is at or before the glyph's near edge, which bounds the part.
+            low
+        } else if edge >= high - CUT_EPSILON_PX {
+            // When: `edge` is at or past `high`, the glyph's own far edge bounds the part.
+            high
+        } else {
+            // When: `edge` lies strictly between `low` and `high`, the glyph is cut there.
+            edge
+        }
+    };
+    let inner_left = cut(target_left, left, right);
+    let inner_right = cut(target_left + target_width, left, right);
+    let (inner_top, inner_bottom) = match edges {
+        CutEdges::All => {
+            (cut(target_top, top, bottom), cut(target_top + target_height, top, bottom))
+        }
+        // A column cut keeps the glyph's own top and bottom, so no band above or below splits off.
+        CutEdges::Columns => (top, bottom),
+    };
+    if inner_right <= inner_left || inner_bottom <= inner_top {
+        // When: `inner_right <= inner_left` or `inner_bottom <= inner_top`, the glyph only grazes
+        // `target`, so no pixel of it is selected.
+        return bands;
+    }
+    let [u_left, v_top, u_right, v_bottom] = original.uv;
+    // A part keeps the atlas coordinates of the pixels it covers, linear across the glyph.
+    let part = |part_left: f32, part_top: f32, part_right: f32, part_bottom: f32, rgba| {
+        let u_at = |pixel_x: f32| u_left + (u_right - u_left) * (pixel_x - left) / width;
+        let v_at = |pixel_y: f32| v_top + (v_bottom - v_top) * (pixel_y - top) / height;
+        GlyphInstance {
+            rect: px_to_ndc(
+                part_left,
+                part_top,
+                part_right - part_left,
+                part_bottom - part_top,
+                sw,
+                sh,
+            ),
+            uv: [u_at(part_left), v_at(part_top), u_at(part_right), v_at(part_bottom)],
+            color: rgba,
+            flags: original.flags,
+        }
+    };
+    if (inner_left, inner_top, inner_right, inner_bottom) == (left, top, right, bottom) {
+        // When: `inner_left`..`inner_bottom` equal the glyph's `left`..`bottom`, it lies wholly
+        // inside `target`, so it keeps its rectangle and only recolors.
+        glyph.color = color;
+        return bands;
+    }
+    *glyph = part(inner_left, inner_top, inner_right, inner_bottom, color);
+    // The outside bands: full-width above and below, then left and right of the inside part.
+    let edges = [
+        (left, top, right, inner_top),
+        (left, inner_bottom, right, bottom),
+        (left, inner_top, inner_left, inner_bottom),
+        (inner_right, inner_top, right, inner_bottom),
+    ];
+    for (slot, (band_left, band_top, band_right, band_bottom)) in edges.into_iter().enumerate() {
+        if band_right > band_left && band_bottom > band_top {
+            // The band holds pixels outside `target`, which keep the glyph's own color.
+            bands[slot] = Some(part(band_left, band_top, band_right, band_bottom, original.color));
+        }
+    }
+    bands
 }
 
 #[cfg(test)]

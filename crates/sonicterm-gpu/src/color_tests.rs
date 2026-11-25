@@ -82,13 +82,39 @@ fn linear_source_over_lookup_matches_direct_blending() {
     }
 }
 
-/// Malformed Unicode and ASCII hex inputs fall back to black without slicing panics.
+/// Malformed Unicode hex input falls back to black, at the requested opacity where one is given,
+/// without slicing panics.
 #[test]
 fn malformed_utf8_hex_uses_black_fallback_without_panicking() {
-    assert_eq!(hex_to_wgpu_with_alpha("#0é000", 0.5), wgpu::Color::BLACK);
+    let translucent_black = wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.5 };
+    assert_eq!(hex_to_wgpu_with_alpha("#0é000", 0.5), translucent_black);
     assert_eq!(hex_to_premultiplied_rgba("#0é000", 0.5), [0.0, 0.0, 0.0, 0.5]);
-    assert_eq!(hex_to_premultiplied_rgba("#zz4020", 0.5), [0.0, 0.0, 0.0, 0.5]);
     assert_eq!(hex_to_chrome_color("#0é000"), ChromeColor::rgb(0, 0, 0));
+}
+
+/// A six-character value with one pair that is not hex draws its other channels on every renderer
+/// path (window clear, quads, glyph and cell colors), exactly as the shared theme parse reads it,
+/// so the parser's seeded default is what is drawn.
+#[test]
+fn a_partly_hex_value_draws_the_shared_parse_on_every_path() {
+    let (red, green, blue) = sonicterm_types::theme_hex_rgb("#zz4020");
+    assert_eq!((red, green, blue), (0, 0x40, 0x20));
+    let expected = ChromeColor::rgb(red, green, blue);
+    assert_eq!(hex_to_chrome_color("#zz4020"), expected);
+    assert_eq!(hex_to_premultiplied_rgba("#zz4020", 1.0), chrome_color_to_linear_rgba(expected));
+    let clear = hex_to_wgpu_with_alpha("#zz4020", 1.0);
+    let linear = chrome_color_to_linear_rgba(expected);
+    for (drawn, wanted) in [clear.r, clear.g, clear.b].into_iter().zip(linear) {
+        assert!((drawn as f32 - wanted).abs() < 1.0e-6, "clear {drawn} vs {wanted}");
+    }
+}
+
+/// A window background that does not parse clears to black at the configured opacity, as a
+/// translucent window's valid background keeps its opacity, never to opaque black.
+#[test]
+fn a_malformed_window_background_clears_at_the_configured_opacity() {
+    assert_eq!(hex_to_wgpu_with_alpha("#abc", 0.5), wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.5 });
+    assert_eq!(hex_to_wgpu("#abc"), wgpu::Color::BLACK);
 }
 
 /// Hex quad colors decode sRGB before multiplying every linear channel by opacity.

@@ -121,10 +121,8 @@ impl App {
                         hover.cells.active = false;
                     }
                     if was_active || had_preview {
+                        // The cleared `hover_link` hands the cursor back at the turn's cursor sync.
                         window.hover_link = false;
-                        if let Some(native) = window.window.as_ref() {
-                            native.set_cursor(winit::window::CursorIcon::Default);
-                        }
                     }
                 }
             }
@@ -235,13 +233,7 @@ impl App {
         }
         if let Some(window) = self.registry.windows.get(&window_id) {
             if visual_changed {
-                if let Some(native) = window.window.as_ref() {
-                    native.set_cursor(if window.hover_link {
-                        winit::window::CursorIcon::Pointer
-                    } else {
-                        winit::window::CursorIcon::Default
-                    });
-                }
+                // `hover_link` decides the hand cursor at the turn's cursor sync.
                 window.request_window_redraw();
             }
         }
@@ -262,9 +254,6 @@ impl App {
             probe_changed | hover_changed | link_changed | window.link_preview.take().is_some();
         window.hover_link = false;
         if changed {
-            if let Some(native) = window.window.as_ref() {
-                native.set_cursor(winit::window::CursorIcon::Default);
-            }
             window.request_window_redraw();
         }
     }

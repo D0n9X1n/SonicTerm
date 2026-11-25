@@ -216,12 +216,26 @@ impl App {
     }
 
     /// Close an open confirm page; `apply` is true only for Apply on it. The page belongs to the
-    /// Agents disconnect when it opened it, otherwise to the default-handler command.
+    /// Agents disconnect or a clipboard read's consent page when one opened it on this session,
+    /// otherwise to the default-handler command.
     pub(in crate::app) fn close_confirm_page(&mut self, apply: bool) {
+        self.close_confirm_page_choosing(apply, None);
+    }
+
+    /// [`Self::close_confirm_page`] answered from the page itself: `choice` is the highlighted
+    /// extra choice row, which only a clipboard consent page offers.
+    pub(in crate::app) fn close_confirm_page_choosing(
+        &mut self,
+        apply: bool,
+        choice: Option<usize>,
+    ) {
         let session = self.interaction.command_palette.session();
         let pending = self.interaction.agent_disconnect.take();
         match pending.filter(|pending| pending.palette_session == session) {
             Some(pending) => self.confirm_agent_disconnect(pending.target, apply),
+            None if self.close_consent_page(apply, choice) => {
+                // When: close_consent_page owned this session, it already answered the read.
+            }
             None => self.confirm_default_handlers(apply),
         }
     }

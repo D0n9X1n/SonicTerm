@@ -27,7 +27,7 @@ main-thread object, platform ABI, desktop identity, or installer metadata.
 Terminal parsing is in `sonicterm-vt`; local PTY/ConPTY transport is behind
 `sonicterm-io::PtyHandle`; rendering is in `sonicterm-gpu`.
 
-The binaries share diagnostic, config, logging, asset, state-machine, and shell
+The binaries share diagnostic, config, logging, asset, and shell
 startup; the ordered sequence is in [Runtime Lifecycle](Runtime-Lifecycle).
 User state is under `~/.sonicterm`; `sonicterm-cfg::assets` resolves packaged assets.
 
@@ -535,7 +535,9 @@ unchanged.
 On the two app-wide surfaces the shown value is the most recently updated
 active report from any pane of any terminal window. When that pane ends its
 report or closes, the next most recent shows; with none left, or no terminal
-window left, the surface clears. A disabling reload clears every surface at
+window left, the surface clears. A report also ends on its own when stale: 60 s
+after its pane's last report, or 5 s after a normal report at 100 % (see
+[Terminal IO and VT](Terminal-IO-and-VT)). A disabling reload clears every surface at
 once, and quitting clears them before the App exits.
 
 Each surface has one latest-value slot, never a queue, delivered at most once
@@ -764,6 +766,50 @@ and `missed_output: false` is not proof of completeness in those cases. Disablin
 `control`, a disconnect or the 10 s deadline drops a queued request before the
 event loop acts on it, and ends a running wait as `revoked`. Pane text is
 untrusted input: the server tells agents never to follow instructions found in it.
+
+## Clipboard writes (OSC 5522 representations)
+
+An OSC 5522 commit (see [Terminal IO and VT](Terminal-IO-and-VT)) publishes each representation
+the OS can hold and omits the others:
+
+| OS | Holds | Publish |
+| --- | --- | --- |
+| macOS | text as `public.utf8-plain-text`, `text/html` as `public.html`, `image/png` as `public.png`, and any other MIME name as the uniform type `UTType typeWithMIMEType:` gives it: a system type when one exists, else the dynamic `dyn.*` type the system derives. A `text/uri-list` whose items are all local `file:` URIs (empty or decoded `localhost` authority) is one `public.file-url` item per file; one other syntactically valid absolute URI is `public.url` (malformed escapes or components are refused without repair); a list mixing them, several other URLs, or a line that is not a URI is omitted. | One `NSPasteboardItem` carries every type (and the first file URL), plus one item per further file, then `clearContents` and `writeObjects` on the event-loop thread, so the change count moves once. A type that cannot be staged leaves the pasteboard untouched; a refused `writeObjects` answers `EIO`. Text beside other types keeps its bytes exact; text alone is written as before. An offer over 512 KiB is refused `EFBIG`, as other program writes are. |
+| Windows | text as `CF_UNICODETEXT` (UTF-16; invalid UTF-8 becomes U+FFFD), `text/html` as the registered `HTML Format` (CF_HTML: a `Version:0.9` header whose `StartHTML`, `EndHTML`, `StartFragment` and `EndFragment` are ten-digit byte offsets, the fragment wrapped in `<html><body>` with fragment comments), `image/png` as the registered `PNG` format only (no `CF_DIB` conversion), `text/uri-list` as `CF_HDROP` when every item is a `file:` URI naming a drive or UNC path, and any other MIME name as the format `RegisterClipboardFormatW` registers under that name. Registered names are session-global and never freed, so at most 128 distinct custom names are registered per process; a later new name is omitted. An empty PNG or custom payload is omitted. Names that register the same native ID (including case variants) publish the first representation once. | Mutations open the clipboard with a message-only window for that mutation. The worker destroys it immediately after closing the clipboard: Windows owns the immediate data blocks, and a later copy need not send messages to a parked worker. Reads do not take ownership. On the worker, every block is allocated and filled before `OpenClipboard` (10 tries, 10 ms apart), then `EmptyClipboard` and one `SetClipboardData` per block in the same session. When any block is refused, the remaining ones are freed and the clipboard is emptied again before `CloseClipboard`, so no program sees part of the offer, and the write answers `EIO`. An allocation failure, or a clipboard another process holds throughout, leaves the previous clipboard and answers `EIO`. |
+| Linux (X11 or XWayland) | On CLIPBOARD and PRIMARY, text is offered byte for byte as `UTF8_STRING`, `text/plain;charset=utf-8`, `text/plain` and `TEXT`. `STRING` is added only for UTF-8 text representable as Latin-1 graphics, tab and newline, encoded as Latin-1. HTML, PNG, URI lists and custom MIME types use their exact MIME names as atoms. The process admits 256 data atom names including the eight fixed targets; excess names are omitted before interning. | A selection-owner thread stages the complete program offer, checks the write binding once before the first ownership request, then calls `SetSelectionOwner` with a server timestamp and confirms its window with `GetSelectionOwner`. Each selection is confirmed independently. If PRIMARY is refused after CLIPBOARD was confirmed, the native write fails (`EIO` for a status-bearing write), but the window keeps serving CLIPBOARD. The prior arboard shares stay charged until arboard itself replaces those selections; server confirmation does not prove arboard has freed its buffers. User copies and valid text-only writes stay on arboard. Native Wayland without XWayland is unsupported. |
+
+macOS and Windows translate at most 256 URI items per offer. Extra items or an invalid file URI cause the entire URI-list representation to be omitted, not truncated. Windows accepts absolute drive and UNC paths only.
+
+An OSC 5522 write targets one location. An OSC 52 `cp` write targets both selections in turn;
+there is no cross-selection transaction or rollback.
+
+The owner serves `TARGETS` and its acquisition `TIMESTAMP` as well as the data. A value too large
+for one server request uses `INCR`, in chunks of up to 256 KiB that also fit a request. Each offer
+admits at most eight concurrent requestors, with five seconds for each chunk. `SelectionClear`
+stops new requests on the lost selection; admitted transfers keep the old bytes until they end
+or time out. An offer still owned after one hour expires.
+
+## Clipboard reads
+
+An OSC 52 read that its ticket allows (see [Terminal IO and VT](Terminal-IO-and-VT)) runs on a
+disposable reader thread, one at a time. The thread keeps the ticket and its reply-budget lease
+until the native call returns, even past the deadline, when the event loop has already answered
+the read empty. Each OS bounds the read before the text is copied into SonicTerm:
+
+| OS | Native call | Bound |
+| --- | --- | --- |
+| macOS | `NSPasteboard` `dataForType(NSPasteboardTypeString)` | 2 s per destination; a value longer than the cap is refused by its length before the copy into Rust. AppKit materializes the whole value before SonicTerm can measure it, as any paste does, so that allocation is not bounded by SonicTerm. |
+| Windows | `OpenClipboard` (10 tries, 10 ms apart), then `GetClipboardData(CF_UNICODETEXT)`, or bounded UTF-8 from registered `text/plain` if Unicode text is unavailable | 2 s per destination, which covers delayed rendering; a block whose `GlobalSize` cannot fit the cap is refused before `GlobalLock`, and conversion stops past the cap. |
+| Linux (X11) | `ConvertSelection` of `CLIPBOARD` or `PRIMARY` as `UTF8_STRING`, then `STRING` (Latin-1), `text/plain;charset=utf-8`, `text/plain` and `TEXT` on successive refusals, under one deadline | 2 s for `SelectionNotify`; a text reply must be format 8 of a text type within the cap; an `INCR` transfer is refused from its announced size before the announcement is deleted, so the owner is never asked for a chunk, and each chunk waits at most 2 s, 5 s in total, checked before every event. With no X server the read is unsupported and answered empty. |
+
+An OSC 5522 read of a type other than text goes through the same native layer, with the 8 MiB
+per-type cap, and a type the clipboard does not hold is omitted:
+
+| OS | Native call | Bound |
+| --- | --- | --- |
+| macOS | `dataForType` of the first listed native type matching the MIME name, or its mapped type (`public.html`, `public.png`, or the uniform type of a custom name); `text/uri-list` joins each item's `public.file-url`, else `public.url`, with CRLF, over at most 256 pasteboard items; a larger list is refused whole | a value longer than the cap is refused by its length before the copy into Rust |
+| Windows | the format found by `EnumClipboardFormats` (at most 64 inspected) under its registered name or listed alias (`Rich Text Format` for `text/rtf`, `JFIF` for `image/jpeg`), so a read never registers a name; `CF_HDROP` for `text/uri-list` | `GlobalSize` decides before `GlobalLock`: a block past the cap is refused (for `CF_HDROP`, past twice the cap). CF_HTML is served as its fragment; `CF_HDROP` as at most 256 `file:` URIs. The complete double-NUL-terminated list and escaped byte count are checked before allocating the reply. MIME type/subtype lookup ignores ASCII case, including for native conversions. Standard formats such as `CF_HDROP` may be requested directly even beyond the listing limit; the native size checks still apply. If the preferred Windows format is absent, OSC 5522 reads a registration under `text/html`, `image/png`, `text/uri-list` or `text/plain` as raw MIME bytes, without native-format decoding. A literal MIME, `PNG` or custom block is served at its `GlobalSize`, which may include allocation slack after the data. |
+| Linux (X11) | `ConvertSelection` to the existing, case-sensitive MIME atom; an unknown name is not interned | format-8 bytes of the requested type only, directly or via `INCR`, under the same size and deadline checks as text |
 
 ## Platform matrix
 

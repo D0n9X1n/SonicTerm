@@ -41,7 +41,7 @@ pub(in crate::core) fn shape_run_for_test(
         fixture.row,
         fixture.style,
         &borrowed,
-        fixture.theme,
+        fixture.theme.into(),
         fixture.fg_default,
         fixture.cell_size.0,
         fixture.cell_size.1,
@@ -161,32 +161,22 @@ pub(in crate::core) struct RetainedPixelFixture {
     pub(in crate::core) target: wgpu::Texture,
     pub(in crate::core) view: wgpu::TextureView,
     pub(in crate::core) dual_source: bool,
+    /// The target's size in pixels.
+    pub(in crate::core) width_px: u32,
+    pub(in crate::core) height_px: u32,
 }
 
 impl RetainedPixelFixture {
+    /// A 4x2 retained target.
     pub(in crate::core) fn new() -> Self {
-        #[cfg(target_os = "windows")]
-        let (backends, fallback) = (wgpu::Backends::DX12, true);
-        #[cfg(not(target_os = "windows"))]
-        let (backends, fallback) = (wgpu::Backends::all(), false);
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: None,
-            force_fallback_adapter: fallback,
-            apply_limit_buckets: false,
-        }))
-        .expect("retained-pixel adapter");
-        let features = selected_optional_device_features(adapter.features(), cfg!(windows));
-        let dual_source = features.contains(wgpu::Features::DUAL_SOURCE_BLENDING);
-        let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor_for(
-            adapter.get_info().device_type == wgpu::DeviceType::Cpu,
-            features,
-        )))
-        .expect("retained-pixel device");
+        Self::sized(4, 2)
+    }
+
+    /// A `width_px` x `height_px` retained target, at most 64 pixels wide (one aligned readback row).
+    pub(in crate::core) fn sized(width_px: u32, height_px: u32) -> Self {
+        // The process's shared device with production's optional features.
+        let (device, queue) = crate::lib_tests::shared_featured_device();
+        let dual_source = device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING);
         let pipeline = WeztermPipeline::new(&device, wgpu::TextureFormat::Bgra8UnormSrgb, 3);
         let atlas = GlyphAtlas::new(1, 1);
         let image_upload = crate::atlas_upload::AtlasUpload::new(
@@ -203,7 +193,7 @@ impl RetainedPixelFixture {
         );
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("retained reset pixel fixture"),
-            size: wgpu::Extent3d { width: 4, height: 2, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width: width_px, height: height_px, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -212,7 +202,29 @@ impl RetainedPixelFixture {
             view_formats: &[],
         });
         let view = target.create_view(&Default::default());
-        Self { device, queue, pipeline, image_upload, glyph_upload, target, view, dual_source }
+        Self {
+            device,
+            queue,
+            pipeline,
+            image_upload,
+            glyph_upload,
+            target,
+            view,
+            dual_source,
+            width_px,
+            height_px,
+        }
+    }
+
+    /// Bind `atlas` as the glyph atlas later draws sample, uploading its tiles.
+    pub(in crate::core) fn upload_glyphs(&mut self, atlas: &mut GlyphAtlas) {
+        self.glyph_upload = crate::atlas_upload::AtlasUpload::new(
+            &self.device,
+            atlas,
+            self.pipeline.glyph_bind_group_layout(),
+            crate::atlas_upload::AtlasBindingKind::Glyph,
+        );
+        self.glyph_upload.sync(&self.queue, atlas);
     }
 
     pub(in crate::core) fn draw(
@@ -223,6 +235,20 @@ impl RetainedPixelFixture {
         mode: SubpixelAaMode,
         quads: &[QuadInstance],
     ) {
+        self.draw_layers(first, damage, background, mode, &[], (quads, &[]));
+    }
+
+    /// Draw one retained frame through the production retained draw, `pane_fills` replacing
+    /// before `quads` and then `glyphs` blend.
+    fn draw_layers(
+        &mut self,
+        first: bool,
+        damage: PixelRect,
+        background: wgpu::Color,
+        mode: SubpixelAaMode,
+        pane_fills: &[QuadInstance],
+        (quads, glyphs): (&[QuadInstance], &[GlyphInstance]),
+    ) {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         draw_retained_frame(
             &mut self.pipeline,
@@ -232,26 +258,53 @@ impl RetainedPixelFixture {
             &self.view,
             self.image_upload.image_bind_group(),
             self.glyph_upload.glyph_bind_group(),
-            4.0,
-            2.0,
+            self.width_px as f32,
+            self.height_px as f32,
             first,
             damage,
             background,
             mode,
+            pane_fills,
             quads,
             &[],
-            &[],
+            glyphs,
             &[],
             &[],
         );
         self.queue.submit([encoder.finish()]);
     }
 
+    /// Draw one retained frame as [`Self::draw`] does, with `pane_fills` as a program
+    /// background's pane fills.
+    pub(in crate::core) fn draw_filled(
+        &mut self,
+        first: bool,
+        damage: PixelRect,
+        background: wgpu::Color,
+        pane_fills: &[QuadInstance],
+    ) {
+        self.draw_layers(first, damage, background, SubpixelAaMode::Off, pane_fills, (&[], &[]));
+    }
+
+    /// Draw one retained frame of terminal `quads` and `glyphs` over `background`.
+    pub(in crate::core) fn draw_glyphs(
+        &mut self,
+        first: bool,
+        damage: PixelRect,
+        background: wgpu::Color,
+        quads: &[QuadInstance],
+        glyphs: &[GlyphInstance],
+    ) {
+        self.draw_layers(first, damage, background, SubpixelAaMode::Off, &[], (quads, glyphs));
+    }
+
     pub(in crate::core) fn pixels(&self) -> Vec<[u8; 4]> {
         const STRIDE: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let (width_px, height_px) = (self.width_px, self.height_px);
+        assert!(width_px * 4 <= STRIDE, "one aligned readback row holds the target's width");
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("retained reset readback"),
-            size: u64::from(STRIDE) * 2,
+            size: u64::from(STRIDE) * u64::from(height_px),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -263,10 +316,10 @@ impl RetainedPixelFixture {
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(STRIDE),
-                    rows_per_image: Some(2),
+                    rows_per_image: Some(height_px),
                 },
             },
-            wgpu::Extent3d { width: 4, height: 2, depth_or_array_layers: 1 },
+            wgpu::Extent3d { width: width_px, height: height_px, depth_or_array_layers: 1 },
         );
         self.queue.submit([encoder.finish()]);
         let slice = readback.slice(..);
@@ -274,8 +327,8 @@ impl RetainedPixelFixture {
         self.device.poll(wgpu::PollType::wait_indefinitely()).expect("retained readback poll");
         let mapped = slice.get_mapped_range().expect("retained mapped pixels");
         let mut pixels = Vec::new();
-        for y in 0..2 {
-            for x in 0..4 {
+        for y in 0..height_px as usize {
+            for x in 0..width_px as usize {
                 let offset = y * STRIDE as usize + x * 4;
                 pixels.push(mapped[offset..offset + 4].try_into().unwrap());
             }

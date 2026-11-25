@@ -172,11 +172,39 @@ outside either edge does not automatically scroll. Text or layout changes reset 
 position, and a changed search match counter resets it too. The prompt and counter
 are never part of the selectable query.
 
+### Tab names
+
+Each tab is labelled `#N`, an icon for its foreground process, and a body: a
+multiplexer's (tmux, screen, rmux, herdr) OSC 0/2 title, else the last two parts of
+the shell's OSC 7 working directory, else a program's OSC 0/2 title, else `shell`.
+A program can name the tab with OSC 1, as oh-my-zsh and fish do at every prompt: a
+nonempty `OSC 1 ; name` replaces the body, an empty or bare OSC 1 clears it, OSC 0
+clears it while setting the title, OSC 2 leaves it, and RIS clears it; a name of only
+spaces names nothing. In a split the label follows the active pane's OSC 1 name;
+another pane's name is kept and shows when that pane becomes active. **Rename Active
+Tab** wins over both, and clearing the rename brings back the automatic or OSC 1 body.
+The window title never shows an OSC 1 name. This follows WezTerm and is an intentional
+difference from kitty and Ghostty, which ignore OSC 1.
+
+### Program status marker
+
+A program can report what it is doing with OSC 7501, as Claude Code does (see
+[Terminal IO and VT](Terminal-IO-and-VT)). The most urgent report of a tab's panes shows as an
+ASCII marker before the tab's text: `[!]` blocked (waiting for you), `[x]` error, `[done]` done,
+`[NN%]` working with a percentage and `[...]` working without one; idle shows nothing. Ties go
+to the most recently changed report. The marker is separate from the title, so it never changes
+the tab name, the window title or a rename, and it updates for a background tab or an inactive
+split too. Working, blocked and idle reports end at the next shell prompt or when the program
+exits; done and error stay until you focus that pane or type into it. The marker is a hint only:
+it never switches tabs, focuses a window, types or notifies. It uses ASCII rather than kitty's
+symbol glyphs, so it needs no symbol font.
+
 ### Window names and numbers
 
 Terminal windows receive process-local numbers starting at 1. A window without
 a custom name is titled after its active tab, for example `#1 code/sonicterm`:
-the text the tab bar shows for that tab, without the tab's own `#N` and icon,
+the text the tab bar shows for that tab, without the tab's own `#N` and icon
+and never a program's OSC 1 tab name,
 or the tab's custom title when it has one. It follows the active tab as you
 switch, close, move or retitle tabs, and falls back to `#1 SonicTerm` when the
 window has no titled tab. Control characters in a program's title are replaced
@@ -250,9 +278,18 @@ primary-screen selection remains after a successful copy. Repainting selected
 cells to the same complete character/style/hyperlink/wide/combining identity
 keeps the selection; an actual selected-cell change clears it before copy, and so
 does a change to where automatic wrapping joins the selected rows.
-Terminal applications may also write UTF-8 text through OSC 52 target `c` up to
-512 KiB. Clipboard reads/queries, malformed Base64, other selection targets, and
-oversized writes are ignored.
+Terminal applications may also write the clipboard through OSC 52 and OSC 1337
+`Copy=:`, up to `[terminal] clipboard_write_limit_bytes` decoded (64 MiB by default); an
+empty write clears it, and on Linux `p` writes PRIMARY. Malformed Base64 and oversized writes
+are ignored. Under `[terminal] osc52 = "ask"` each write waits for Allow on a consent page,
+`Let tab N, pane M write to the clipboard?`, and is dropped on Deny, Escape or after two
+minutes; while a page waits, the `clip` status segment shows `waiting for you`. A clipboard read (`52;c;?`) returns the clipboard's text only under
+`[terminal] osc52_read = "allow"`, or after you choose Allow on its consent page under the
+default `"ask"`. That page opens in the command palette of the requesting pane's window, once
+the window is frontmost and the palette is closed, and asks `Let tab N, pane M read the
+clipboard?`; Deny is highlighted first. Deny, Escape, a click outside the page, or two minutes
+without an answer send the program an empty reply. Under `"deny"` the read is silently dropped. See
+[Terminal IO and VT](Terminal-IO-and-VT).
 
 Copy follows the wraps the terminal recorded. A row that continues the previous
 one because output reached the right edge joins it with no line break, and a
@@ -266,6 +303,16 @@ column keeps the wrap, as xterm and WezTerm do, so a shell that redraws a wrappe
 command line, such as zsh with syntax highlighting, still copies it as one line.
 A wide character that does not fit in the last column wraps early and leaves that
 column blank; the blank copies as a space.
+
+Click inside a shell prompt to move its cursor there, when the shell marks its prompt with
+OSC 133 (fish, or SonicTerm's shell integration). A plain single click sends the shell a click
+report if the prompt asked for one, or the arrow keys that reach the clicked cell. Drags,
+double- and triple-clicks, link clicks and clicks with Ctrl, Alt or Super keep their usual
+meaning and move nothing. When a program tracks the mouse, Shift-click still moves the cursor.
+Nothing moves while a palette, search, copy mode or READONLY is open, or when the prompt, the
+pane's layout or the view changed between press and release. The keys go to the clicked pane
+only, never to broadcast receivers. `[terminal] click_to_move` chooses `"any-prompt"` (the
+default), `"declared"` or `"off"`; see [Configuration](Configuration).
 
 READONLY mode blocks terminal input while you inspect history. Arrow keys or
 `h/j/k/l` move its reading cursor; `w/b`, `0/$`, and `g` / `G` move by word, line, and buffer. Press `Escape` to exit. READONLY does not create a text
@@ -283,6 +330,16 @@ the paste separately for each pane that receives it.
 
 Pasted text is sent unchanged. A pane whose program has turned on bracketed
 paste gets the text inside bracketed-paste markers; other panes get plain text.
+
+A program can ask for paste events instead (mode 5522 of kitty's clipboard
+protocol). A paste then sends that pane a notice listing the clipboard's types,
+never its contents, and the program asks for what it wants. That one request
+needs no confirmation when it comes within 60 seconds, from the same pane,
+while the clipboard still holds what you pasted; otherwise it asks as any
+clipboard read does. With `osc52_read = "deny"` the pane gets the text as
+usual, and other panes receiving the same paste, such as broadcast receivers
+without the mode, get the text. See
+[Terminal IO and VT](Terminal-IO-and-VT#kitty-clipboard-protocol-osc-5522).
 
 On Windows and macOS, when the clipboard holds files copied in Explorer or
 Finder, a paste sends their paths as a drop of those files would: the same

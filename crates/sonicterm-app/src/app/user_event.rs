@@ -117,15 +117,27 @@ pub enum UserEvent {
         /// User-facing explanation of why no draft was inserted.
         message: String,
     },
-    /// A validated OSC 52 clipboard write reached the event-loop thread.
+    /// A complete OSC 52 or OSC 1337 `Copy=:` write reached the event-loop thread.
     ///
-    /// The VT worker decodes and bounds the payload before constructing this
-    /// event; native clipboard access remains confined to the app thread.
+    /// The VT worker decoded and bounded the payload, reserved its staging and took a program
+    /// slot before posting this; the event loop routes it into the clipboard ordering domain. The
+    /// handle shares one job, so cloning or printing the event copies no payload.
     ClipboardWrite {
         /// The pane whose program asked for the write.
         pane_id: u64,
-        /// UTF-8 text requested by the terminal application.
-        text: String,
+        /// The write, taken once by the event loop.
+        job: osc52_stream::ClipboardJobHandle,
+    },
+    /// The clipboard worker or an OSC 52 reader reported results; the event loop applies them. It
+    /// carries no payload.
+    ClipboardDone,
+    /// An OSC 52 read, or an `ask` write, the VT worker admitted: its consent ticket, bound to the
+    /// pane, PTY, owner and command epochs and policy generation. `Debug` prints no clipboard data.
+    ClipboardTicket {
+        /// The pane whose program asked.
+        pane_id: u64,
+        /// The ticket, taken once by the event loop.
+        ticket: osc52_read_ticket::ClipboardTicketHandle,
     },
     /// One VT batch's OSC 52 requests, counted without payloads, after its writes; refusals
     /// reach the App only through this summary.
@@ -141,6 +153,13 @@ pub enum UserEvent {
         pane_id: u64,
         /// The active report, or `None` when the pane's progress ended.
         report: Option<sonicterm_vt::vt::ProgressReport>,
+    },
+    /// A batch changed the pane's OSC 7501 records; the summary is the batch's last state.
+    ProgramStatus {
+        /// The pane whose program reported it.
+        pane_id: u64,
+        /// The most urgent record and the store's generation.
+        summary: sonicterm_vt::vt::StatusSummary,
     },
     /// A batch's OSC 9, 777 or 99 notifications of one occasion: the kept one and how many followed.
     ProgramNotify {

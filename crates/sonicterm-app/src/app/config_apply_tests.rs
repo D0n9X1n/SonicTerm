@@ -242,19 +242,14 @@ fn startup_and_reload_store_the_normalized_backdrop() {
 
     let mut startup = Config::default();
     startup.appearance.backdrop = BackdropKind::Mica;
-    let mut app = crate::shell::LinuxShell::new(
-        sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default()),
-        Theme::default(),
-        startup,
-        Keymap::default(),
-    )
-    .with_config_normalizer(Box::new(|mut config| {
-        if config.appearance.backdrop != BackdropKind::Opaque {
-            config.appearance.backdrop = BackdropKind::Opaque;
-        }
-        (config, Vec::new())
-    }))
-    .into_app_for_test();
+    let mut app = crate::shell::LinuxShell::new(Theme::default(), startup, Keymap::default())
+        .with_config_normalizer(Box::new(|mut config| {
+            if config.appearance.backdrop != BackdropKind::Opaque {
+                config.appearance.backdrop = BackdropKind::Opaque;
+            }
+            (config, Vec::new())
+        }))
+        .into_app_for_test();
     assert_eq!(app.config.appearance.backdrop, BackdropKind::Opaque);
 
     let mut reloaded = Config::default();
@@ -272,17 +267,12 @@ fn windows_reload_stores_the_normalized_config() {
 
     let mut startup = Config::default();
     startup.appearance.backdrop = BackdropKind::Mica;
-    let mut app = crate::shell::WindowsShell::new(
-        sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default()),
-        Theme::default(),
-        startup,
-        Keymap::default(),
-    )
-    .with_config_normalizer(Box::new(|mut config| {
-        config.appearance.backdrop = BackdropKind::Opaque;
-        (config, Vec::new())
-    }))
-    .into_app_for_test();
+    let mut app = crate::shell::WindowsShell::new(Theme::default(), startup, Keymap::default())
+        .with_config_normalizer(Box::new(|mut config| {
+            config.appearance.backdrop = BackdropKind::Opaque;
+            (config, Vec::new())
+        }))
+        .into_app_for_test();
     assert_eq!(app.config.appearance.backdrop, BackdropKind::Opaque);
 
     let mut reloaded = Config::default();
@@ -369,7 +359,7 @@ fn assert_reload_revokes_path_authorization(mutate: fn(&mut Config)) {
             view_top: 20,
             candidates: vec![candidate.clone()],
             rows: smallvec::smallvec![PathRowIdentity { row: 22, fingerprint: 11 }],
-            cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
+            cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into(), uri_path: true }),
             cwd_revision: 3,
             link_destination: None,
             scrollback_evicted: 0,
@@ -430,7 +420,11 @@ fn assert_reload_revokes_path_authorization(mutate: fn(&mut Config)) {
                     joined: false,
                 }],
                 rows: smallvec::smallvec![PathRowIdentity { row: 22, fingerprint: 11 }],
-                cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
+                cwd: Some(Osc7Cwd {
+                    authority: String::new(),
+                    path: "/work".into(),
+                    uri_path: true
+                }),
                 cwd_revision: 3,
                 link_destination: None,
                 scrollback_evicted: 0,

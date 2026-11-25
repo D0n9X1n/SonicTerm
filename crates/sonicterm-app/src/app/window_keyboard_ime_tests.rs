@@ -119,7 +119,8 @@ fn source_focus_cleanup_preserves_peer_state_and_report_destinations() {
         window.pointer_gesture = begin_pointer_gesture(
             pointer_cell(pointer_pane, 2, 3),
             MouseTracking::ButtonMotion,
-            true,
+            sonicterm_vt::vt::MouseFormat::Sgr,
+            false,
             ModifiersState::empty(),
             false,
         );
@@ -151,21 +152,33 @@ fn source_focus_cleanup_preserves_peer_state_and_report_destinations() {
     }
 }
 
+/// Focus moves between main and child windows: the newest focused window becomes frontmost, and a
+/// late blur of a window that already lost focus leaves the current frontmost window in place.
 #[test]
-fn source_focus_keeps_main_only_compatibility_observations() {
-    // Shared GUI cleanup must not turn the compatibility reducer into a second live child-focus owner.
+fn late_main_blur_keeps_the_newly_focused_child_frontmost() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.registry.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     app.handle_window_focus_changed(main, true);
-    assert_eq!(app.machine.state().focused_window, Some(sonicterm_types::WindowKey::new(0)));
+    assert_eq!(app.registry.frontmost_window, Some(main));
     app.handle_window_focus_changed(child, true);
-    assert_eq!(app.machine.state().focused_window, Some(sonicterm_types::WindowKey::new(0)));
     assert_eq!(app.registry.frontmost_window, Some(child));
     app.handle_window_focus_changed(main, false);
-    assert_eq!(app.machine.state().focused_window, None);
     assert_eq!(app.registry.frontmost_window, Some(child));
+}
+
+/// Every main-window cursor move is recorded, so the live cursor position ends at the last
+/// reported point after a run of moves.
+#[test]
+fn repeated_main_cursor_moves_keep_the_latest_position() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    for step in 0..20 {
+        let position = winit::dpi::PhysicalPosition::new(10.0 + f64::from(step), 15.0);
+        app.handle_main_cursor_moved(position);
+    }
+    assert_eq!(app.main().unwrap().cursor_pos, (29.0, 15.0));
 }
 
 #[test]
@@ -186,7 +199,6 @@ fn unknown_focus_and_modifiers_never_mutate_main_or_emit_input() {
     assert_eq!(app.registry.windows[&main].ime.preedit(), "keep");
     assert_eq!(app.registry.windows[&main].modifiers, ModifiersState::empty());
     assert_eq!(app.registry.frontmost_window, Some(main));
-    assert_eq!(app.machine.state().focused_window, None);
     assert!(app.__test_drain_pty_writes().is_empty());
 }
 

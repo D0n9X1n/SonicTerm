@@ -177,6 +177,7 @@ fn every_field_is_emitted_even_when_it_holds_nothing() {
         "allocator_allocations",
         "allocator_blocks",
         "allocator_largest_block_bytes",
+        "program_metadata_bytes",
     ] {
         assert!(
             present.contains(&field),
@@ -204,11 +205,12 @@ fn each_pane_class_reports_its_own_bytes() {
     assert_eq!(event.number("inline_media_bytes"), Some(32));
     assert_eq!(event.number("pty_output_bytes"), Some(64));
     assert_eq!(event.number("pty_input_bytes"), Some(128));
+    assert_eq!(event.number("program_metadata_bytes"), Some(256));
     assert_eq!(
         event.number("session_total_bytes"),
-        Some(255),
-        "the session total must fold all eight seams; a missing term leaves a gap the other \
-         seven cannot produce"
+        Some(511),
+        "the session total must fold all nine seams; a missing term leaves a gap the other \
+         eight cannot produce"
     );
     assert_eq!(event.number("panes_total"), Some(4));
     assert_eq!(event.number("panes_sampled"), Some(3));
@@ -232,7 +234,8 @@ fn panes_skipped_for_lock_contention_are_reported() {
 
 /// Contract: the graphics fields are appended. Every field a periodic line carried before them
 /// keeps its name and position, so a reader or tool that parses the line by its existing fields
-/// is unaffected, and the eight graphics fields follow in a fixed order.
+/// is unaffected, the graphics fields follow in a fixed order, and `program_metadata_bytes` is
+/// appended after them.
 #[test]
 fn graphics_fields_are_appended_after_the_unchanged_prefix() {
     let prefix = [
@@ -287,9 +290,13 @@ fn graphics_fields_are_appended_after_the_unchanged_prefix() {
         "graphics_requested_released",
         "graphics_os_unavailable_reason",
     ];
+    // The program metadata seam is appended after the graphics fields, so they keep their places.
+    let appended_fields = ["program_metadata_bytes"];
     let names = ordered_field_names(|| emit_memory_snapshot(&populated_snapshot(), None));
     assert_eq!(names[..prefix.len()], prefix.map(str::to_string));
-    assert_eq!(names[prefix.len()..], graphics_fields.map(str::to_string));
+    let graphics_end = prefix.len() + graphics_fields.len();
+    assert_eq!(names[prefix.len()..graphics_end], graphics_fields.map(str::to_string));
+    assert_eq!(names[graphics_end..], appended_fields.map(str::to_string));
 }
 
 /// Contract: the graphics fields carry the OS figure under its source and each renderer's

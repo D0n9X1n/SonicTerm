@@ -80,7 +80,7 @@ impl App {
         match kind {
             FrontmostKind::Child(id) => {
                 if let Some(child) = self.registry.windows.get_mut(&id) {
-                    child.copy_mode = state;
+                    child.set_copy_mode(state);
                     mark_all_panes_dirty(&child.panes);
                 }
             }
@@ -322,6 +322,8 @@ impl App {
             return;
         }
         let tab_state = main.tab_states.remove(index);
+        // Every later tab moved up one position.
+        main.revoke_tab_positions(index..);
         let tab_id = main.tabs.tabs().get(index).map(|tab| tab.id);
         if let Some(id) = tab_id {
             main.tabs.close(id);
@@ -402,7 +404,7 @@ impl App {
                 id
             }
         };
-        let (text, clear_after_copy) = {
+        let (text, clear_after_copy, copied_selection) = {
             let Some(window) = self.registry.windows.get_mut(&window_id) else {
                 // When: windows no longer holds window_id; the window closed before
                 // the copy ran, so there is no selection left to read.
@@ -448,19 +450,25 @@ impl App {
                 // and copying it would clear the clipboard.
                 return;
             }
-            (selection.as_text(grid), selection.on_alt_screen)
+            (selection.as_text(grid), selection.on_alt_screen, selection)
         };
-        let copied = self.set_clipboard_text(text);
-        self.note_copy_result(window_id, copied);
-        if copied && clear_after_copy {
-            // A volatile selection is consumed only after confirmed clipboard delivery.
-            if let Some(window) = self.registry.windows.get_mut(&window_id) {
-                // Clear the highlight and invalidate retained rows before requesting its frame.
-                window.selection = None;
-                mark_all_panes_dirty(&window.panes);
-                window.request_window_redraw();
+        let _ = self.copy_text_then(text, move |app, copied| {
+            app.note_copy_result(window_id, copied);
+            if !(copied && clear_after_copy) {
+                // When: copied is false or clear_after_copy is false, the selection stays.
+                return;
             }
-        }
+            // A volatile selection is consumed only after confirmed clipboard delivery, and only
+            // while it is still the selection that was copied.
+            if let Some(window) = app.registry.windows.get_mut(&window_id) {
+                if window.selection == Some(copied_selection) {
+                    // Clear the highlight and invalidate retained rows before requesting its frame.
+                    window.selection = None;
+                    mark_all_panes_dirty(&window.panes);
+                    window.request_window_redraw();
+                }
+            }
+        });
     }
 }
 
@@ -477,22 +485,49 @@ impl App {
             self.note_pane_input(source_pane, InputState::Blocked(1));
             return (0, Vec::new());
         }
-        // A paste restarts the source window's blink shown, even into a program that echoes nothing.
-        let _ = self.note_cursor_activity(source_pane);
+        let (destinations, blocked) = self.paste_destinations(source_pane);
+        self.note_paste_gesture(source_pane, blocked);
+        self.encode_paste_to(&destinations, payload, source)
+    }
+
+    /// The panes a paste from `source_pane` reaches, the source first, then the receivers the
+    /// broadcast admission accepts now when `source_pane` armed it; and how many READONLY
+    /// receivers it left out.
+    fn paste_destinations(&self, source_pane: u64) -> (Vec<u64>, usize) {
         let mut destinations = vec![source_pane];
+        let mut blocked = 0;
         if matches!(self.interaction.broadcast, sonicterm_ui::broadcast::BroadcastState::On { source_pane: pane, .. } if pane == source_pane)
         {
             // `source_pane` armed this broadcast, so append only its currently admitted receivers.
-            let (receivers, blocked) = self.broadcast_receivers_counted();
-            if blocked > 0 {
-                // READONLY receivers were skipped; the strip names how many.
-                self.note_pane_input(source_pane, InputState::Blocked(blocked));
-            }
+            let (receivers, skipped) = self.broadcast_receivers_counted();
+            blocked = skipped;
             destinations.extend(receivers);
         }
+        (destinations, blocked)
+    }
+
+    /// Note one paste gesture from `source_pane`: restart its window's blink, and name the
+    /// `blocked` READONLY receivers on the strip.
+    fn note_paste_gesture(&mut self, source_pane: u64, blocked: usize) {
+        // A paste restarts the source window's blink shown, even into a program that echoes nothing.
+        let _ = self.note_cursor_activity(source_pane);
+        if blocked > 0 {
+            // READONLY receivers were skipped; the strip names how many.
+            self.note_pane_input(source_pane, InputState::Blocked(blocked));
+        }
+    }
+
+    /// Encode `payload` for each live pane in `destinations` with its own paste protocol and shell
+    /// syntax, and write it; the attempted count and payload-free refusals.
+    fn encode_paste_to(
+        &mut self,
+        destinations: &[u64],
+        payload: &UserPayload,
+        source: super::PtyInputSource,
+    ) -> (usize, Vec<PasteRefusal>) {
         let mut attempted = 0;
         let mut refusals = Vec::new();
-        for pane_id in destinations {
+        for &pane_id in destinations {
             let Some(pane) = self.pane_by_id(pane_id) else {
                 // When: pane_id is stale, it has no target state and must not select another pane.
                 continue;

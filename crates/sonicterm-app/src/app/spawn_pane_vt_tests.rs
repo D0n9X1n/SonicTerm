@@ -643,3 +643,219 @@ fn every_production_parser_write_is_published() {
     let exit = std::fs::read_to_string(app_dir.join("pane_exit.rs")).unwrap();
     assert!(exit.contains("publish_grid_change(&pane.output_generation, &pane.change_signal)"));
 }
+
+/// A program that sets colors in every batch costs one publication and one redraw per batch, not
+/// one per color: 64 OSC 4 sets in one batch raise no host event, advance the output generation
+/// once, and flush a single redraw, and the parser holds every color for the next frame.
+#[test]
+fn a_batch_of_color_sets_publishes_and_redraws_once() {
+    let (pane, handles, _watch) = echo_worker(80, 24, 100);
+    let base = test_base();
+    let batch: Vec<u8> = (0..64u8)
+        .flat_map(|index| format!("\x1b]4;{index};rgb:{index:02x}/00/00\x07").into_bytes())
+        .collect();
+    let mut events = 0usize;
+    publish_pane_vt_batch_with(
+        &handles,
+        &batch[..],
+        None,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |_| events += 1,
+        || base,
+        |_| {},
+    );
+    assert_eq!(events, 0, "a color set raises no host event");
+    assert_eq!(handles.output_generation.load(Ordering::Acquire), 1, "one batch, one publication");
+    assert_eq!(echo_flush(&handles, base, true), [echo_window()], "one redraw for the batch");
+    assert_eq!(echo_flush(&handles, base, true), Vec::<WindowId>::new(), "and no second one");
+    let parser = pane.parser.lock();
+    let overrides = parser.color_overrides().expect("the batch's colors");
+    assert_eq!(overrides.palette(63), Some((63, 0, 0)));
+}
+
+/// The OSC 21 answer to an all-unknown packet filling the input cap is one reply-path submission
+/// the pane's spool admits: 526 unknown keys reach `send_reply` once, at most 32 KiB, after the
+/// parser guard ends. The VT unit tests also cover the mixed packet, whose reply is longer.
+#[test]
+fn an_all_unknown_kitty_color_reply_is_one_spool_submission() {
+    let (_pane, handles, _watch) = echo_worker(80, 24, 100);
+    let payload = all_unknown_kitty_color_payload();
+    let mut submissions = Vec::new();
+    publish_pane_vt_batch_with(
+        &handles,
+        format!("\x1b]21;{payload}\x1b\\").as_bytes(),
+        None,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |_| {},
+        test_base,
+        |bytes: Vec<u8>| {
+            assert!(handles.parser.try_lock().is_some(), "the reply is written after the guard");
+            submissions.push(bytes);
+        },
+    );
+    assert_eq!(submissions.len(), 1, "one submission");
+    let reply = &submissions[0];
+    assert!(reply.len() <= 32 * 1024, "{} bytes fit one spool submission", reply.len());
+    let answers = reply.windows(8).filter(|window| window == b"unknown=").count();
+    assert_eq!(answers, KITTY_COLOR_ITEM_CAP, "every key is answered");
+}
+
+/// The most counted fields one OSC 21 packet may hold.
+const KITTY_COLOR_ITEM_CAP: usize = 526;
+
+/// An all-unknown OSC 21 payload: 526 unknown keys of 30 or 31 bytes and their 525 separators fill
+/// the 16 KiB input cap exactly, the most fields one packet may answer.
+fn all_unknown_kitty_color_payload() -> String {
+    let payload_cap = 16 * 1024;
+    let key_bytes = payload_cap - (KITTY_COLOR_ITEM_CAP - 1);
+    let keys: Vec<String> = (0..KITTY_COLOR_ITEM_CAP)
+        .map(|index| {
+            let extra = usize::from(index < key_bytes % KITTY_COLOR_ITEM_CAP);
+            "k".repeat(key_bytes / KITTY_COLOR_ITEM_CAP + extra)
+        })
+        .collect();
+    let payload = keys.join(";");
+    assert_eq!(payload.len(), payload_cap);
+    payload
+}
+
+/// The environment marker under which this test binary runs as the raw-mode PTY reader.
+#[cfg(unix)]
+const REPLY_READER_CHILD: &str = "SONICTERM_KITTY_REPLY_READER";
+
+/// FNV-1a over `bytes`: a stable digest the reader child and the test compute alike.
+#[cfg(unix)]
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// Run as the PTY child: put the terminal in raw mode without echo, say `READY`, then read until
+/// an OSC reply ends in ST (at most 64 KiB) and report its length and digest on one line.
+#[cfg(unix)]
+fn report_one_reply_from_the_terminal() {
+    use std::io::{Read, Write};
+    // Raw mode passes every reply byte through unchanged, and a full input queue then blocks the
+    // terminal's writer rather than dropping bytes as a canonical-mode line limit would.
+    let raw = std::process::Command::new("stty").args(["raw", "-echo"]).status();
+    assert!(raw.is_ok_and(|status| status.success()), "stty raw -echo");
+    let mut out = std::io::stdout();
+    out.write_all(b"READY\n").and_then(|()| out.flush()).expect("announce readiness");
+    let (mut received, mut chunk) = (Vec::new(), [0u8; 4096]);
+    let mut stdin = std::io::stdin().lock();
+    while !received.ends_with(b"\x1b\\") && received.len() < 64 * 1024 {
+        let read = stdin.read(&mut chunk).expect("read the reply");
+        if read == 0 {
+            // When: the terminal closed, the reply is reported as far as it arrived.
+            break;
+        }
+        received.extend_from_slice(&chunk[..read]);
+    }
+    let line = format!("GOT {} {:016x}\n", received.len(), fnv1a(&received));
+    out.write_all(line.as_bytes()).and_then(|()| out.flush()).expect("report the reply");
+}
+
+/// The text from the first `marker` in the terminal's output up to its line end, read from `pty`
+/// into `output` until `deadline`; libtest may print its own `test … ...` prefix on the same line.
+/// Panics with the output's tail when no complete marked line arrives in time.
+#[cfg(unix)]
+fn terminal_line(
+    pty: &sonicterm_io::pty::PtyHandle,
+    output: &mut Vec<u8>,
+    marker: &str,
+    deadline: Instant,
+) -> String {
+    loop {
+        let text = String::from_utf8_lossy(output).into_owned();
+        if let Some(line) = text.find(marker).and_then(|start| {
+            let rest = &text[start..];
+            rest.find(['\r', '\n']).map(|end| rest[..end].to_owned())
+        }) {
+            return line;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(chunk) = pty.out_rx.recv_timeout(remaining) else {
+            let tail = &text[text.len().saturating_sub(300)..];
+            panic!("no `{marker}` line before the deadline; output ends {tail:?}");
+        };
+        output.extend_from_slice(&chunk);
+    }
+}
+
+/// An all-unknown OSC 21 answer travels the pane's real reply path intact: the cap-filling packet's
+/// one reply is admitted whole by a live PTY's reply spool (one submission of at most 32 KiB, none
+/// dropped), and the child on the other end reads exactly those bytes. The child is this test
+/// binary re-run under a marker in raw mode, and it exits cleanly by itself before its PTY is
+/// dropped, so a coverage run keeps its whole profile; every wait is bounded by a 30 s deadline.
+#[cfg(unix)]
+#[test]
+fn an_all_unknown_kitty_color_reply_reaches_the_pty_child_intact() {
+    use crate::app::pty_test_support::isolated;
+    use sonicterm_io::pty::{CommandSpawn, PtyHandle, ShellSpawnOpts};
+    let name = std::thread::current().name().expect("named unit test").to_owned();
+    if std::env::var(REPLY_READER_CHILD).is_ok_and(|value| value == name) {
+        // This process is the PTY child: it reads the reply and reports it.
+        report_one_reply_from_the_terminal();
+        return;
+    }
+    if isolated() {
+        return;
+    }
+    // Only this isolated process runs, so setting its environment races no other test.
+    std::env::set_var(REPLY_READER_CHILD, &name);
+    let spawn = CommandSpawn {
+        program: std::env::current_exe().expect("test binary path").into_os_string(),
+        args: [name.as_str(), "--exact", "--nocapture", "--test-threads=1"]
+            .map(std::ffi::OsString::from)
+            .into(),
+        cwd: std::env::temp_dir(),
+    };
+    let pty = PtyHandle::spawn_command(&spawn, 120, 40, &ShellSpawnOpts::default())
+        .expect("spawn the reader");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut output = Vec::new();
+    terminal_line(&pty, &mut output, "READY", deadline);
+    let (_pane, handles, _watch) = echo_worker(80, 24, 100);
+    let replies = pty.reply_sender();
+    let mut submitted = Vec::new();
+    publish_pane_vt_batch_with(
+        &handles,
+        format!("\x1b]21;{}\x1b\\", all_unknown_kitty_color_payload()).as_bytes(),
+        None,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |_| {},
+        test_base,
+        |bytes: Vec<u8>| {
+            submitted.push(bytes.clone());
+            replies.send(bytes).expect("the pane's reply spool admits the whole reply");
+        },
+    );
+    assert_eq!(submitted.len(), 1, "one submission");
+    let reply = &submitted[0];
+    assert!(reply.len() <= 32 * 1024, "{} bytes fit one spool submission", reply.len());
+    assert_eq!(replies.stats().dropped_replies, 0, "the spool dropped nothing");
+    let got = terminal_line(&pty, &mut output, "GOT ", deadline);
+    assert_eq!(
+        got,
+        format!("GOT {} {:016x}", reply.len(), fnv1a(reply)),
+        "the child read the reply"
+    );
+    // The child is an instrumented test binary under coverage: dropping the PTY while it is still
+    // exiting stops it mid-way through writing its profile, which llvm-profdata then refuses to
+    // merge. So the child must end on its own, and cleanly, before `pty` drops.
+    let probe = pty.child_exit_probe();
+    while !probe.has_exited().expect("observe the reader's exit") {
+        assert!(Instant::now() < deadline, "the reader did not exit before the deadline");
+        // Draining keeps the child's last writes from blocking on a full terminal.
+        while pty.out_rx.try_recv().is_ok() {}
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(probe.exit_status(), Some(sonicterm_io::pty::PaneExitStatus::Code(0)));
+}

@@ -8,7 +8,8 @@ use super::*;
 #[test]
 fn a_rolled_back_tear_out_keeps_each_pane_on_its_media_pool() {
     let pool = crate::app::media::InlineMediaPool::new();
-    let mut app = app_with_reducer_counts(3, 2).with_inline_media_pool(pool.clone());
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default())
+        .with_inline_media_pool(pool.clone());
     for title in ["a", "b", "c"] {
         app.__test_seed_tab(title);
     }

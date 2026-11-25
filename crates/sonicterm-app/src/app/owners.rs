@@ -38,7 +38,8 @@ pub const fn pane_seam_cap_terms() -> [PaneSeamCapTerm; 8] {
         },
         PaneSeamCapTerm {
             class: ResourceClass::ProtocolMetadata,
-            bytes: sonicterm_grid::hyperlink::MAX_HYPERLINK_METADATA_BYTES,
+            bytes: sonicterm_grid::hyperlink::MAX_HYPERLINK_METADATA_BYTES
+                + sonicterm_vt::vt::MAX_PROGRAM_METADATA_BYTES,
         },
         PaneSeamCapTerm {
             class: ResourceClass::InlineMediaRetained,
@@ -135,6 +136,14 @@ impl std::fmt::Debug for OwnerGuard {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_struct("OwnerGuard").field("owner", &self.owner).finish()
     }
+}
+
+/// Runs the two-phase governor close and returns any refusal to the caller.
+fn close_owner(
+    governor: &ResourceGovernor,
+    owner: ResourceOwnerId,
+) -> Result<(), sonicterm_types::BudgetError> {
+    governor.begin_close(owner).and_then(|()| governor.finish_close(owner))
 }
 
 // Lifecycle: dropping an `OwnerGuard` closes `owner` in the governor, releasing
@@ -345,3 +354,7 @@ impl App {
         drop(window.owner.take());
     }
 }
+
+#[cfg(test)]
+#[path = "owners_tests.rs"]
+mod owners_tests;

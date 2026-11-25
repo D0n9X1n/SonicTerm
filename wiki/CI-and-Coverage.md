@@ -188,7 +188,8 @@ checkout, Rust, Cairo and Cargo-cache setup, so CI's wall time follows the longe
 - `windows-tests-harness-api` runs the harness tests with every harness API cfg; only the example receives those flags.
 - `windows-tests-runtime` first measures the real PTY close baseline after Cargo restore, so its test-binary
   build stays cold, then runs the host probes, fail-closed GDI presentation verification, the WARP allocator,
-  software-selection presentation, and the perf scenario harness build and its smoke, which checks the
+  software-selection presentation, the real-ConPTY protocol fixture (`windows-conpty-forms`), and the perf
+  scenario harness build and its smoke, which checks the
   comparison tooling on a software adapter without timing ([Windows](Local-Gate#windows)); when the GDI probe or
   the perf smoke fails, the shard uploads its evidence. Its probe reruns print reports for integration tests that
   `windows-tests-workspace` already runs. The GDI wrapper accepts only one `capability=EXERCISED` verdict;
@@ -356,7 +357,7 @@ gestures. See [Platform Integration](Platform-Integration).
 
 ## Gate blind spots
 
-- The one-pass workspace gate includes integration tests for all 24 packages,
+- The one-pass workspace gate includes integration tests for all 23 packages,
   but it still exercises only targets that can compile and run on its host.
 - `rust-logic-coverage.sh` requires 80% line coverage only for its selected
   deterministic subset. Its ignore regex excludes 9 whole crates, including

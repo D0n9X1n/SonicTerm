@@ -307,6 +307,97 @@ fn prompt_end_does_not_start_command_timer() {
     assert_eq!(started, None);
 }
 
+/// An authenticated C's command text reaches the drain paired with its own D when the command ran
+/// at least a second, across batches and past the next prompt that clears it in the grid; a
+/// shorter run leaves no text held.
+#[test]
+fn authenticated_cmdline_reaches_a_long_commands_end() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let token = "0123456789abcdef0123456789abcdef";
+    handles.parser.lock().set_shell_token(Some(token.to_owned()));
+    let base = Instant::now();
+    let mut times =
+        [0, 0, 0, 5, 5, 6, 6, 6].into_iter().map(|secs| base + Duration::from_secs(secs));
+    let mut started = None;
+    let mut batch = |text: String| {
+        process_pane_vt_batch_with(
+            &handles,
+            text.as_bytes(),
+            None,
+            &mut started,
+            &mut SyncLatch::default(),
+            |_| None,
+            |_| {},
+            || times.next().unwrap(),
+            |_| {},
+        );
+    };
+    let mark = |body: &str| format!("\x1b]133;{body};sonicterm_token={token}\x07");
+    batch([mark("A"), mark("B"), mark("C;cmdline_url=make%20test")].concat());
+    batch([mark("D;0"), mark("A")].concat());
+    let drained = crate::app::command_events::drain_paired(&mut handles.command_events.lock());
+    let ends: Vec<_> = drained
+        .iter()
+        .filter(|(event, _)| matches!(event.event, CommandEvent::CmdEnd(_)))
+        .map(|(_, text)| text.as_ref().map(|text| text.as_str().to_owned()))
+        .collect();
+    assert_eq!(ends, vec![Some("make test".to_owned())]);
+    batch([mark("C;cmdline_url=ls"), mark("D;0"), mark("A")].concat());
+    assert!(handles.command_events.lock().cmdline.is_none(), "a short run holds no text");
+}
+
+/// A fresh A ends a command that never sent its D: a later D with no C of its own gets neither the
+/// abandoned command's duration nor its text, in one batch or across batches, while a stamped
+/// long command still drains paired with its own D after the next A.
+#[test]
+fn a_fresh_prompt_drops_the_abandoned_commands_timer_and_text() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let token = "0123456789abcdef0123456789abcdef";
+    handles.parser.lock().set_shell_token(Some(token.to_owned()));
+    let base = Instant::now();
+    let mut times = (0..).map(|secs| base + Duration::from_secs(secs * 5));
+    let mut started = None;
+    let mut batch = |text: String| {
+        process_pane_vt_batch_with(
+            &handles,
+            text.as_bytes(),
+            None,
+            &mut started,
+            &mut SyncLatch::default(),
+            |_| None,
+            |_| {},
+            || times.next().unwrap(),
+            |_| {},
+        );
+    };
+    let mark = |body: &str| format!("\x1b]133;{body};sonicterm_token={token}\x07");
+    let orphan_end = |handles: &PaneVtHandles| {
+        let drained = crate::app::command_events::drain_paired(&mut handles.command_events.lock());
+        drained
+            .into_iter()
+            .filter(|(event, _)| matches!(event.event, CommandEvent::CmdEnd(_)))
+            .map(|(event, text)| (event.duration, text.map(|text| text.as_str().to_owned())))
+            .collect::<Vec<_>>()
+    };
+    // C, then A with no D, then a bare D: in one batch.
+    batch([mark("C;cmdline_url=secret%20one"), mark("A"), mark("D;0")].concat());
+    assert_eq!(orphan_end(&handles), vec![(None, None)], "one batch: no duration, no text");
+    // The same across batches.
+    batch(mark("C;cmdline_url=secret%20two"));
+    assert!(handles.command_events.lock().cmdline.is_some(), "the running command holds its text");
+    batch(mark("A"));
+    // The A itself drops the text: nothing of an abandoned command is held past its end.
+    assert!(handles.command_events.lock().cmdline.is_none(), "a fresh A drops the held text");
+    batch(mark("D;0"));
+    assert_eq!(orphan_end(&handles), vec![(None, None)], "across batches: no duration, no text");
+    // A long command's stamped text survives the next A and drains with its own D.
+    batch(mark("C;cmdline_url=make%20test"));
+    batch([mark("D;0"), mark("A")].concat());
+    let ends = orphan_end(&handles);
+    assert_eq!(ends.len(), 1);
+    assert_eq!(ends[0].1.as_deref(), Some("make test"), "a stamped text stays paired");
+}
+
 /// Execution duration starts at C, not B, and B/D without execution has no duration.
 #[test]
 fn command_duration_excludes_prompt_editing_time() {
@@ -392,13 +483,9 @@ fn pane_vt_batch_routes_clipboard_commands_media_and_modes_after_unlock() {
     assert_eq!(keyboard_modes.modify_other_keys(), 2);
     let attempts =
         crate::app::spawn_pane::ClipAttempts { total: 1, accepted: 1, refused: 0, latest: None };
-    assert_eq!(
-        emitted,
-        [
-            UserEvent::ClipboardWrite { pane_id: 0, text: "copied".into() },
-            UserEvent::ClipboardAttempts { pane_id: 0, attempts },
-        ]
-    );
+    assert_eq!(emitted.len(), 2);
+    assert_eq!(clip_writes(&emitted), [(0, Some("copied".into()))]);
+    assert_eq!(emitted[1], UserEvent::ClipboardAttempts { pane_id: 0, attempts });
     let commands = handles.command_events.lock();
     assert_eq!(commands.len(), 2);
     assert_eq!(commands[0].event, CommandEvent::CmdStart);
@@ -454,7 +541,11 @@ fn pane_vt_batch_publishes_pointer_modes_after_each_parse() {
     assert_eq!(published, handles.parser.lock().pointer_input_snapshot());
     let modes = sonicterm_vt::vt::PointerModes::from_bits(published);
     assert_eq!(modes.tracking(), sonicterm_vt::vt::MouseTracking::ButtonMotion);
-    assert!(modes.sgr() && modes.is_alt() && modes.application_cursor());
+    assert!(
+        (modes.format() == sonicterm_vt::vt::MouseFormat::Sgr)
+            && modes.is_alt()
+            && modes.application_cursor()
+    );
 
     // A later batch that resets the modes republishes them; the byte never keeps a stale mode.
     process_pane_vt_batch_with(
@@ -471,7 +562,37 @@ fn pane_vt_batch_publishes_pointer_modes_after_each_parse() {
     let modes =
         sonicterm_vt::vt::PointerModes::from_bits(handles.pointer_input.load(Ordering::Relaxed));
     assert_eq!(modes.tracking(), sonicterm_vt::vt::MouseTracking::Off);
-    assert!(modes.sgr() && !modes.is_alt() && modes.application_cursor());
+    assert!(
+        (modes.format() == sonicterm_vt::vt::MouseFormat::Sgr)
+            && !modes.is_alt()
+            && modes.application_cursor()
+    );
+}
+
+/// Contract: a VT batch publishes the DECSET 5522 word after it parses, so paste routing reads the
+/// mode without the parser lock, and a DECRST then DECSET inside one batch still moves the word.
+#[test]
+fn pane_vt_batch_publishes_paste_events_after_each_parse() {
+    let (pane, handles) = pane_and_worker_handles();
+    let run = |bytes: &[u8]| {
+        process_pane_vt_batch_with(
+            &handles,
+            bytes,
+            None,
+            &mut None,
+            &mut SyncLatch::default(),
+            |_| None,
+            |_| {},
+            Instant::now,
+            |_| {},
+        );
+    };
+    run(b"\x1b[?5522h");
+    let set = pane.paste_events_mode();
+    assert_eq!(set & 1, 1, "the set bit is published");
+    assert_eq!(set, handles.parser.lock().paste_events_snapshot());
+    run(b"\x1b[?5522l\x1b[?5522h");
+    assert_ne!(pane.paste_events_mode(), set, "the reset is visible though the mode is set again");
 }
 
 /// A pane attached to a parser that already negotiated mouse tracking starts with that
@@ -629,32 +750,25 @@ fn worker_spawn_roles_publish_their_own_pane_not_an_app_global() {
 }
 
 /// Accepted writes stay separate events in order, then one payload-free summary follows; a batch of
-/// 1,000 reads writes nothing and sends exactly one summary, all naming the worker's pane.
+/// 1,000 reads writes nothing, posts the pane's one read ticket, then exactly one summary counting
+/// the held read accepted and the rest refused busy, never "read refused", all naming the pane.
 #[test]
 fn osc52_batch_keeps_each_write_and_sends_one_summary() {
     use base64::Engine as _;
     let encode = |text: &str| base64::engine::general_purpose::STANDARD.encode(text);
     let two = format!("\x1b]52;c;{}\x07\x1b]52;c;{}\x07", encode("one"), encode("two"));
     let accepted = ClipAttempts { total: 2, accepted: 2, refused: 0, latest: None };
-    assert_eq!(
-        osc52_batch(two.as_bytes()),
-        [
-            UserEvent::ClipboardWrite { pane_id: 7, text: "one".into() },
-            UserEvent::ClipboardWrite { pane_id: 7, text: "two".into() },
-            UserEvent::ClipboardAttempts { pane_id: 7, attempts: accepted },
-        ]
-    );
+    let emitted = osc52_batch(two.as_bytes());
+    assert_eq!(emitted.len(), 3);
+    assert_eq!(clip_writes(&emitted), [(7, Some("one".into())), (7, Some("two".into()))]);
+    assert_eq!(emitted[2], UserEvent::ClipboardAttempts { pane_id: 7, attempts: accepted });
     let reads = "\x1b]52;c;?\x07".repeat(1_000);
-    let refused = ClipAttempts {
-        total: 1_000,
-        accepted: 0,
-        refused: 1_000,
-        latest: Some(Osc52Refusal::Read),
-    };
-    assert_eq!(
-        osc52_batch(reads.as_bytes()),
-        [UserEvent::ClipboardAttempts { pane_id: 7, attempts: refused }]
-    );
+    let refused =
+        ClipAttempts { total: 1_000, accepted: 1, refused: 999, latest: Some(Osc52Refusal::Busy) };
+    let emitted = osc52_batch(reads.as_bytes());
+    assert_eq!(emitted.len(), 2);
+    assert!(matches!(emitted[0], UserEvent::ClipboardTicket { pane_id: 7, .. }));
+    assert_eq!(emitted[1], UserEvent::ClipboardAttempts { pane_id: 7, attempts: refused });
     assert!(osc52_batch(b"plain output").is_empty(), "no OSC 52, no summary");
 }
 
@@ -681,7 +795,7 @@ fn a_batch_reports_its_last_progress_and_clears_only_what_it_showed() {
     let normal = |percent| {
         Some(sonicterm_vt::vt::ProgressReport {
             state: sonicterm_vt::vt::ProgressState::Normal,
-            percent,
+            percent: Some(percent),
         })
     };
     let first = program_batch(&handles, "\x1b]9;4;1;10\x07\x1b]9;4;1;20\x07");
@@ -772,7 +886,7 @@ fn conpty_child_program_oscs_reach_the_pane() {
             },
         );
     }
-    let set = Some(ProgressReport { state: ProgressState::Normal, percent: 40 });
+    let set = Some(ProgressReport { state: ProgressState::Normal, percent: Some(40) });
     assert_eq!(progress, vec![set, None]);
     let total: u32 = notices.iter().map(|(_, _, more)| more + 1).sum();
     assert_eq!(total, 2, "both notifications arrived: {notices:?}");
@@ -797,4 +911,76 @@ fn a_batch_keeps_the_first_notification_that_sanitizes_to_text() {
     let mut blank = ProgramNotices::default();
     blank.push(None, "\u{200B}".to_owned());
     assert_eq!(blank.into_parts(), None, "a batch of blank notifications sends no event");
+}
+
+/// A batch that changes OSC 7501 records sends one `ProgramStatus` event with its last summary,
+/// even when a query reply splits it into several parser sections; a batch that changes no
+/// record (a query, an identical report) sends none.
+#[test]
+fn a_batch_reports_its_last_program_status_once() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let statuses = |events: &[UserEvent]| -> Vec<sonicterm_vt::vt::StatusSummary> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                UserEvent::ProgramStatus { summary, .. } => Some(*summary),
+                _ => None,
+            })
+            .collect()
+    };
+    let batch = program_batch(
+        &handles,
+        "\x1b]7501;state=working\x07\x1b]7501;?\x07\x1b]7501;id=a:state=blocked\x07",
+    );
+    let sent = statuses(&batch);
+    assert_eq!(sent.len(), 1, "one event per batch");
+    let top = sent[0].top.expect("a record");
+    assert_eq!(top.state, sonicterm_vt::vt::StatusState::Blocked, "the batch's last state");
+    assert!(statuses(&program_batch(&handles, "\x1b]7501;?\x07")).is_empty());
+    assert!(statuses(&program_batch(&handles, "\x1b]7501;id=a:state=blocked\x07")).is_empty());
+}
+
+/// The command text the drain pairs with each D queued in `handles`, in parse order.
+fn drained_end_texts(handles: &PaneVtHandles) -> Vec<Option<String>> {
+    crate::app::command_events::drain_paired(&mut handles.command_events.lock())
+        .into_iter()
+        .filter(|(event, _)| matches!(event.event, CommandEvent::CmdEnd(_)))
+        .map(|(_, text)| text.map(|text| text.as_str().to_owned()))
+        .collect()
+}
+
+/// Command text pairs only with the C that carried it: a primary command's text never reaches an
+/// alternate-screen command ended in the same section (its owner is ambiguous, so it is omitted),
+/// and of two Cs in one section only the last holds text, its own.
+#[test]
+fn cmdline_never_attaches_to_another_command() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let token = "0123456789abcdef0123456789abcdef";
+    handles.parser.lock().set_shell_token(Some(token.to_owned()));
+    let base = Instant::now();
+    // One instant per command event, in parse order.
+    let mut times = [0, 0, 0, 5, 10, 10, 10, 10, 20, 20, 20, 20, 30]
+        .into_iter()
+        .map(|secs| base + Duration::from_secs(secs));
+    let mut started = None;
+    let mut batch = |text: String| {
+        process_pane_vt_batch_with(
+            &handles,
+            text.as_bytes(),
+            None,
+            &mut started,
+            &mut SyncLatch::default(),
+            |_| None,
+            |_| {},
+            || times.next().unwrap(),
+            |_| {},
+        );
+    };
+    let mark = |body: &str| format!("\x1b]133;{body};sonicterm_token={token}\x07");
+    let primary = [mark("A"), mark("B"), mark("C;cmdline_url=make")].concat();
+    batch(format!("{primary}\x1b[?1049h{}{}\x1b[?1049l", mark("C"), mark("D;0")));
+    assert_eq!(drained_end_texts(&handles), vec![None], "the alternate command shows no text");
+    let first = [mark("A"), mark("B"), mark("C"), mark("D;0")].concat();
+    batch([first, mark("A"), mark("B"), mark("C;cmdline_url=ls"), mark("D;0")].concat());
+    assert_eq!(drained_end_texts(&handles), vec![None, Some("ls".to_owned())]);
 }

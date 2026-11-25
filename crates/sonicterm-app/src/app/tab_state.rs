@@ -79,6 +79,8 @@ impl App {
         }
         let mut panes = super::DetachedPanes::default();
         let state = window.tab_states.remove(index);
+        // Every later tab moved up one position.
+        window.revoke_tab_positions(index..);
         window.tabs.close(tab.id);
         for id in leaves {
             panes.push(window.remove_pane(id).expect("validated live leaf"));
@@ -227,6 +229,8 @@ impl App {
         assert_eq!(refused.len(), 0, "the moved ids were checked absent above");
         window.tabs = tabs;
         window.tab_states.insert(index, state);
+        // The inserted tab and every later one changed position.
+        window.revoke_tab_positions(index..);
         if self.registry.main_window_id == Some(target) {
             self.resize_visible_panes();
         } else {
@@ -249,8 +253,12 @@ impl App {
 ///
 /// The process name and warning come from the pane's cached foreground sample; the frame
 /// sets demand separately, and the worker never runs here.
+///
+/// `pane_id` names `pane`; the tab records it as its label's source, which decides who may read
+/// the label through MCP.
 pub fn refresh_active_tab_title(
     tabs: &mut sonicterm_ui::tabs::TabBar,
+    pane_id: u64,
     pane: &PaneState,
     parser: &Parser,
     tab_idx: usize,
@@ -268,22 +276,24 @@ pub fn refresh_active_tab_title(
         proc_name.as_deref(),
         raw_title.as_deref(),
     );
-    let effective_title = tabs
-        .active()
-        .and_then(|tab| tab.custom_title.as_ref())
-        .map(|custom| sonicterm_ui::tabs::title_with_replaced_body(&auto_title, custom))
-        .unwrap_or_else(|| auto_title.clone());
-    let cur = tabs.active().map(|tab| tab.title.clone());
-    if cur.as_deref() == Some(effective_title.as_str()) {
-        // When: the shown title already equals `effective_title`, so nothing needs
-        // repainting; only the stored auto base may still have drifted underneath.
-        if tabs.active().is_some_and(|tab| tab.auto_title != auto_title) {
-            tabs.set_active_title(auto_title);
-        }
+    // The active pane's OSC 1 name names the label only; a blank one names nothing.
+    let icon_title = parser.icon_title().map(str::trim).filter(|name| !name.is_empty());
+    let Some(tab) = tabs.active() else {
+        // When: tabs has no active tab, there is no label to refresh.
+        return None;
+    };
+    if tab.auto_title == auto_title
+        && tab.icon_title.as_deref() == icon_title
+        && tab.label_source_pane == Some(pane_id)
+    {
+        // When: tab.auto_title, tab.icon_title and tab.label_source_pane already equal auto_title,
+        // icon_title and pane_id, the label and caption show them and nothing is set.
         return None;
     }
-    tabs.set_active_title(auto_title);
-    Some(effective_title)
+    let shown = tab.title.clone();
+    tabs.set_active_titles(auto_title, icon_title.map(str::to_string), pane_id);
+    let title = tabs.active().map(|tab| tab.title.clone())?;
+    (title != shown).then_some(title)
 }
 
 /// Per-tab state. The `TabBar` keeps title/order; this struct tracks the

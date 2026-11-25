@@ -155,8 +155,13 @@ pub(super) fn preedit_bg_rect(
 }
 
 pub(super) fn splitter_color_from_theme(theme: &Theme) -> [f32; 4] {
-    let bg = theme.colors.background.color().unwrap_or_else(|| ThemeColor::rgb(0, 0, 0));
-    let fg = theme.colors.foreground.color().unwrap_or_else(|| ThemeColor::rgb(255, 255, 255));
+    // Both colors are read as the terminal draws them, so a malformed value has one meaning.
+    let drawn = |hex: &str| {
+        let (red, green, blue) = sonicterm_types::theme_hex_rgb(hex);
+        ThemeColor::rgb(red, green, blue)
+    };
+    let bg = drawn(theme.colors.background.0.as_str());
+    let fg = drawn(theme.colors.foreground.0.as_str());
     bg.shift_toward(fg, 0.18).to_rgba_f32_linear(1.0)
 }
 

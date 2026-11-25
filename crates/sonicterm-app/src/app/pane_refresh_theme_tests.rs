@@ -63,3 +63,138 @@ fn propagation_collects_one_report_per_listening_pane() {
     let reports = propagate_theme_to_pane_parsers(panes, &theme_with("#fafafa", Appearance::Light));
     assert_eq!(reports, vec![(listening, b"\x1b[?997;2n".to_vec())]);
 }
+
+/// Every seed tells the parser the theme's selection background, selection foreground and cursor
+/// text, so OSC 17, OSC 19 and the OSC 21 `cursor_text` key answer the theme until a program sets
+/// its own; a reload's new values are answered after the reseed.
+#[test]
+fn seeds_answer_the_theme_selection_and_cursor_text() {
+    let mut theme = Theme::default();
+    theme.colors.selection_bg = Hex("#102030".into());
+    theme.colors.selection_fg = Hex("#405060".into());
+    theme.colors.cursor_text = Hex("#708090".into());
+    let mut parser = Parser::new(Grid::new(8, 2));
+    seed_parser_theme_colors(&mut parser, &theme);
+    // The chain walks 17, 18 and 19; 18 is not kept, so 17 and 19 answer.
+    let (_, _, reply) = parser.advance_with_replies(b"\x1b]17;?;?;?\x07");
+    assert_eq!(reply, b"\x1b]17;rgb:1010/2020/3030\x07\x1b]19;rgb:4040/5050/6060\x07");
+    let (_, _, reply) = parser.advance_with_replies(b"\x1b]21;cursor_text=?\x07");
+    assert_eq!(reply, b"\x1b]21;cursor_text=rgb:70/80/90\x07");
+    theme.colors.selection_bg = Hex("#a0b0c0".into());
+    let _ = reseed_parser_theme_colors(&mut parser, &theme);
+    let (_, _, reply) = parser.advance_with_replies(b"\x1b]17;?\x07");
+    assert_eq!(reply, b"\x1b]17;rgb:a0a0/b0b0/c0c0\x07");
+}
+
+/// A theme change that alters only the selection or cursor-text colors still sends the mode 2031
+/// report, because OSC 17, OSC 19 and the OSC 21 `cursor_text` key read those colors back.
+#[test]
+fn selection_or_cursor_text_change_alone_sends_the_report() {
+    let base = theme_with("#101010", Appearance::Dark);
+    let mut parser = Parser::new(Grid::new(8, 2));
+    seed_parser_theme_colors(&mut parser, &base);
+    parser.advance(b"\x1b[?2031h");
+    let mut selection = base.clone();
+    selection.colors.selection_bg = Hex("#123456".into());
+    let report = reseed_parser_theme_colors(&mut parser, &selection);
+    assert_eq!(report.as_deref(), Some(&b"\x1b[?997;1n"[..]), "selection background");
+    let mut cursor_text = selection.clone();
+    cursor_text.colors.cursor_text = Hex("#abcdef".into());
+    let report = reseed_parser_theme_colors(&mut parser, &cursor_text);
+    assert_eq!(report.as_deref(), Some(&b"\x1b[?997;1n"[..]), "cursor text");
+}
+
+/// A theme whose selection or cursor-text color does not parse reseeds the color the renderer
+/// draws for it, opaque black, instead of keeping the previous theme's value: OSC 17, 19 and the
+/// OSC 21 `cursor_text` key answer black, and mode 2031 reports the change.
+#[test]
+fn an_unparsable_selection_color_reseeds_the_drawn_fallback() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    let mut valid = theme_with("#101010", Appearance::Dark);
+    valid.colors.selection_bg = Hex("#336699".into());
+    valid.colors.selection_fg = Hex("#ddeeff".into());
+    valid.colors.cursor_text = Hex("#123456".into());
+    seed_parser_theme_colors(&mut parser, &valid);
+    parser.advance(b"\x1b[?2031h");
+    let mut invalid = valid.clone();
+    for hex in [
+        &mut invalid.colors.selection_bg,
+        &mut invalid.colors.selection_fg,
+        &mut invalid.colors.cursor_text,
+    ] {
+        *hex = Hex("not a color".into());
+    }
+    let report = reseed_parser_theme_colors(&mut parser, &invalid);
+    assert_eq!(report.as_deref(), Some(&b"\x1b[?997;1n"[..]), "the drawn defaults changed");
+    let mut replies = Vec::new();
+    let mut remaining: &[u8] = b"\x1b]17;?\x07\x1b]19;?\x07\x1b]21;cursor_text=?\x07";
+    while !remaining.is_empty() {
+        let (consumed, _, reply) = parser.advance_with_replies(remaining);
+        replies.extend(reply);
+        remaining = &remaining[consumed..];
+    }
+    assert_eq!(
+        replies,
+        b"\x1b]17;rgb:0000/0000/0000\x07\x1b]19;rgb:0000/0000/0000\x07\x1b]21;cursor_text=rgb:00/00/00\x07"
+    );
+}
+
+/// A theme color that does not parse seeds the black the renderer draws for it, so the parser's
+/// default is the drawn color: with a white foreground and an unparsable cursor, OSC 12 answers
+/// black and an OSC 12 set to white moves the override generation, since it changes the drawn
+/// cursor. Unparsable foreground, background and palette slots answer black too.
+#[test]
+fn an_unparsable_theme_color_seeds_the_drawn_black() {
+    let mut theme = theme_with("#101010", Appearance::Dark);
+    theme.colors.foreground = Hex("#ffffff".into());
+    theme.colors.cursor = Hex("not a color".into());
+    let mut parser = Parser::new(Grid::new(8, 2));
+    seed_parser_theme_colors(&mut parser, &theme);
+    let (_, _, reply) = parser.advance_with_replies(b"\x1b]12;?\x07");
+    assert_eq!(reply, b"\x1b]12;rgb:0000/0000/0000\x07", "the cursor answers the drawn black");
+    parser.advance(b"\x1b]12;#ffffff\x07");
+    // Generations come from one process-wide counter, so the test checks only that it moved.
+    let generation = parser.color_overrides().map(|overrides| overrides.generation());
+    assert!(
+        generation.is_some_and(|generation| generation != 0),
+        "a white cursor over the drawn black repaints: {generation:?}"
+    );
+
+    let mut invalid = theme_with("not a color", Appearance::Dark);
+    invalid.colors.foreground = Hex("not a color".into());
+    invalid.colors.ansi.red = Hex("not a color".into());
+    let mut parser = Parser::new(Grid::new(8, 2));
+    seed_parser_theme_colors(&mut parser, &invalid);
+    let mut replies = Vec::new();
+    let mut remaining: &[u8] = b"\x1b]10;?\x07\x1b]11;?\x07\x1b]4;1;?\x07";
+    while !remaining.is_empty() {
+        let (consumed, _, reply) = parser.advance_with_replies(remaining);
+        replies.extend(reply);
+        remaining = &remaining[consumed..];
+    }
+    assert_eq!(
+        replies,
+        b"\x1b]10;rgb:0000/0000/0000\x07\x1b]11;rgb:0000/0000/0000\x07\x1b]4;1;rgb:0000/0000/0000\x07"
+    );
+}
+
+/// A six-character theme background with one pair that is not hex seeds the channels the renderer
+/// draws for it, not black: OSC 11 answers them, and an OSC 11 set to black, the value a strict
+/// parse would have seeded, still moves the override generation, since it changes the drawn color.
+#[test]
+fn a_partly_hex_theme_color_seeds_the_drawn_channels() {
+    let theme = theme_with("#zz4020", Appearance::Dark);
+    let drawn = sonicterm_gpu::color::hex_to_chrome_color(theme.colors.background.0.as_str());
+    assert_eq!((drawn.r, drawn.g, drawn.b), (0, 0x40, 0x20), "the renderer draws the valid pairs");
+    let mut parser = Parser::new(Grid::new(8, 2));
+    seed_parser_theme_colors(&mut parser, &theme);
+    let (_, _, reply) = parser.advance_with_replies(b"\x1b]11;?\x07");
+    assert_eq!(reply, b"\x1b]11;rgb:0000/4040/2020\x07", "the seed answers the drawn color");
+    parser.advance(b"\x1b]11;#000000\x07");
+    // Generations come from one process-wide counter, so the test checks only that it moved.
+    let generation = parser.color_overrides().map(|overrides| overrides.generation());
+    assert!(
+        generation.is_some_and(|generation| generation != 0),
+        "a black background over the drawn channels repaints: {generation:?}"
+    );
+}

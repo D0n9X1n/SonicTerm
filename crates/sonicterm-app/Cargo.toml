@@ -19,9 +19,7 @@ workspace = true
 # fully built and unreachable from the shipping binary.
 sonicterm-resource.workspace = true
 enum-map = { workspace = true }
-sonicterm-app-core.workspace = true
 sonicterm-types.workspace = true
-bytes = "1"
 smallvec = "1"
 sonicterm-logging.workspace = true
 sonicterm-cfg.workspace = true
@@ -59,6 +57,8 @@ accesskit_winit = { version = "0.34.1", default-features = false, features = ["a
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.14", default-features = false, features = ["open_uri", "notification", "async-io"] }
+# OSC 52 clipboard reads ask the X11 selection owner directly, so every reply is size-checked.
+x11rb = "0.13"
 async-io = "2.6"
 libc.workspace = true
 
@@ -70,8 +70,9 @@ core-text = "=22.0.0"
 objc2 = "0.6"
 # The integrated titlebar reads the traffic lights' frames, the current event's click count and
 # the system's titlebar double-click preference.
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSRunLoop", "NSString", "NSUserDefaults", "NSGeometry", "NSBundle", "NSError"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSView", "NSWindow", "NSButton", "NSControl", "NSEvent", "NSApplication", "objc2-quartz-core"] }
+# OSC 52 clipboard reads measure the pasteboard's string data before copying it.
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSObject", "NSRunLoop", "NSString", "NSUserDefaults", "NSGeometry", "NSBundle", "NSError", "NSData"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSView", "NSWindow", "NSButton", "NSControl", "NSEvent", "NSApplication", "NSPasteboard", "NSPasteboardItem", "objc2-quartz-core"] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CABase", "CADisplayLink", "CAFrameRateRange", "objc2-core-foundation"] }
 # Desktop notifications through the user notification center, only from a bundled app.
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger"] }
@@ -88,7 +89,9 @@ windows = { workspace = true, features = [
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_DataExchange",
     "Win32_System_IO",
+    "Win32_System_Memory",
     "Win32_System_Pipes",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
@@ -114,6 +117,8 @@ wgpu.workspace = true
 sonicterm-app = { workspace = true, features = ["test-support"] }
 # Drives that test's asynchronous adapter enumeration to completion.
 pollster.workspace = true
+# The shared real-ConPTY protocol fixture the Windows app smoke drives a pane through.
+sonicterm-io = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 # The close baseline identifies only its own console hosts and shell descendants from a native snapshot.

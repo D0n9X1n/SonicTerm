@@ -52,6 +52,11 @@ impl App {
         })
     }
 
+    /// Whether the terminal owns `win_id`'s input: no palette, composition, search or copy mode.
+    pub(super) fn terminal_owns_keys(&self, win_id: WindowId) -> bool {
+        self.window_key_owner(win_id) == Some(WindowKeyOwner::Terminal)
+    }
+
     fn copy_mode_allows_keymap(&self, win_id: WindowId) -> bool {
         self.registry
             .windows
@@ -89,7 +94,7 @@ impl App {
                     Some(&mut targets),
                     is_synthetic,
                 );
-                self.dispatch_terminal_key_writes(writes);
+                self.dispatch_terminal_key_writes(writes, !is_synthetic);
             }
             return;
         }
@@ -114,7 +119,7 @@ impl App {
             if let Some(window) = self.registry.windows.get_mut(&win_id) {
                 window.pty_pressed_keys.insert(event.physical_key, targets);
             }
-            self.dispatch_terminal_key_writes(writes);
+            self.dispatch_terminal_key_writes(writes, !is_synthetic);
             return;
         }
         if let Some(chord) = key_event_to_string(event, modifiers) {
@@ -261,7 +266,7 @@ impl App {
         let targets = self.terminal_key_targets(active_pane);
         let writes =
             self.encoded_terminal_key_writes(event, modifiers, &targets, None, is_synthetic);
-        let delivered = self.dispatch_terminal_key_writes(writes);
+        let delivered = self.dispatch_terminal_key_writes(writes, !is_synthetic);
         if delivered.is_empty() {
             // When: delivered is empty, refused input must not clear selection or move the viewport.
             return;
@@ -306,23 +311,12 @@ impl App {
     /// Apply native focus and release only the source window's held input owners.
     pub(super) fn handle_window_focus_changed(&mut self, win_id: WindowId, focused: bool) {
         if !self.registry.windows.contains_key(&win_id) {
-            // When: win_id is gone, late focus cannot publish reducer state or touch another terminal.
+            // When: win_id is gone, late focus cannot touch another terminal.
             return;
         }
         if !focused {
             // Losing focus ends strip focus, so the next keys go to the terminal.
             self.end_status_focus(win_id);
-        }
-        if Some(win_id) == self.registry.main_window_id {
-            // Only main contributes this compatibility observation; live child focus stays in WindowState.
-            let window = sonicterm_types::WindowKey::new(0);
-            let intent = if focused {
-                sonicterm_app_core::AppIntent::WindowFocused { window }
-            } else {
-                // When: focused is false, preserve the main compatibility blur observation.
-                sonicterm_app_core::AppIntent::WindowBlurred { window }
-            };
-            self.observe_intent(intent);
         }
         if !focused {
             self.release_window_native_keys(win_id);
@@ -378,6 +372,9 @@ impl App {
             // IME stays enabled; focus-in resets only its caret throttle to avoid native context churn.
             window.request_window_redraw();
         }
+        // Focus is applied on its native event, not sampled by the next frame: a blur clears every
+        // pane's focus, so a refocus between two redraws is still an edge that acknowledges.
+        self.acknowledge_focused_status_in(win_id);
         if let Some((pane_id, bytes)) = pointer_release {
             self.write_to_pane(pane_id, bytes, PtyInputSource::PointerButton);
         }
@@ -486,15 +483,47 @@ impl App {
             }
         }
         drop(guard);
-        if !should_exit {
+        // A copy that exits keeps its state until the clipboard answers, so a refusal can return it.
+        let kept_for_copy = if should_exit {
+            copied_text.is_some().then_some(state)
+        } else {
+            // When: should_exit is false, the window keeps copy mode with the moved cursor.
             window.copy_mode = Some(state);
-        }
+            None
+        };
         mark_all_panes_dirty(&window.panes);
         if let Some(text) = copied_text {
-            // Parser and window borrows end before the shared clipboard boundary.
-            let copied = self.set_clipboard_text(text);
-            self.note_copy_result(win_id, copied);
+            // When: copied_text is Some, parser and window borrows have ended before the shared
+            // clipboard boundary; the result is noted once the clipboard has answered.
+            let _ = self.copy_text_then(text, move |app, copied| {
+                app.note_copy_result(win_id, copied);
+                // A refused copy returns copy mode and its selection; a written one leaves it.
+                let returned = (!copied).then_some(kept_for_copy).flatten();
+                app.restore_copy_mode(win_id, active_pane, returned);
+            });
         }
+    }
+
+    /// Return `state` to window `win_id`'s copy mode after its copy was refused, only while
+    /// `pane_id` is still that window's active pane and no other copy mode has started there.
+    fn restore_copy_mode(&mut self, win_id: WindowId, pane_id: u64, state: Option<CopyModeState>) {
+        let Some(state) = state else {
+            // When: no state was kept (copy mode had not exited), there is nothing to return.
+            return;
+        };
+        let Some(window) = self.registry.windows.get_mut(&win_id) else {
+            // When: the window has closed, its copy mode is gone with it.
+            return;
+        };
+        let active = window.tab_states.get(window.tabs.active_index()).map(|tab| tab.active_pane);
+        if window.copy_mode.is_some() || active != Some(pane_id) {
+            // When: `copy_mode` is set again or `active` is not `pane_id`, the kept cursor would
+            // name the wrong owner or grid, so it is not returned.
+            return;
+        }
+        window.copy_mode = Some(state);
+        mark_all_panes_dirty(&window.panes);
+        window.request_window_redraw();
     }
 }
 
@@ -511,6 +540,10 @@ fn copy_mode_selected_text(state: &CopyModeState, grid: &Grid) -> Option<String>
 #[cfg(test)]
 #[path = "window_keyboard_tests.rs"]
 mod window_keyboard_tests;
+
+#[cfg(test)]
+#[path = "window_keyboard_copy_tests.rs"]
+mod window_keyboard_copy_tests;
 
 #[path = "window_keyboard_ime.rs"]
 mod ime;

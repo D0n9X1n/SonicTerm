@@ -26,6 +26,7 @@ impl Grid {
         let removed = count as u64;
         self.scrollback_evicted = self.scrollback_evicted.saturating_add(removed);
         self.rebase_prompts_after_drain(removed);
+        self.rebase_semantic(removed);
         // Returning the drain lets the scroll path reuse an evicted row without allocating a replacement.
         self.scrollback.drain_front(count)
     }

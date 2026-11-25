@@ -75,3 +75,22 @@ fn a_refused_or_cancelled_chunk_drops_the_pending_notification() {
         );
     }
 }
+
+/// `cancel_capture` reports only what it frees: pending OSC 99 chunks stay when a title OSC in
+/// flight is cancelled, so they are not counted as released; they are freed, and counted, when
+/// the cancelled OSC is itself an OSC 99 chunk.
+#[test]
+fn cancel_counts_pending_chunks_only_when_it_frees_them() {
+    let mut parser = Parser::new(Grid::new(20, 4));
+    assert!(notifications(&mut parser, b"\x1b]99;i=r:d=0;Pending title\x1b\\").is_empty());
+    let pending = parser.retained_amount().bytes;
+    assert!(pending > 0, "the pending chunk is retained");
+    parser.advance(b"\x1b]2;a title in flight");
+    let in_flight = parser.retained_amount().bytes - pending;
+    assert_eq!(parser.cancel_capture(), in_flight, "the pending chunk is not released");
+    assert_eq!(parser.retained_amount().bytes, pending, "and it is still retained");
+    parser.advance(b"\x07\x1b]99;i=r:p=body;more");
+    let held = parser.retained_amount().bytes;
+    assert_eq!(parser.cancel_capture(), held, "an OSC 99 in flight frees the pending chunks too");
+    assert_eq!(parser.retained_amount().bytes, 0);
+}

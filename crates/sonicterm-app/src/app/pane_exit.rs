@@ -7,6 +7,7 @@
 //! whatever killed it still legible.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use sonicterm_types::PaneExitStatus;
@@ -14,6 +15,51 @@ use sonicterm_vt::vt::Parser;
 use winit::window::WindowId;
 
 use super::{child_window, App};
+
+/// How long the VT loop waits for an exited child to become observable.
+///
+/// EOF on the pty master and the child becoming reapable are two events with
+/// no ordering between them, so a single probe at EOF can read "still
+/// running" for a shell that has already gone. The wait is bounded because
+/// the answer is only worth having promptly: past this, the pane stays open,
+/// which is the same outcome as an unclean exit and costs the user nothing
+/// but a stale tab they can close.
+const CHILD_EXIT_OBSERVE_TIMEOUT: Duration = Duration::from_millis(250);
+/// Gap between exit observations while waiting.
+const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// How the pane's child exited, waiting briefly for it to become observable.
+///
+/// `Unknown` means the child outlived the wait, the probe failed, or no status
+/// was recorded. Callers must not read that as a crash: it decides only that
+/// the pane stays open, never that it closes.
+pub(in crate::app) fn observe_child_exit_status(
+    probe: &sonicterm_io::pty::PtyChildExitProbe,
+) -> sonicterm_types::PaneExitStatus {
+    use sonicterm_types::PaneExitStatus;
+    let deadline = Instant::now() + CHILD_EXIT_OBSERVE_TIMEOUT;
+    loop {
+        match probe.has_exited() {
+            Ok(true) => {
+                // When: has_exited returns Ok(true), report the child's recorded exit status.
+                return probe.exit_status().unwrap_or(PaneExitStatus::Unknown);
+            }
+            Ok(false) => {
+                // When: has_exited returns Ok(false), keep polling until the observation deadline.
+            }
+            Err(error) => {
+                // When: has_exited returns Err(error), preserve an unknown exit classification.
+                tracing::debug!(%error, "failed to observe pane child exit");
+                return PaneExitStatus::Unknown;
+            }
+        }
+        if Instant::now() >= deadline {
+            // When: Instant::now reaches deadline, stop waiting and preserve an unknown result.
+            return PaneExitStatus::Unknown;
+        }
+        std::thread::sleep(CHILD_EXIT_POLL_INTERVAL);
+    }
+}
 
 /// Write `text` into a pane's own grid as one line, never to its PTY.
 ///
@@ -39,6 +85,9 @@ struct ExitedPaneSite {
     tab_index: usize,
     /// Whether the pane is its tab's only leaf, so closing it empties the tab.
     sole_leaf: bool,
+    /// Whether the pane's tab is its window's active tab, so closing a split leaf refits the
+    /// surviving panes on screen; a split in a background tab is refitted when it is shown.
+    visible_tab: bool,
 }
 
 impl App {
@@ -53,15 +102,23 @@ impl App {
     pub(super) fn handle_pane_process_exited(&mut self, pane_id: u64, status: PaneExitStatus) {
         // Any exit, clean or not, clears the pane's process name and warning; an unclean pane stays.
         self.clear_exited_foreground(pane_id, std::time::Instant::now());
+        let mut status_ended = false;
         if let Some(pane) = self.registry.pane_mut(pane_id) {
             // When: the exited pane is still live, its phase resets and its first status is kept.
             // The shell is gone, so no prompt is confirmed; the last command is kept.
             pane.command_state.phase = super::CommandPhase::Unknown;
+            // The program is gone, so its working, blocked and idle reports end; done and error
+            // stay until the user sees them.
+            status_ended = pane.end_transient_program_status();
             // Recorded before the repeat check below, so a waiter sees the first status and a
             // repeated report cannot replace it.
             let _ = pane.exit_status.set(status.clone());
             // Announced after the cell is set, so a woken exit wait finds the status.
             pane.change_signal.notify();
+        }
+        if status_ended {
+            // The tab marker follows at once, even for a pane in an inactive tab or split.
+            self.redraw_window_of_pane(pane_id);
         }
         let Some(hold) = self.mark_exit_reported(pane_id) else {
             // When: `mark_exit_reported` finds no live pane, or one already reported, nothing remains to do.
@@ -82,21 +139,25 @@ impl App {
             // When: `locate_exited_pane(pane_id)` returns no `site`, teardown raced and nothing remains to close.
             return;
         };
-        // The intent describes what happened regardless of how much topology
-        // follows from it, and its `PtyClose` effect owns the multi-leaf case
-        // — closing the tree node and resizing the survivor.
-        self.dispatch_intent(sonicterm_app_core::AppIntent::PtyExit {
-            pane: sonicterm_app_core::PaneId(pane_id),
-            status: 0,
-        });
+        // Retires the pane in every case; for a split it also closes the tree node, and in the
+        // window's active tab it resizes the survivor. A sole leaf stays in its tab's tree for the
+        // tab close below.
+        let closed = self.close_pty_pane(pane_id);
+        let survivor_resized = closed && !site.sole_leaf && site.visible_tab;
+        tracing::debug!(
+            pane = pane_id,
+            ?status,
+            closed,
+            sole_leaf = site.sole_leaf,
+            survivor_resized,
+            "pane child exited cleanly; pane closed"
+        );
         if !site.sole_leaf {
-            // When: `site.sole_leaf` is false, reducer cleanup resized the surviving sibling and the tab remains usable.
+            // When: `site.sole_leaf` is false, the tab keeps its other panes and stays open.
             return;
         }
-        // The tab's only pane is gone, so the tab has nothing left to show.
-        // The reducer does not reach this: its pane close deliberately leaves
-        // a sole leaf in place, which is why the tab used to survive its own
-        // shell.
+        // The tab's only pane is gone, so the tab has nothing left to show; `close_pty_pane` leaves
+        // a sole leaf in its tree, so the tab itself closes here.
         tracing::info!(
             pane = pane_id,
             tab = site.tab_index,
@@ -153,6 +214,7 @@ impl App {
                     window: *window_id,
                     tab_index,
                     sole_leaf: tab_state.tree.leaf_count() == 1,
+                    visible_tab: tab_index == window.tabs.active_index(),
                 })
             })
         })

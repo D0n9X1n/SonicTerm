@@ -123,6 +123,7 @@ fn switching_to_a_background_tab_shows_its_latest_output_and_title() {
     let viewports = sources.reconcile_viewports(&mut window.panes, &guards).expect("owner");
     crate::app::refresh_active_tab_title(
         &mut window.tabs,
+        pane,
         &window.panes[&pane],
         &guards[sources.active_pos].1,
         sources.tab_index,

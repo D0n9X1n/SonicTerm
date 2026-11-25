@@ -39,8 +39,16 @@ impl GpuRenderer {
             };
         }
         let now = Instant::now();
-        let broadcast_participant_ids: Vec<u64> =
-            panes.iter().filter(|pane| pane.is_broadcast_participant).map(|pane| pane.id).collect();
+        // One pass over the panes collects the broadcast participants and the color identity, so
+        // a frame without program colors makes no extra pane scan for them.
+        let mut broadcast_participant_ids: Vec<u64> = Vec::new();
+        let mut pane_colors_digest = PaneColorsDigest::default();
+        for pane in panes.iter() {
+            if pane.is_broadcast_participant {
+                broadcast_participant_ids.push(pane.id);
+            }
+            pane_colors_digest.add(pane.id, pane.colors);
+        }
         // Reused while every pane's media revision matches the last frame's.
         let (retained_inline_media_bytes, inline_media_hash) = self.media_identity.figures(panes);
         self.retained_inline_media_bytes = retained_inline_media_bytes;
@@ -232,6 +240,7 @@ impl GpuRenderer {
                     close_override: u8::from(self.tab_close_override.is_some()),
                     broadcast_participants_hash,
                     inline_media_hash,
+                    pane_colors: pane_colors_digest.finish(),
                     hovered_url_cells,
                     process_privileged,
                     subpixel_aa,
@@ -352,6 +361,7 @@ impl GpuRenderer {
                 rect_h: planned.layout.h,
                 scrollbar_alpha: planned.scrollbar_alpha,
                 inline_images: &pane.inline_images,
+                overrides: pane.colors,
             })
             .collect();
         let active = &plan.panes[plan.active_index];
@@ -462,7 +472,8 @@ impl GpuRenderer {
             hover_tab_idx,
             tab_now,
         };
-        self.assemble_glyph_rows(geometry, inputs, scratch, &mut missing_chars_this_frame);
+        let active_rows =
+            self.assemble_glyph_rows(geometry, inputs, scratch, &mut missing_chars_this_frame);
         if std::mem::take(&mut self.fault_assembly_error) {
             // When: `fault_assembly_error` is armed, assembly fails as a real `Err` would, after
             // its glyph rows were staged, so the error arm must discard them.
@@ -502,6 +513,7 @@ impl GpuRenderer {
             inputs,
             scratch,
             &active_snapped_cell_x,
+            active_rows,
             &mut frame_recolor,
         );
 

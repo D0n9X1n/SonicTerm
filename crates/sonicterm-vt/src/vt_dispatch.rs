@@ -445,7 +445,7 @@ impl Perform for Performer {
         }
     }
 
-    fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         self.fast_path_ready = false;
         let code = params
             .first()
@@ -456,25 +456,23 @@ impl Perform for Performer {
             Some(0) | Some(2) => {
                 if let Some(text) = params.get(1).and_then(|param| std::str::from_utf8(param).ok())
                 {
+                    if code == Some(0) {
+                        // OSC 0 names icon and window together, so a tab name an earlier OSC 1
+                        // set is cleared, as WezTerm does.
+                        self.icon_title = None;
+                    }
                     self.title = Some(text.to_string());
                     self.events.push(VtEvent::SetTitle(text.to_string()));
                 }
             }
+            Some(1) => {
+                // The raw collector owns OSC 1 (`set_icon_title`); vte also reaches here on CAN,
+                // SUB or an ESC before a complete ST, so this path changes nothing.
+            }
             Some(7) => {
-                // OSC 7 ; file://<host>/<path> ST — shell-reported cwd.
-                // Used by the tab-title renderer to show `parent/leaf`.
-                // We are permissive: accept the raw payload even when it
-                // doesn't start with `file://` (some shells skip the
-                // scheme), strip the host component when present, and
-                // percent-decode the path so spaces/unicode survive.
-                if let Some(raw) = params.get(1).and_then(|param| std::str::from_utf8(param).ok()) {
-                    self.cwd_revision = self.cwd_revision.wrapping_add(1);
-                    self.osc7_cwd = parse_osc7_cwd_snapshot(raw);
-                    let title_path = parse_osc7_cwd(raw);
-                    if !title_path.is_empty() {
-                        self.cwd = Some(title_path);
-                    }
-                }
+                // The raw collector owns OSC 7 in every spelling its probe reads and applies it only
+                // once complete; vte reaches here for a spelling it missed (a C1 introducer, a long
+                // digit run) and on CAN, SUB or a cut ESC, so this path sets and trusts nothing.
             }
             Some(8) => {
                 // OSC 8;params;uri ST — hyperlink. Empty uri = end of link.
@@ -577,89 +575,28 @@ impl Perform for Performer {
                     }
                 }
             }
-            Some(4) => {
-                // OSC 4 ; <index> ; ? ST — query a palette colour. xterm
-                // allows multiple `index ; spec` pairs in one OSC 4, so we
-                // walk the params two at a time. A `?` spec is a query → reply
-                // `ESC ] 4 ; <index> ; rgb:RRRR/GGGG/BBBB ST` (16-bit channels,
-                // xterm canonical). A non-`?` spec would be a *set*, which we
-                // don't implement yet (theme owns the palette) — skip it.
-                //
-                // Some CLIs (GitHub Copilot's prompt frame) gate their richer
-                // UI on being able to read backgroundSecondary via the full
-                // OSC 4 palette + OSC 10/11 set; without these replies they
-                // treat SonicTerm as colourless and disable the frame.
-                //
-                // vte 0.15 keeps the full OSC payload in a private buffer but
-                // exposes only MAX_OSC_PARAMS split params here. Parser::advance
-                // therefore captures raw OSC 4 bytes in parallel and handles
-                // full 16-colour batch queries before this capped callback. Keep
-                // this path as a fallback for synthetic/direct Performer tests
-                // for any capture miss, but avoid duplicate replies.
-                if self.suppress_next_osc4 {
-                    // When: suppress_next_osc4 marks a query already answered from raw bytes, avoid sending a duplicate palette reply.
-                    self.suppress_next_osc4 = false;
-                    return;
-                }
-                self.handle_osc4_pairs(params, bell_terminated);
-            }
-            Some(code @ 10..=12) => {
-                // OSC 10/11/12 ; ? ST — query default fg/bg/cursor colour.
-                // Reply format (xterm): `ESC ] N ; rgb:RRRR/GGGG/BBBB ST`
-                // where each channel is duplicated to 16 bits (xterm
-                // canonical form, accepted by every consumer including
-                // nvim). Terminator matches the request's terminator
-                // (BEL → BEL, ST → ST) so we don't surprise the client.
-                //
-                // Without this reply nvim falls back to a hard-coded
-                // guess for the bg (NeoTreeNormal 27,29,30), which
-                // doesn't match SonicTerm's actual theme bg — neo-tree
-                // icon cells (painted with `bg=NONE`) then visibly
-                // differ from the surrounding theme-clear surface.
-                // OSC 10/11/12 *set* (payload is a colour, not `?`)
-                // is intentionally not implemented yet — diagnosis
-                // shows query-reply is sufficient to fix.
-                let payload = params.get(1).and_then(|param| std::str::from_utf8(param).ok());
-                if payload != Some("?") {
-                    // When: payload is not a query marker, ignore unsupported OSC color-setting input rather than changing the theme.
-                    return;
-                }
-                let rgb = match code {
-                    10 => self.theme_fg,
-                    11 => self.theme_bg,
-                    12 => self.theme_cursor.or(self.theme_fg),
-                    _ => None,
-                };
-                let Some((red, green, blue)) = rgb else {
-                    // When: rgb is unavailable, omit the reply rather than reporting a color the host never supplied.
-                    return;
-                };
-                let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
-                let mut buf = Vec::with_capacity(24);
-                buf.extend_from_slice(b"\x1b]");
-                buf.extend_from_slice(code.to_string().as_bytes());
-                buf.extend_from_slice(
-                    format!(";rgb:{red:02x}{red:02x}/{green:02x}{green:02x}/{blue:02x}{blue:02x}")
-                        .as_bytes(),
-                );
-                buf.extend_from_slice(terminator);
-                self.reply(&buf);
+            Some(4 | 10..=19 | 104 | 110..=119) => {
+                // The raw collector owns every color request whose number fits its probe (at most
+                // nine characters before the `;`, zero padding and `+` included) and applies it only
+                // once complete; a longer spelling or a C1 introducer is dropped on purpose, never
+                // applied from vte's capped parameters.
             }
             Some(9) | Some(777) => {
                 // Raw capture owns every OSC 9 and 777 it recognizes; one that reaches vte has a
                 // spelling it missed (a digit run past the probe, a C1 introducer) and is dropped.
             }
+            Some(7501) => {
+                // The raw collector owns `7501;`; a spelling it missed (`07501`, a C1 introducer)
+                // is dropped, never stored from vte's split parameters.
+            }
             Some(52) => {
-                let sel =
-                    params.get(1).and_then(|param| param.first().copied()).unwrap_or(b'c') as char;
-                let data = params
-                    .get(2)
-                    .and_then(|param| std::str::from_utf8(param).ok())
-                    .unwrap_or_default()
-                    .to_string();
-                self.events.push(VtEvent::Clipboard { selection: sel, data });
+                // The raw collector streams every `52;`; a spelling it missed (`052;`, a C1
+                // introducer) writes nothing, never from vte's capped parameters.
             }
             Some(1337) => {
+                // Only a `File=` image reads vte's joined parameters; the raw collector owns
+                // `SetUserVar=` and `CurrentDir=`, so a spelling it missed (`01337`, a C1
+                // introducer) sets nothing.
                 let payload = join_osc_params(params.get(1..).unwrap_or(&[]));
                 let row = self.grid.cursor.row;
                 let col = self.grid.cursor.col;
@@ -668,62 +605,8 @@ impl Perform for Performer {
                 }
             }
             Some(133) => {
-                // OSC 133 ; <kind> [; <args>] ST — FinalTerm/WezTerm shell
-                // integration. Kinds:
-                //   A → prompt start
-                //   B → prompt end / editable input start
-                //   C → command output start
-                //   D [; exit_code] → command finished
-                let kind = params.get(1).and_then(|param| param.first().copied());
-                let admitted = self.admit_shell_marker(params.get(2..).unwrap_or(&[]));
-                // The newest marker decides the observed state, a dropped one included: a nested
-                // shell's tokenless markers mean the shell in front is not the verified one.
-                self.shell_state = if admitted == Some(true) {
-                    super::ShellIntegrationState::Verified
-                } else {
-                    // Not authenticated: admitted without a token, or refused.
-                    super::ShellIntegrationState::Unverified
-                };
-                let Some(authenticated) = admitted else {
-                    // When: `admit_shell_marker` refused the marker (a wrong token, or tokenless
-                    // after the pane authenticated), it changes neither the grid nor the events.
-                    tracing::debug!(target: "vt", "dropped an unauthenticated OSC 133 marker");
-                    return;
-                };
-                match kind {
-                    Some(b'A') => {
-                        self.grid.record_prompt_start();
-                        self.events.push(VtEvent::Command(CommandEvent::PromptStart));
-                    }
-                    Some(b'B') => {
-                        self.grid.record_input_start();
-                        self.events.push(VtEvent::Command(CommandEvent::PromptEnd));
-                    }
-                    Some(b'C') => {
-                        self.grid.record_output_start_marked(authenticated);
-                        self.events.push(VtEvent::Command(CommandEvent::CmdStart));
-                    }
-                    Some(b'D') => {
-                        let exit_i32 = params
-                            .get(2)
-                            .and_then(|param| std::str::from_utf8(param).ok())
-                            .and_then(|text| text.parse::<i32>().ok());
-                        // The source is read by key, the last one winning, wherever it sits.
-                        let source = params
-                            .get(2..)
-                            .unwrap_or(&[])
-                            .iter()
-                            .rev()
-                            .find_map(|param| param.strip_prefix(super::vt_osc::EXIT_SOURCE_PARAM))
-                            .and_then(sonicterm_grid::grid::ExitSource::from_param);
-                        self.grid.record_prompt_end_sourced(exit_i32, source, authenticated);
-                        let exit = exit_i32.and_then(|status| u8::try_from(status).ok());
-                        self.events.push(VtEvent::Command(CommandEvent::CmdEnd(exit)));
-                    }
-                    _ => {
-                        // When: kind is not a recognized shell marker, preserve prompt boundaries and emit no command event.
-                    }
-                }
+                // The raw collector owns `133;` and applies a marker only once BEL or ST completes
+                // it; a spelling it missed (`0133`, a C1 introducer, a bare `133`) is dropped.
             }
             _ => {}
         }

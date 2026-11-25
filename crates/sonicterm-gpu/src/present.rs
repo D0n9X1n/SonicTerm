@@ -253,6 +253,8 @@ pub(super) struct FrameLayers<'a> {
 
 /// Drawable slices borrowed by both presenters without copying or reordering.
 pub(super) struct FrameBatches<'a> {
+    /// Program-background pane fills, which replace the pixels under them before the base quads.
+    pub(super) pane_fills: &'a [QuadInstance],
     /// Base quads.
     pub(super) quads: &'a [QuadInstance],
     /// Inline-image instances.
@@ -364,6 +366,7 @@ impl GpuRenderer {
         }
         let frame = self.software_frame.as_mut().expect("software frame initialized");
         frame.prepare(self.config.width, self.config.height, bg_clear)?;
+        frame.replace_quads(layers.batches.pane_fills);
         frame.draw_layers_with_subpixel_aa(
             &self.glyph_atlas,
             &self.image_atlas,
@@ -518,6 +521,7 @@ impl GpuRenderer {
             layers.damage,
             self.bg,
             layers.subpixel_aa,
+            layers.batches.pane_fills,
             layers.batches.quads,
             layers.batches.images,
             layers.batches.glyphs,

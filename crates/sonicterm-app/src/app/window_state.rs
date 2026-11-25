@@ -191,8 +191,8 @@ pub struct WindowState {
     pub(crate) caption: sonicterm_ui::window_band::CaptionState,
     /// The last empty-band left press, for counting a double-click where the platform does not.
     pub(crate) band_last_press: Option<(std::time::Instant, (f32, f32))>,
-    /// The pointer is on a resize edge, so the window shows a resize cursor.
-    pub(crate) band_edge_cursor: bool,
+    /// The native cursor's own inputs (band edge, scrollbar gutter) and the icon last written.
+    pub(crate) native_cursor: super::pointer_cursor::NativeCursorState,
     /// The status line's selection count and last copy result for this window.
     pub(crate) sel_status: super::status_line::SelStatus,
     /// When copy mode last dropped an IME commit in this window; the status line holds it for a while.
@@ -311,6 +311,34 @@ pub(crate) fn window_redraw_requests_for(window: &WindowState) -> u64 {
 }
 
 impl WindowState {
+    /// Replace this window's copy mode. Entering READONLY revokes every clipboard write already
+    /// approved for one of its panes, whose binding records the READONLY epoch at Apply.
+    pub(in crate::app) fn set_copy_mode(&mut self, copy_mode: Option<CopyModeState>) {
+        if copy_mode.as_ref().is_some_and(CopyModeState::is_read_only) {
+            for (_, pane) in &self.panes {
+                pane.read_identity.bump_readonly();
+            }
+        }
+        self.copy_mode = copy_mode;
+    }
+
+    /// Advance the owner epoch of every pane in the tabs at `positions`, whose position changed: a
+    /// clipboard consent page names its tab by position, so a page or approval that named the old
+    /// position is revoked. Positions past the last tab are ignored.
+    pub(in crate::app) fn revoke_tab_positions(
+        &self,
+        positions: impl std::ops::RangeBounds<usize>,
+    ) {
+        let bounds = (positions.start_bound().cloned(), positions.end_bound().cloned());
+        for tab in self.tab_states.get(bounds).unwrap_or_default() {
+            for leaf in tab.tree.leaves() {
+                if let Some(pane) = self.panes.get(&leaf) {
+                    pane.read_identity.bump_owner();
+                }
+            }
+        }
+    }
+
     /// Record a press on the tab at `tab_index` of this window's bar at `press_pos`: the
     /// pointer is down, the tab is pressed and a drag session starts, so a drag can reorder,
     /// transfer or tear the tab out. Both left-button handlers call it after activating the tab.
@@ -634,10 +662,8 @@ impl WindowState {
         self.hover_link = false;
         if changed {
             // The redraw requested here re-detects the target; until then the hover is unresolved.
+            // The cleared `hover_link` hands the cursor back to the pane at the turn's cursor sync.
             self.hover_unresolved = true;
-            if let Some(window) = self.window.as_ref() {
-                window.set_cursor(winit::window::CursorIcon::Default);
-            }
             self.request_window_redraw();
         }
     }
@@ -706,6 +732,8 @@ impl WindowState {
         self.tabs.reorder(from, to);
         let state = self.tab_states.remove(from);
         self.tab_states.insert(to, state);
+        // Every tab between the two slots changed position.
+        self.revoke_tab_positions(from.min(to)..=from.max(to));
         self.complete_topology_change(
             TopologyChange {
                 resize_visible: false,

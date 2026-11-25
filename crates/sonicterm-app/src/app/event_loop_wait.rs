@@ -359,10 +359,6 @@ impl App {
         if let Some(deadline) = self.services.foreground_schedule.next_deadline() {
             due.push(DueWork { owner: None, cause: DueCause::Foreground, deadline });
         }
-        #[cfg(windows)]
-        if let Some(pending) = self.pending_osc52_reassert.as_ref() {
-            due.push(DueWork { owner: None, cause: DueCause::Osc52, deadline: pending.due });
-        }
         for (id, window) in &self.registry.windows {
             #[cfg(target_os = "macos")]
             if let Some(deadline) = window.surface_probe_deadline() {

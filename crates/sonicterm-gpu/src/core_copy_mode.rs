@@ -94,6 +94,68 @@ impl GpuRenderer {
 }
 
 impl GpuRenderer {
+    /// Copy mode's selected range as one surface-pixel rectangle per visible row, on the shared
+    /// snapped column edges; empty without an anchored range. The highlight quads and the
+    /// selected-glyph recolor both read these rectangles, so they cover the same cells.
+    pub(crate) fn copy_mode_selection_rects(
+        copy_mode: &CopyModeState,
+        grid: &Grid,
+        view_top_abs: u64,
+        (origin_x, origin_y): (f32, f32),
+        (cell_w, cell_h): (f32, f32),
+        snapped_cell_x: &[f32],
+    ) -> Vec<(f32, f32, f32, f32)> {
+        let raw_fallback = snapped_cell_x.is_empty();
+        let mut rects = Vec::new();
+        let Some((start, end)) = copy_mode.selected_range() else {
+            // When: `copy_mode.selected_range()` is None, copy mode has no anchored selection.
+            return rects;
+        };
+        for row_abs in start.1..=end.1 {
+            let Some(visible_row) = Self::viewport_relative_row(row_abs, view_top_abs, grid.rows)
+            else {
+                // When: `viewport_relative_row` is None — a selection may
+                // span scrollback, so off-screen rows are skipped.
+                continue;
+            };
+            let col_a = if row_abs == start.1 {
+                start.0
+            } else {
+                // When: `row_abs != start.1` — an interior or final row,
+                // which starts at column 0, not the selection anchor.
+                0
+            }
+            .min(grid.cols as usize);
+            let col_b = if row_abs == end.1 {
+                end.0.min(grid.cols.saturating_sub(1) as usize)
+            } else {
+                // When: `row_abs != end.1` — an interior row of a
+                // multi-row selection, which runs to the right edge.
+                grid.cols.saturating_sub(1) as usize
+            };
+            if col_b < col_a {
+                // When: `col_b < col_a` — an empty span on this row, which
+                // would still push a zero-width quad into the buffer.
+                continue;
+            }
+            let end_exclusive = col_b + 1;
+            let (x, w) = if raw_fallback {
+                (origin_x + col_a as f32 * cell_w, (end_exclusive - col_a) as f32 * cell_w)
+            } else {
+                // When: `!raw_fallback` — a real snapped-edge cache, so the
+                // quad takes device-pixel edges shared with glyph cells.
+                let cache_end = end_exclusive.min(snapped_cell_x.len() - 1);
+                let lo = snapped_cell_x[col_a];
+                let hi = snapped_cell_x[cache_end];
+                (lo, hi - lo)
+            };
+            rects.push((x, origin_y + f32::from(visible_row) * cell_h, w, cell_h));
+        }
+        rects
+    }
+}
+
+impl GpuRenderer {
     /// Emit copy-mode selection and cursor quads using scrollback-absolute
     /// copy-mode coordinates translated into viewport-relative rows.
     #[doc(hidden)]
@@ -121,55 +183,19 @@ impl GpuRenderer {
         // integer scales make the two identical via the identity fast
         // path in `snap_to_device_pixels`.
         let raw_fallback = snapped_cell_x.is_empty();
-        if let Some((start, end)) = copy_mode.selected_range() {
-            // When: `copy_mode.selected_range()` is Some — copy mode has an
-            // anchored selection. The cursor quad below is emitted regardless.
-            for row_abs in start.1..=end.1 {
-                let Some(visible_row) =
-                    Self::viewport_relative_row(row_abs, view_top_abs, grid.rows)
-                else {
-                    // When: `viewport_relative_row` is None — a selection may
-                    // span scrollback, so off-screen rows are skipped.
-                    continue;
-                };
-                let col_a = if row_abs == start.1 {
-                    start.0
-                } else {
-                    // When: `row_abs != start.1` — an interior or final row,
-                    // which starts at column 0, not the selection anchor.
-                    0
-                }
-                .min(grid.cols as usize);
-                let col_b = if row_abs == end.1 {
-                    end.0.min(grid.cols.saturating_sub(1) as usize)
-                } else {
-                    // When: `row_abs != end.1` — an interior row of a
-                    // multi-row selection, which runs to the right edge.
-                    grid.cols.saturating_sub(1) as usize
-                };
-                if col_b < col_a {
-                    // When: `col_b < col_a` — an empty span on this row, which
-                    // would still push a zero-width quad into the buffer.
-                    continue;
-                }
-                let end_exclusive = col_b + 1;
-                let (x, w) = if raw_fallback {
-                    (origin_x + col_a as f32 * cell_w, (end_exclusive - col_a) as f32 * cell_w)
-                } else {
-                    // When: `!raw_fallback` — a real snapped-edge cache, so the
-                    // quad takes device-pixel edges shared with glyph cells.
-                    let cache_end = end_exclusive.min(snapped_cell_x.len() - 1);
-                    let lo = snapped_cell_x[col_a];
-                    let hi = snapped_cell_x[cache_end];
-                    (lo, hi - lo)
-                };
-                let y = origin_y + f32::from(visible_row) * cell_h;
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(x, y, w, cell_h, sw, sh),
-                    color: selection_color,
-                    ..Default::default()
-                });
-            }
+        for (x, y, w, h) in Self::copy_mode_selection_rects(
+            copy_mode,
+            grid,
+            view_top_abs,
+            (origin_x, origin_y),
+            (cell_w, cell_h),
+            snapped_cell_x,
+        ) {
+            quads.push(QuadInstance {
+                rect: px_to_ndc(x, y, w, h, sw, sh),
+                color: selection_color,
+                ..Default::default()
+            });
         }
 
         if copy_mode.is_read_only() {

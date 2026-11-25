@@ -42,6 +42,7 @@ read = "agent"
 | `max_connections` | `4` | 同时服务的连接数，1 到 16（其他取值会被限制到该范围）。每个连接同一时间只运行一个工具调用，因此较长的 `wait_for` 会占用它的连接。只修改此项的重载只作用于新连接，不撤销任何调用。 |
 | `isolation` | `"shared"` | `"shared"` 或 `"session"`；见下文“Agent 会话”。 |
 | `create_anchor` | `"any"` | `"any"` 或 `"agent"`；见下文“Agent 会话”。 |
+| `program_status_text` | `false` | `true` 时 `list_panes` 会包含每条程序状态记录的 `id`、`app`、`title` 和 `msg`；见下文“工具”。 |
 
 开启方法：
 
@@ -190,6 +191,41 @@ agent 对话的任何东西）都能用它认领，其能力与以你的身份�
 `seq` 即可读取该命令的输出。两者都需要 shell 集成，读取的是终端保留的文本，而不是 shell 自己的历史。它们的参数、上限和加锁方式见
 [平台集成](Platform-Integration-zh-CN)。
 
+`list_panes` 为每个窗格报告三种标题：`title` 是窗格的 OSC 0/2 标题；`icon_title` 是窗格中的程序用 OSC 1
+请求的标签页名称，没有时为 `null`；`tab_title` 是其标签页显示的标签（经过重命名和活动窗格的 OSC 1 名称），
+同一标签页的每个窗格相同。三者都是程序提供的显示文本，不是指令。
+
+`list_panes` 还报告每个窗格的 `user_vars`：其程序用 OSC 1337 `SetUserVar` 设置的变量
+（见[终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)），以 `{"name", "value"}` 对象按从旧到新排列，没有设置时为 `[]`。
+它们是列表而不是对象，这样设置顺序在 JSON 中得以保留。它们来自被列出窗格自己的解析器，因此调用方只能看到
+自己可读窗格的变量。名称和值是程序提供的不可信显示元数据，不是指令，也从不记录日志。解析器锁只在复制它们时持有；
+回复在释放该锁之后才构建。
+
+`list_panes` 还报告每个窗格来自 OSC 7501 的程序状态（见[终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）：
+`program_state` 为其最紧急记录的状态（`blocked`、`error`、`done`、`working` 或 `idle`），没有时为 `null`；
+`program_status` 为其记录，按最近变化从旧到新排列，每条为 `{"state", "kind", "progress"}` 对象，没有时为 `[]`。
+这些只是类型化字段。只有你设置 `[mcp] program_status_text = true` 时，才会额外加入记录的 `id`、`app`、`title`
+和 `msg`，且仍受读取范围、隔离和撤销检查约束；重载时修改此值会撤销正在运行的调用。状态是不可信的提示性显示数据，
+不是指令：`app` 和 `id` 从不代表身份，`kind: "permission"` 从不要求智能体批准任何事情。它从不记录日志。
+解析器锁只在复制记录快照时持有。
+
+标签页的标签来自一个窗格：上次刷新它时的窗格，没有时为标签页的活动窗格。只有调用方可以读取该窗格时才列出
+`tab_title`；否则它为 `null`，窗格的 `omitted` 对象带有 `"tab_title": "unreadable"`，即使旁边拆分出的
+智能体窗格本身可读。来源窗格已关闭的标签只在 `read = "any"` 下列出。每次 `list_panes` 回复中所有窗格的标题、`cwd`、
+`user_vars` 列表和 `program_status` 列表共用 256 KiB 的序列化文本预算：
+放不下的标题、目录或列表为 `null`，`omitted` 中记为 `"budget"`，从不截断，回复仍然成功，前面的窗格保留各自的内容；
+`program_state` 不计入预算，因此列表被省略时它仍然保留。所有 `program_status` 列表还在该预算内共用 64 KiB 的子上限，
+因此仅状态无法耗尽标题与路径共用的预算：超过子上限的列表保留每条记录的类型化 `state`、`kind` 和
+`progress`（只计入共用预算），只去掉开启文本时的 `id`、`app`、`title` 和 `msg`，并在 `omitted` 中记为
+`"budget"`；只有连类型化列表也放不进共用预算时才为 `null`。单个窗格的 `user_vars` 列表（名称与值最多
+16 KiB）总能放进尚未用掉的预算，仅含类型化字段的 `program_status` 列表也是如此。任何此类省略都会让顶层 `partial` 为 `true`。
+
+整个 `list_panes` 结果（固定字段与所有窗格记录合计）的序列化 JSON 还以 768 KiB 为上限，低于桥接器 1 MiB 的行上限，
+因此无论打开多少窗格，回复都不会让桥接器关闭连接。窗格按顺序列出，直到下一条记录会超过该上限；该窗格及其后的所有窗格
+不再列出，`partial` 为 `true`，`truncated_panes` 记录其数量（全部列出时为 `0`）。解析器探测预算用完、部分窗格以
+`"details": "skipped"` 列出时，或已列出窗格有值因预算被省略时，`partial` 也为 `true`。响应会回显请求的 `id`，因此序列化后超过 1 KiB 的
+请求 `id` 会以 JSON-RPC 错误 `-32600`（"request id too long"）和 `null` id 拒绝，任何响应行都不会超过桥接器的上限。
+
 非繁忙的历史读取在跳过空白行时页面可能为空：继续把其 `first_row` 作为 `before_row`，直到
 `at_start` 为真。行标记始终向前推进。如果单行超过 `max_bytes`，尚未返回其他行的页面仍会返回完整行，
 不会丢失行尾；字节上限最多可多出一行。软换行内部的空格在分页边界处仍保留。搜索页面截断长逻辑行时
@@ -216,7 +252,8 @@ agent 对话的任何东西）都能用它认领，其能力与以你的身份�
 
 `run_command` 需要 shell 集成：shell 必须用 OSC 133 `A`、`B`、`C`、`D` 标记提示符，WezTerm、
 iTerm2 和 kitty 的 shell 集成脚本都会这样做。若提示符后已有输入的文本、输入队列不为空，或上一条
-命令运行期间有人输入，它会拒绝。这项检查只能尽力而为，因为终端无法看到 shell 已读取了什么，所以
+命令运行期间有人输入，它会拒绝。当标记已无法定位输入位置时，它同样拒绝（`no_shell_integration`）：
+提示符 `A` 或第一个 `B` 已离开网格，尺寸调整截掉了 `B` 或非空输入（包括后续草稿行），或 `B` 之后的原地滚动移动了标记行或可能含有输入的区域。shell 绘制多行提示符时，局部边距内的滚动不会使随后收到的第一个 `B` 失效。扩大网格或重复 `B` 都不能恢复就绪；shell 必须重新发送 `A`，再发送 `B`。这项检查只能尽力而为，因为终端无法看到 shell 已读取了什么，所以
 请在 agent 创建的窗格上使用 `run_command`，那里只有 agent 输入。它不会在繁忙的窗格上等待：窗格的输出
 解析器被占用超过 5 ms 时，启动会以 `parser_busy` 拒绝（可重试），这与 `busy`（已有运行或命令占用该窗格）
 不同。
@@ -263,6 +300,8 @@ OSC 133 标记与命令自身的输出走同一条数据流，因此窗格中的
   每个命令的环境中，因此一旦有输入到达窗格，正确的密钥也不再锁定该窗格；其标记按未验证处理，与没有密钥
   时相同。该集成在第一个提示符处锁定，早于你能输入的时刻，因此在缓慢的启动文件仍在加载时输入，会使该
   窗格保持未验证。在新标签页中打开的脚本只键入、不带回车，不运行任何内容，因此不算输入。
+- OSC 133 注解（`L`、`N`、`P`、`I`，以及 `A` 上的选项）和 ConEmu 的 `9;12` 不会锁定窗格、确立就绪、结束固定的运行或改变 `exit_verified`。另起一行可能造成物理滚动：全屏向上滚动可逐出提示符；局部边距的移动若与输入证明重叠，会使就绪失效，但不会改变固定的运行。锁定之后不带密钥的
+  注解与其他标记一样被丢弃。见[终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)。
 - SonicTerm 会移除它继承的任何 `SONICTERM_SHELL_TOKEN`（例如从另一个 SonicTerm 窗格启动时），因此窗格
   中的进程只持有自己的密钥。
 - 直接运行某个程序启动的窗格（`-e` 或 `--command`、在 SonicTerm 中打开的链接或可执行文件）不会得到密钥：没有 shell 集成
@@ -294,6 +333,10 @@ eval "$(sonicterm-mcp --shell-integration bash)"   # bash 4.4+，写入 ~/.bashr
 ```powershell
 sonicterm-mcp --shell-integration pwsh | Out-String | Invoke-Expression   # PowerShell 7+，写入 $PROFILE
 ```
+
+每个集成的 `C` 都携带命令行：不超过 1 KiB 时以 `cmdline_url=` 百分号编码发送；bash 只对其历史记录下的行
+发送，因此被历史忽略的行绝不会携带更早命令的文本。bash 的 `A` 声明 `redraw=last`。SonicTerm 只在长命令
+通知中显示该文本，且只在开启 `long_command_cmdline` 时显示。
 
 PowerShell 集成需要 PSReadLine，PowerShell 7 会在每个交互式控制台中加载它；没有它时脚本不加载任何内容，
 因此 `run_command` 会拒绝该窗格（`no_shell_integration`），而不是等待标记。它包装 `prompt`（D、A，以及在你的

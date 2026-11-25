@@ -593,6 +593,30 @@ pub(crate) fn row_cells_text_from(
     RowCopy { text, trailing_blanks: blanks, cut: false }
 }
 
+/// A pane's OSC 7501 records, oldest change first: typed state, kind and progress, plus id, app,
+/// title and message only under the user's `program_status_text` opt-in. Untrusted display data.
+pub(crate) fn program_status_json(
+    status: &sonicterm_vt::vt::ProgramStatus,
+    status_text: bool,
+) -> serde_json::Value {
+    let records = status.records().map(|record| {
+        let mut entry = serde_json::json!({
+            "state": record.state().as_str(),
+            "kind": record.kind().map(sonicterm_vt::vt::StatusKind::as_str),
+            "progress": record.progress(),
+        });
+        if status_text {
+            // The user opted in, so the record's program-supplied text is listed too.
+            entry["id"] = serde_json::json!(record.id());
+            entry["app"] = serde_json::json!(record.app());
+            entry["title"] = serde_json::json!(record.title());
+            entry["msg"] = serde_json::json!(record.msg());
+        }
+        entry
+    });
+    serde_json::Value::Array(records.collect())
+}
+
 #[cfg(test)]
 #[path = "read_tests.rs"]
 mod read_tests;

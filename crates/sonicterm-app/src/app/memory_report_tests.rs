@@ -209,10 +209,12 @@ PANES
     grid visible / history / alternate    0.5 MB / 4.0 MB / 0.0 MB
     parser / hyperlinks / inline media    0.2 MB / 0.0 MB / 0.0 MB
     pty output / input                    0.0 MB / 0.0 MB
+    program status / user vars            0.0 MB
   tab 1 "Memory Usage" pane 1             total 1.8 MB   (this report)
     grid visible / history / alternate    0.5 MB / 1.0 MB / 0.0 MB
     parser / hyperlinks / inline media    0.2 MB / 0.0 MB / 0.0 MB
     pty output / input                    0.0 MB / 0.0 MB
+    program status / user vars            0.0 MB
 
 PTY QUEUES (0 pane(s)): 0 B in memory, 0 B on disk
   input queued 0 B, writer in flight 0 B, reply tier allocated 0 B, reply spill 0 B (disk)

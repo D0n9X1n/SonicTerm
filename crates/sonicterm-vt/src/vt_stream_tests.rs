@@ -1,6 +1,8 @@
 use super::*;
 use crate::vt::vt_test_support::*;
 
+/// An oversized semantic OSC is refused by its own collector, retaining nothing, and swallowed
+/// through its terminator, after which output prints again.
 #[test]
 fn oversized_osc_is_discarded_without_unbounded_buffering() {
     let mut parser = Parser::new(Grid::new(80, 24));
@@ -8,10 +10,11 @@ fn oversized_osc_is_discarded_without_unbounded_buffering() {
     payload.extend(std::iter::repeat_n(b'a', MAX_ESCAPE_SEQUENCE_BYTES + 1));
 
     parser.advance(&payload);
-    assert!(parser.discarding_oversized_escape);
+    assert!(matches!(parser.raw_osc, Some(RawOsc::Refused { .. })));
+    assert_eq!(parser.retained_amount().bytes, 0);
 
     parser.advance(b"\x1b\\Z");
-    assert!(!parser.discarding_oversized_escape);
+    assert!(parser.raw_osc.is_none());
     assert_eq!(parser.grid().row(0)[0].ch, 'Z');
 }
 

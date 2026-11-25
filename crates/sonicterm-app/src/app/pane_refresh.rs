@@ -6,8 +6,8 @@ use super::*;
 /// Seed a freshly-created parser with the active theme's query-reply colours:
 /// default fg/bg/cursor (OSC 10/11/12 `?`) AND the full 16-colour ANSI palette
 /// (OSC 4 `?`). Every pane-spawn site calls this one function, so the OSC 4
-/// palette wiring cannot be added to one path and forgotten on another. Per-slot colours that don't resolve are simply left unseeded
-/// (the parser then suppresses that slot's reply rather than lying).
+/// palette wiring cannot be added to one path and forgotten on another. Every colour
+/// is seeded as the renderer draws it, through the one shared theme parse.
 pub fn seed_parser_theme_colors(parser: &mut sonicterm_vt::vt::Parser, theme: &Theme) {
     // The creation seed records the pane's starting theme; it never reports a change.
     let _ = reseed_parser_theme_colors(parser, theme);
@@ -25,15 +25,24 @@ pub(super) fn reseed_parser_theme_colors(
         sonicterm_cfg::theme::Appearance::Dark => sonicterm_types::ColorScheme::Dark,
         sonicterm_cfg::theme::Appearance::Light => sonicterm_types::ColorScheme::Light,
     });
-    if let Some((red, green, blue)) = theme.colors.foreground.rgb() {
-        parser.set_theme_fg(red, green, blue);
-    }
-    if let Some((red, green, blue)) = theme.colors.background.rgb() {
-        parser.set_theme_bg(red, green, blue);
-    }
-    if let Some((red, green, blue)) = theme.colors.cursor.rgb() {
-        parser.set_theme_cursor(red, green, blue);
-    }
+    // Every slot is seeded with the color the renderer draws for it, read by the renderer's own
+    // parse: a pair that is not hex reads 0 and a value that does not parse reads black. The
+    // parser's default then equals the drawn color, which its override generation compares
+    // against, and a reply or the mode 2031 fingerprint never keeps the previous theme's color.
+    let drawn = |hex: &sonicterm_cfg::theme::Hex| sonicterm_types::theme_hex_rgb(&hex.0);
+    let (red, green, blue) = drawn(&theme.colors.foreground);
+    parser.set_theme_fg(red, green, blue);
+    let (red, green, blue) = drawn(&theme.colors.background);
+    parser.set_theme_bg(red, green, blue);
+    let (red, green, blue) = drawn(&theme.colors.cursor);
+    parser.set_theme_cursor(red, green, blue);
+    // OSC 17, OSC 19 and the OSC 21 `cursor_text` key answer these while a program set none.
+    let (red, green, blue) = drawn(&theme.colors.selection_bg);
+    parser.set_theme_selection_bg(red, green, blue);
+    let (red, green, blue) = drawn(&theme.colors.selection_fg);
+    parser.set_theme_selection_fg(red, green, blue);
+    let (red, green, blue) = drawn(&theme.colors.cursor_text);
+    parser.set_theme_cursor_text(red, green, blue);
     // OSC 4 palette: indices 0..=7 from `ansi.*`, 8..=15 from `bright.*`,
     // in the standard xterm slot order.
     let normal = [
@@ -57,9 +66,8 @@ pub(super) fn reseed_parser_theme_colors(
         &theme.colors.bright.white,
     ];
     for (palette_index, hex) in normal.iter().chain(bright.iter()).enumerate() {
-        if let Some((red, green, blue)) = hex.rgb() {
-            parser.set_theme_palette_color(palette_index as u8, red, green, blue);
-        }
+        let (red, green, blue) = drawn(hex);
+        parser.set_theme_palette_color(palette_index as u8, red, green, blue);
     }
     parser.finish_theme_update()
 }
@@ -87,6 +95,20 @@ pub(super) fn propagate_theme_to_pane_parsers(
     reports
 }
 
+/// Resize `parser` for a terminal geometry change. Off Windows a rows shrink under a live prompt
+/// keeps the cursor's row visible ([`sonicterm_vt::vt::Parser::resize_terminal`]). Windows clips
+/// as before until a ConPTY app smoke shows its post-resize repaint does not duplicate the
+/// scrolled rows. The grid changes before the fallible PTY resize and is never rolled back.
+pub(super) fn resize_terminal_grid(parser: &mut sonicterm_vt::vt::Parser, cols: u16, rows: u16) {
+    if cfg!(windows) {
+        // When: `cfg!(windows)` holds, ConPTY's repaint after a resize is unproven, so clip.
+        parser.resize(cols, rows);
+    } else {
+        // When: not `windows`, the shell's redraw follows the kept cursor row.
+        parser.resize_terminal(cols, rows);
+    }
+}
+
 /// Resize every pane in `panes` to `(cols, rows)`: both the parser's
 /// grid and (if the pane owns one) the PTY child. Used by the window
 /// resize handler and by the font live-reload path, where changing
@@ -98,7 +120,11 @@ pub(super) fn propagate_theme_to_pane_parsers(
 #[doc(hidden)]
 pub fn resize_all_panes(panes: &HashMap<u64, PaneState>, cols: u16, rows: u16) {
     for (pane_id, pane) in panes {
-        crate::app::frame_counters::lock_parser(&pane.parser).resize(cols, rows);
+        resize_terminal_grid(
+            &mut crate::app::frame_counters::lock_parser(&pane.parser),
+            cols,
+            rows,
+        );
         pane.resize_pty(*pane_id, cols, rows);
     }
 }
@@ -148,7 +174,7 @@ pub fn resize_panes_to_rects(
         let mut parser = crate::app::frame_counters::lock_parser(&pane.parser);
         // The clock is read only while the counters are on, to time the resize's parser hold.
         let locked_at = pane.frame_counters.as_ref().map(|_| std::time::Instant::now());
-        parser.resize(cols, rows);
+        resize_terminal_grid(&mut parser, cols, rows);
         // The cell size sizes a kitty image placed without `c` or `r`, and so its cursor move.
         parser.set_cell_pixel_size(cell_w, cell_h);
         drop(parser);

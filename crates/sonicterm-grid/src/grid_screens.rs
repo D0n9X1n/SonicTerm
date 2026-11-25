@@ -56,10 +56,14 @@ impl Grid {
             // The seq counter and pinned run stay on the outer grid; the saved screen holds none.
             prompt_seq_next: 0,
             pinned_run: None,
+            semantic: std::mem::take(&mut self.semantic),
+            alt_semantic_floor: 0,
             autowrap: self.autowrap,
             pending_wrap: false,
         };
         self.alt_screen = Some(Box::new(saved));
+        // The alternate screen's generations start past every earlier alternate screen's.
+        self.semantic.generation = self.alt_semantic_floor.saturating_add(1);
         // The alternate screen counts from past the primary's count and every earlier alternate
         // screen's, so neither screen's images are drawn on the other.
         self.lines_scrolled = self
@@ -93,6 +97,8 @@ impl Grid {
         self.visible = saved.visible;
         self.scrollback = saved.scrollback;
         self.prompts = saved.prompts;
+        self.alt_semantic_floor = self.semantic.generation;
+        self.semantic = saved.semantic;
         // The primary screen's scroll count returns, so its images stay beside its text; the
         // alternate screen's last count is kept so the next one starts past it.
         self.alt_scroll_floor = self.lines_scrolled;
@@ -152,6 +158,7 @@ impl Grid {
             // When: dimensions are unchanged, preserve storage and revision without reflowing rows.
             return;
         }
+        self.invalidate_input_on_clip(cols, rows);
         self.scrollback_limit = if self.is_alt() {
             0
         } else {

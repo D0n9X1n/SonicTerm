@@ -131,6 +131,15 @@ function Test-WixSourceContract {
         $license[0].GetAttribute("KeyPath") -ceq "yes") {
         throw "main.wxs must include the winit license in binary0 without replacing its key path"
     }
+    # The X.Org notice of the compiled-in X11 color table ships beside the executable the same way.
+    $notice = @($Wix.SelectNodes("//*[local-name()='File' and @Id='license_x11_rgb']"))
+    if ($notice.Count -ne 1 -or
+        $notice[0].GetAttribute("Name") -cne "LICENSE-X11-rgb" -or
+        $notice[0].GetAttribute("Source") -cne '..\..\crates\sonicterm-vt\LICENSE-X11-rgb' -or
+        $notice[0].ParentNode.GetAttribute("Id") -cne "binary0" -or
+        $notice[0].GetAttribute("KeyPath") -ceq "yes") {
+        throw "main.wxs must include the X11 color table notice in binary0 without replacing its key path"
+    }
 }
 
 [xml]$wix = Get-Content -LiteralPath "$PSScriptRoot\..\crates\sonicterm-windows\wix\main.wxs" -Raw
@@ -147,6 +156,11 @@ foreach ($attribute in @("Name", "Source", "KeyPath")) {
     $changedLicense.SetAttribute($attribute, $(if ($attribute -eq "KeyPath") { "yes" } else { "unexpected" }))
     Assert-ThrowsLike { Test-WixSourceContract $changedLicenseWix } "*must include the winit license in binary0*"
 }
+
+[xml]$missingNoticeWix = $wix.OuterXml
+$missingNotice = $missingNoticeWix.SelectSingleNode("//*[local-name()='File' and @Id='license_x11_rgb']")
+[void]$missingNotice.ParentNode.RemoveChild($missingNotice)
+Assert-ThrowsLike { Test-WixSourceContract $missingNoticeWix } "*must include the X11 color table notice in binary0*"
 
 [xml]$movedLicenseWix = $wix.OuterXml
 $movedLicense = $movedLicenseWix.SelectSingleNode("//*[local-name()='File' and @Id='license_winit']")

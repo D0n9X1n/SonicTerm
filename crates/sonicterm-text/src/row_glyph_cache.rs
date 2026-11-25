@@ -95,7 +95,7 @@ pub fn pane_payload_quota(rows: u16, cols: u16) -> usize {
     pane_entry_quota(rows).saturating_mul(row_payload_limit(cols))
 }
 
-/// Cell-decoration run for an underlined span.
+/// Cell-decoration run for an underlined or struck-through span.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnderlineRun {
     /// Inclusive start column.
@@ -107,6 +107,9 @@ pub struct UnderlineRun {
     /// Effective underline colour. This is either the explicit SGR 58 colour
     /// or the cell foreground for default underline colour.
     pub color: Color,
+    /// Whether the run is an SGR 9 strikethrough, drawn through the cell's middle in `color`,
+    /// rather than an underline; `style` is unused for it.
+    pub strikethrough: bool,
 }
 
 /// How a [`RowGlyph`] is projected onto the surface.

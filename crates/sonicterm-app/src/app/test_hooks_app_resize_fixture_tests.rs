@@ -103,3 +103,72 @@ fn a_failed_native_resize_leaves_the_grid_committed() {
     assert_eq!(calls.load(Ordering::Relaxed), 1, "the native call was attempted and failed");
     assert_eq!(warning_count(&log), 1, "the failure was reported once:\n{log}");
 }
+
+/// A failed native resize under a live prompt leaves the grid resized, as for any resize: off
+/// Windows the prompt's cursor row was first kept on the new bottom row, and nothing rolls back.
+/// Windows keeps today's clip until a ConPTY app smoke enables it there.
+#[test]
+fn pty_resize_failure_leaves_grid_resized_as_today() {
+    let (pane, calls, _fail) = pane_with_failing_resize();
+    let parser = pane.parser.clone();
+    let output: String = (0..20).map(|line| format!("o{line}\r\n")).collect();
+    parser.lock().advance(format!("{output}\x1b]133;A\x07$ \x1b]133;B\x07ls").as_bytes());
+    let mut panes = HashMap::new();
+    panes.insert(7u64, pane);
+
+    let log = capture_resize_warnings(|| resize_all_panes(&panes, 80, 10));
+
+    let guard = parser.lock();
+    let grid = guard.grid();
+    assert_eq!((grid.cols, grid.rows), (80, 10), "the grid stays resized; nothing rolls back");
+    let bottom: String = grid.row(9).iter().map(|cell| cell.ch).collect();
+    let expected = if cfg!(windows) { "o9" } else { "$ ls" };
+    assert_eq!(bottom.trim_end(), expected, "the bottom row after the shrink");
+    assert_eq!(calls.load(Ordering::Relaxed), 1, "the native call was attempted and failed");
+    assert_eq!(warning_count(&log), 1, "the failure was reported once:\n{log}");
+}
+
+/// A failed native resize still commits the shrunken grid, so `run_command` readiness reads that
+/// grid. With history off, a shell-prefilled draft on B's row still refuses after the shrink: off
+/// Windows B moved up with its discarded rows, and Windows' plain clip cut B's row.
+#[test]
+fn pty_resize_failure_keeps_a_no_history_draft_refused() {
+    use crate::app::mcp::{control_loop::Refusal, run::check_prompt};
+    let (pane, calls, _fail) = pane_with_failing_resize();
+    let parser = pane.parser.clone();
+    let output: String = (0..20).map(|line| format!("o{line}\r\n")).collect();
+    {
+        let mut guard = parser.lock();
+        guard.grid_mut().set_scrollback_limit(0);
+        guard.advance(format!("{output}\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n").as_bytes());
+        assert_eq!(check_prompt(guard.grid(), None), Err(Refusal::DraftPresent));
+    }
+    let mut panes = HashMap::new();
+    panes.insert(7u64, pane);
+
+    capture_resize_warnings(|| resize_all_panes(&panes, 80, 3));
+
+    let guard = parser.lock();
+    assert_eq!((guard.grid().cols, guard.grid().rows), (80, 3), "the grid stays resized");
+    let expected = if cfg!(windows) { Refusal::NoShellIntegration } else { Refusal::DraftPresent };
+    assert_eq!(check_prompt(guard.grid(), None), Err(expected));
+    assert_eq!(calls.load(Ordering::Relaxed), 1, "the native call was attempted and failed");
+}
+
+/// The shell retains a multiline draft when the native resize fails. A parser clip that loses
+/// its tail must refuse readiness before the failed PTY operation, on both host resize paths.
+#[test]
+fn failed_native_resize_cannot_authorize_a_clipped_draft() {
+    use crate::app::mcp::{control_loop::Refusal, run::check_prompt};
+    let (pane, calls, _fail) = pane_with_failing_resize();
+    let parser = pane.parser.clone();
+    {
+        let mut guard = parser.lock();
+        guard.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07\x1b[5;1Hdraft\x1b[1;3H");
+        assert_eq!(check_prompt(guard.grid(), None), Err(Refusal::DraftPresent));
+    }
+    let panes = HashMap::from([(7, pane)]);
+    capture_resize_warnings(|| resize_all_panes(&panes, 80, 3));
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(check_prompt(parser.lock().grid(), None), Err(Refusal::NoShellIntegration));
+}

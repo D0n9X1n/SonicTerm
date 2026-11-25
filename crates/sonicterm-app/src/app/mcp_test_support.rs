@@ -17,6 +17,7 @@ pub(crate) fn test_entry(cols: u16, rows: u16, scrollback: usize) -> PaneEntry {
     PaneEntry {
         pane_id: 7,
         metadata: None,
+        tab_title: None,
         creator: agents::PaneOwner::User,
         parser: Arc::new(Mutex::new(Parser::new_with_staging_pool(
             grid,

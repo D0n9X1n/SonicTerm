@@ -1,0 +1,329 @@
+//! The Win32 calls of the Windows offer backend, made on the clipboard worker: each block is a
+//! filled moveable global allocation before `OpenClipboard`, and one session sets them all. Reads
+//! of non-text formats size each block with `GlobalSize` before `GlobalLock`.
+
+use std::time::Duration;
+
+use windows::core::{w, HSTRING};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DestroyWindow, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
+};
+use windows::Win32::{
+    Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND},
+    System::{
+        DataExchange::{
+            CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
+            GetClipboardFormatNameW, GetClipboardSequenceNumber, IsClipboardFormatAvailable,
+            OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+        },
+        Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT},
+    },
+};
+
+use super::windows_formats::{
+    read_text_with, read_type_with, Win32Clipboard, WindowsOffer, CF_UNICODETEXT,
+};
+use super::{publish_offer, CommitGate, NativeOffer, Published};
+use crate::app::clipboard_worker::Snapshot;
+use crate::app::osc52_read_source::{ReadOutcome, TypeRead, MAX_NATIVE_TYPES_SCANNED};
+
+/// Attempts to open a clipboard another process briefly holds.
+const OPEN_ATTEMPTS: usize = 10;
+
+/// The pause between open attempts.
+const OPEN_RETRY: Duration = Duration::from_millis(10);
+
+/// A hidden message-only window owned by the same thread that opens the clipboard for mutation.
+struct OwnerWindow(HWND);
+
+impl OwnerWindow {
+    fn create() -> Option<Self> {
+        // SAFETY: STATIC is a system window class. HWND_MESSAGE selects a message-only parent; there are no borrowed creation parameters.
+        unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!(""),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                None,
+                None,
+            )
+        }
+        .ok()
+        .map(Self)
+    }
+}
+
+// Lifecycle: OwnerWindow calls DestroyWindow after CloseClipboard, before the worker can park.
+impl Drop for OwnerWindow {
+    fn drop(&mut self) {
+        let _ =
+            // SAFETY: this thread created the owned HWND, which remains live until this drop.
+            unsafe { DestroyWindow(self.0) };
+    }
+}
+
+/// Open the clipboard with a fresh owner window for writes, or no window for reads.
+fn open_clipboard(owner: Option<HWND>) -> bool {
+    for _ in 0..OPEN_ATTEMPTS {
+        let opened =
+            // SAFETY: owner is absent for a read or is the live window of this worker for a mutation.
+            unsafe { OpenClipboard(owner) }.is_ok();
+        if opened {
+            // When: opened, the caller closes the clipboard on this thread.
+            return true;
+        }
+        std::thread::sleep(OPEN_RETRY);
+    }
+    false
+}
+
+/// The real Win32 clipboard.
+struct Win32;
+
+impl Win32Clipboard for Win32 {
+    type Block = HGLOBAL;
+
+    fn register(&mut self, name: &str) -> Option<u32> {
+        let id =
+            // SAFETY: RegisterClipboardFormatW reads the NUL-terminated name HSTRING holds.
+            unsafe { RegisterClipboardFormatW(&HSTRING::from(name)) };
+        (id != 0).then_some(id)
+    }
+
+    fn alloc(&mut self, byte_len: usize, fill: &dyn Fn(&mut [u8])) -> Option<HGLOBAL> {
+        let block =
+            // SAFETY: GlobalAlloc returns a new zeroed moveable block this thread owns, or fails.
+            unsafe { GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, byte_len) }.ok()?;
+        let base =
+            // SAFETY: block is a live moveable allocation, so GlobalLock returns its base or null.
+            unsafe { GlobalLock(block) }.cast::<u8>();
+        if base.is_null() {
+            // When: base is null, the block cannot be filled, so it is freed.
+            self.free(block);
+            return None;
+        }
+        let bytes =
+            // SAFETY: base points at byte_len zeroed bytes, locked and owned here until GlobalUnlock.
+            unsafe { std::slice::from_raw_parts_mut(base, byte_len) };
+        fill(bytes);
+        let _ =
+            // SAFETY: block was locked above; a final unlock reports an error with no lock left.
+            unsafe { GlobalUnlock(block) };
+        Some(block)
+    }
+
+    fn free(&mut self, block: HGLOBAL) {
+        let _ =
+            // SAFETY: block is an unlocked allocation SonicTerm still owns; it is freed once here.
+            unsafe { GlobalFree(Some(block)) };
+    }
+
+    fn open(&mut self) -> bool {
+        open_clipboard(None)
+    }
+
+    type Owner = OwnerWindow;
+
+    fn open_owned(&mut self) -> Option<Self::Owner> {
+        // Per the SetClipboardData contract, a non-null immediate HGLOBAL belongs to the system.
+        // No delayed format needs this window after close, or WM_DESTROYCLIPBOARD on an idle worker.
+        let owner = OwnerWindow::create()?;
+        open_clipboard(Some(owner.0)).then_some(owner)
+    }
+
+    fn empty(&mut self) -> bool {
+        // SAFETY: the clipboard is open on this thread; EmptyClipboard frees its current data.
+        unsafe { EmptyClipboard() }.is_ok()
+    }
+
+    fn set(&mut self, format: u32, block: HGLOBAL) -> Result<(), HGLOBAL> {
+        let set =
+            // SAFETY: the clipboard is open and emptied by this thread; on success the system owns
+            // block, on failure it stays SonicTerm's.
+            unsafe { SetClipboardData(format, Some(HANDLE(block.0))) };
+        set.map(|_| ()).map_err(|_| block)
+    }
+
+    fn close(&mut self) {
+        let _ =
+            // SAFETY: this thread opened the clipboard in open; it is closed once here.
+            unsafe { CloseClipboard() };
+    }
+
+    fn registered(&self, matches: impl Fn(&str) -> bool) -> Option<u32> {
+        find_registered(matches)
+    }
+    fn available(&self, id: u32) -> bool {
+        // SAFETY: this only queries availability of a standard format on the open clipboard.
+        unsafe { IsClipboardFormatAvailable(id) }.is_ok()
+    }
+    fn read_block(
+        &mut self,
+        id: u32,
+        cap_bytes: usize,
+        decode: impl FnOnce(&[u8]) -> TypeRead,
+    ) -> TypeRead {
+        read_block(id, cap_bytes, decode)
+    }
+
+    fn sequence(&mut self) -> u32 {
+        // SAFETY: GetClipboardSequenceNumber takes no arguments and only reads a session counter.
+        unsafe { GetClipboardSequenceNumber() }
+    }
+
+    fn text_block_bytes(&mut self) -> Option<usize> {
+        let block = text_block()?;
+        let block_bytes =
+            // SAFETY: block is the clipboard's live text handle while the clipboard stays open.
+            unsafe { GlobalSize(block) };
+        Some(block_bytes)
+    }
+
+    fn lock_text(&mut self, block_bytes: usize, read: &mut dyn FnMut(&[u16])) {
+        let Some(block) = text_block() else {
+            // When: text_block is None, the text block is gone, so nothing is locked.
+            return;
+        };
+        let current_bytes =
+            // SAFETY: block is the clipboard's live text handle while the clipboard stays open.
+            unsafe { GlobalSize(block) };
+        if current_bytes != block_bytes {
+            // When: current_bytes differs from the admitted block_bytes, it is never locked.
+            return;
+        }
+        let base =
+            // SAFETY: block is a live moveable allocation, so GlobalLock returns its base or null.
+            unsafe { GlobalLock(block) }.cast::<u16>();
+        if base.is_null() {
+            // When: base is null, GlobalLock failed and there is nothing to read.
+            return;
+        }
+        let units =
+            // SAFETY: base points at block_bytes locked bytes until GlobalUnlock; block_bytes / 2
+            // u16 units stay in bounds.
+            unsafe { std::slice::from_raw_parts(base, block_bytes / 2) };
+        let text_units = units.iter().position(|unit| *unit == 0).unwrap_or(units.len());
+        read(&units[..text_units]);
+        let _ =
+            // SAFETY: block was locked above; a final unlock reports an error with no lock left.
+            unsafe { GlobalUnlock(block) };
+    }
+}
+
+/// The open clipboard's `CF_UNICODETEXT` handle; `None` when it holds no text.
+fn text_block() -> Option<HGLOBAL> {
+    let handle =
+        // SAFETY: the clipboard is open on this thread; the handle stays owned by the clipboard.
+        unsafe { GetClipboardData(CF_UNICODETEXT) }.ok()?;
+    Some(HGLOBAL(handle.0))
+}
+
+/// Bounded Windows text for OSC 52, including UTF-8 conversion of a literal text/plain fallback.
+pub(super) fn read_text(max_bytes: usize) -> ReadOutcome {
+    read_text_with(&mut Win32, max_bytes)
+}
+
+/// Publish `offer` on the Windows clipboard in one `OpenClipboard` session, `gate` checked
+/// immediately before `EmptyClipboard`.
+pub(super) fn publish(offer: &NativeOffer, gate: CommitGate<'_>) -> Published {
+    publish_offer(&mut WindowsOffer::new(Win32), offer, gate)
+}
+
+/// Replace the clipboard with `text` in one acquisition, reading what it replaces first when
+/// `snapshot_max_bytes` is set; `gate` is checked after that read, before `EmptyClipboard`.
+pub(super) fn write_text(
+    text: &str,
+    snapshot_max_bytes: Option<usize>,
+    gate: CommitGate<'_>,
+) -> (Published, Option<Snapshot>) {
+    WindowsOffer::new(Win32).write_text(text, snapshot_max_bytes, gate)
+}
+
+/// Write `text` again only while the clipboard holds exactly `previous`, compared and replaced in
+/// one acquisition; `gate` is checked after the comparison, before `EmptyClipboard`.
+pub(super) fn reassert_text(text: &str, previous: &Snapshot, gate: CommitGate<'_>) -> Published {
+    WindowsOffer::new(Win32).reassert_text(text, previous, gate)
+}
+
+/// The bounded native representation, or a literal MIME registration if its native format is absent.
+pub(super) fn read_type(mime: &str, max_bytes: usize) -> TypeRead {
+    read_type_with(&mut Win32, mime, max_bytes)
+}
+
+/// The first of the open clipboard's formats `wanted` accepts, among at most
+/// [`MAX_NATIVE_TYPES_SCANNED`].
+fn find_format(wanted: impl Fn(u32) -> bool) -> Option<u32> {
+    let mut format = 0;
+    for _ in 0..MAX_NATIVE_TYPES_SCANNED {
+        format =
+            // SAFETY: the clipboard is open on this thread; EnumClipboardFormats reads its list.
+            unsafe { EnumClipboardFormats(format) };
+        if format == 0 {
+            // When: format is 0, the enumeration ended without a match.
+            return None;
+        }
+        if wanted(format) {
+            // When: wanted accepts format, it is the one read.
+            return Some(format);
+        }
+    }
+    None
+}
+
+/// Find a registered format by its actual name in the open clipboard.
+fn find_registered(matches: impl Fn(&str) -> bool) -> Option<u32> {
+    find_format(|format| {
+        let mut buffer = [0u16; 256];
+        let length =
+            // SAFETY: GetClipboardFormatNameW writes at most buffer.len() units into buffer.
+            unsafe { GetClipboardFormatNameW(format, &mut buffer) };
+        let length = usize::try_from(length).unwrap_or(0).min(buffer.len());
+        length > 0 && matches(&String::from_utf16_lossy(&buffer[..length]))
+    })
+}
+
+/// Run `decode` over clipboard `format`'s block when `GlobalSize` reports at most `cap_bytes`,
+/// decided before `GlobalLock`, so an oversized block is never locked or copied.
+fn read_block(format: u32, cap_bytes: usize, decode: impl FnOnce(&[u8]) -> TypeRead) -> TypeRead {
+    let data =
+        // SAFETY: the clipboard is open on this thread; the handle stays owned by the clipboard.
+        unsafe { GetClipboardData(format) };
+    let Ok(handle) = data else {
+        // When: data is Err, the format could not be rendered, so the read failed.
+        return TypeRead::Failed;
+    };
+    let block = HGLOBAL(handle.0);
+    let block_bytes =
+        // SAFETY: block is the clipboard's live handle while the clipboard stays open.
+        unsafe { GlobalSize(block) };
+    if block_bytes == 0 {
+        // When: block_bytes is 0, GlobalSize could not size the handle.
+        return TypeRead::Failed;
+    }
+    if block_bytes > cap_bytes {
+        // When: block_bytes passes cap_bytes, the block is refused before it is locked.
+        return TypeRead::TooLarge;
+    }
+    let base =
+        // SAFETY: block is a live moveable allocation, so GlobalLock returns its base or null.
+        unsafe { GlobalLock(block) }.cast::<u8>();
+    if base.is_null() {
+        // When: base is null, GlobalLock failed and there is nothing to read.
+        return TypeRead::Failed;
+    }
+    let bytes =
+        // SAFETY: base points at block_bytes locked bytes until GlobalUnlock.
+        unsafe { std::slice::from_raw_parts(base, block_bytes) };
+    let result = decode(bytes);
+    let _ =
+        // SAFETY: block was locked above; a final unlock reports an error with no lock left.
+        unsafe { GlobalUnlock(block) };
+    result
+}

@@ -39,15 +39,17 @@ pub trait TaskbarProgressBackend {
 
 /// The Dock badge text for `report`: the percent, `!` for an error, `…` while indeterminate and
 /// `‖` while paused; `None` clears the badge. A normal report at 0% clears it too: programs start
-/// their progress there, and a red `0%` on the Dock reads as an alert while saying nothing.
+/// their progress there, and a red `0%` on the Dock reads as an alert while saying nothing. A report
+/// with no percent shows 0.
 pub fn badge_text(report: Option<ProgressReport>) -> Option<String> {
     let report = report?;
+    let percent = report.percent.unwrap_or(0);
     Some(match report.state {
-        ProgressState::Normal if report.percent == 0 => {
+        ProgressState::Normal if percent == 0 => {
             // When: a normal report is at 0%, nothing has progressed yet, so show no badge.
             return None;
         }
-        ProgressState::Normal => format!("{}%", report.percent),
+        ProgressState::Normal => format!("{percent}%"),
         ProgressState::Error => "!".to_owned(),
         ProgressState::Indeterminate => "…".to_owned(),
         ProgressState::Paused => "‖".to_owned(),
@@ -65,14 +67,14 @@ pub struct LauncherValues {
     pub urgent: bool,
 }
 
-/// The launcher values for `report`. The entry has no indeterminate bar, so indeterminate hides
-/// the bar rather than drawing a misleading 0%.
+/// The launcher values for `report`; a report with no percent shows 0. The entry has no
+/// indeterminate bar, so indeterminate hides the bar rather than drawing a misleading 0%.
 pub fn launcher_values(report: Option<ProgressReport>) -> LauncherValues {
     let Some(report) = report else {
         // When: report is None, the entry hides its bar.
         return LauncherValues { progress: 0.0, visible: false, urgent: false };
     };
-    let progress = f64::from(report.percent) / 100.0;
+    let progress = f64::from(report.percent.unwrap_or(0)) / 100.0;
     match report.state {
         ProgressState::Normal | ProgressState::Paused => {
             LauncherValues { progress, visible: true, urgent: false }

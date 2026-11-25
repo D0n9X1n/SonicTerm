@@ -20,7 +20,7 @@ use std::{
 
 use crossbeam_channel::Sender;
 use sonicterm_grid::{
-    grid::{Cell, CellFlags, Color, Grid, Pos, UnderlineStyle},
+    grid::{Cell, CellFlags, Color, Grid, Pos, PromptRedraw, SemanticMode, UnderlineStyle},
     hyperlink::{HyperlinkId, HyperlinkRegistry, MAX_HYPERLINK_CLIENT_ID_BYTES},
 };
 // Governor accounting type, consumed rather than republished.
@@ -37,6 +37,10 @@ use staging::StagingReservation;
 pub use staging::{
     CaptureStagingPool, GUARANTEED_CONCURRENT_CAPTURES, MAX_PROCESS_CAPTURE_STAGING_BYTES,
     MIN_CAPTURE_STAGING_BYTES,
+};
+pub use vt_clipboard::{
+    ClipboardInbox, ClipboardKinds, ClipboardPhase, MAX_CLIPBOARD_CHUNK_BYTES,
+    MAX_CLIPBOARD_INBOX_SECTION_BYTES, MAX_CLIPBOARD_KINDS_BYTES,
 };
 
 /// Terminal identity reported in answer to CSI > q (XTVERSION): `SonicTerm`
@@ -90,14 +94,31 @@ pub enum MouseTracking {
     AnyMotion,
 }
 
+/// The encoding of mouse reports a program selected with DECSET 1005, 1006, 1015 or 1016. Only one
+/// is active: the last one set wins, and resetting any of them returns to X10.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum MouseFormat {
+    /// `CSI M` and three bytes, each coordinate clamped to 223.
+    #[default]
+    X10,
+    /// DECSET 1005: `CSI M`, the button byte, then each coordinate as UTF-8.
+    Utf8,
+    /// DECSET 1006: `CSI < Cb ; Cx ; Cy M`, lowercase `m` on release, one-based cells.
+    Sgr,
+    /// DECSET 1015: `CSI Cb+32 ; Cx ; Cy M` in decimal, one-based cells.
+    Urxvt,
+    /// DECSET 1016: the SGR form with zero-based pane pixels instead of cells.
+    SgrPixels,
+}
+
 /// Terminal modes that decide how host pointer events are routed and encoded.
 ///
-/// Packed into one byte so the VT worker can publish all five bits with one store
-/// and a pointer handler can read them without the parser lock.
+/// Packed into one byte so the VT worker can publish them with one store and a pointer handler can
+/// read them without the parser lock.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub struct PointerModes {
     tracking: MouseTracking,
-    sgr: bool,
+    format: MouseFormat,
     is_alt: bool,
     application_cursor: bool,
 }
@@ -133,7 +154,6 @@ pub const MAX_MEDIA_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 /// many rejections bounds the scan to roughly one per that many links instead
 /// of one per link, while still recovering as soon as content scrolls away.
 const HYPERLINK_RECLAIM_BACKOFF_LINKS: u32 = 256;
-const MAX_RAW_OSC4_BYTES: usize = 4096;
 const MAX_SEMANTIC_OSC_BYTES: usize = 16 * 1024;
 
 /// Whether `code` is a program-state OSC (`9` or `777`) the raw capture owns.
@@ -162,17 +182,37 @@ fn program_osc_number(prefix: &[u8]) -> Option<u16> {
 fn raw_osc_cap(code: u16) -> usize {
     if is_program_osc(code) {
         MAX_NOTIFY_BYTES
+    } else if vt_color::is_color_osc(code) {
+        // When: code is a color request, its own bound applies.
+        vt_color::color_osc_cap(code)
+    } else if code == 22 {
+        // When: code is a pointer-shape request, its own bound applies.
+        vt_pointer_shape::MAX_POINTER_SHAPE_OSC_BYTES
+    } else if code == 1337 {
+        // When: code is an OSC 1337 `SetUserVar` payload, its own bound applies.
+        vt_user_vars::MAX_USER_VAR_OSC_BYTES
+    } else if code == 7501 {
+        // When: code is an OSC 7501 program-status report, kitty's wire bound applies.
+        vt_program_status::MAX_STATUS_BODY_BYTES
     } else {
-        // When: code is a title, CWD or hyperlink, the semantic bound applies.
+        // When: code is a title, CWD, hyperlink or OSC 133 marker, the semantic bound applies.
         MAX_SEMANTIC_OSC_BYTES
     }
 }
 const MAX_ITERM2_METADATA_BYTES: usize = 1024;
 const ITERM2_OSC_PREFIX: &[u8; 10] = b"1337;File=";
-const OSC4_PREFIX: &[u8; 2] = b"4;";
+/// The OSC 1337 prefix whose whole payload the raw collector owns as user variables.
+const USER_VAR_OSC_PREFIX: &[u8; 16] = b"1337;SetUserVar=";
+/// The OSC 1337 prefix, matched in any ASCII case, whose whole payload the raw collector owns as a
+/// working-directory report; its length fits the probe, which `USER_VAR_OSC_PREFIX` sizes.
+const CURRENT_DIR_OSC_PREFIX: &[u8; 16] = b"1337;CurrentDir=";
 /// Public for the same reason as [`MAX_MEDIA_PAYLOAD_BYTES`]: the backstop is
 /// derived from the caps, not parallel to them.
 pub const MAX_ESCAPE_SEQUENCE_BYTES: usize = 1024 * 1024;
+/// The most heap one parser's persistent program metadata owns: its OSC 7501 records and OSC 1337
+/// user variables. Public for the same reason: the pane backstop is derived from it.
+pub const MAX_PROGRAM_METADATA_BYTES: usize =
+    vt_program_status::MAX_PROGRAM_STATUS_BYTES + vt_user_vars::MAX_USER_VARS_BYTES;
 
 /// Event surfaced to the host so it can update window chrome, clipboard, etc.
 #[derive(Debug, Clone)]
@@ -193,12 +233,23 @@ pub enum VtEvent {
         /// The target URI; empty string terminates the currently-active link.
         uri: String,
     },
-    /// OSC 52 — shell requested clipboard read/write on the named selection.
-    Clipboard {
-        /// Selection target byte (`c` = clipboard, `p` = primary, etc.).
-        selection: char,
-        /// Base64-encoded payload as received from the shell.
-        data: String,
+    /// OSC 52 or OSC 1337 `Copy=:` — one stage of a clipboard stream. The encoded payload waits
+    /// in [`Parser::clipboard_inbox`]; the event carries no payload bytes.
+    ClipboardStream {
+        /// The stream this stage belongs to.
+        stream: u64,
+        /// What happened to it.
+        phase: ClipboardPhase,
+    },
+    /// OSC 5522 — one complete kitty clipboard packet. A valid packet's encoded payload waits in
+    /// [`Parser::kitty_clipboard_inbox`] under `stream`; the event carries no payload bytes.
+    KittyClipboard {
+        /// The packet's id in the kitty inbox.
+        stream: u64,
+        /// What the packet asks.
+        request: KittyClipboardRequest,
+        /// Whether BEL ended the packet, so the reply ends with BEL too; otherwise ST.
+        bel: bool,
     },
     /// Inline media protocol payload captured from the stream.
     ///
@@ -227,6 +278,8 @@ pub enum VtEvent {
     },
     /// RIS reset the terminal, so program-reported state (progress) is cleared.
     ProgramStateReset,
+    /// A batch changed the pane's OSC 7501 records; the summary is the batch's last state.
+    ProgramStatus(StatusSummary),
 }
 
 /// One in-flight media capture and its claim on a staging pool.
@@ -312,6 +365,9 @@ pub struct Osc7Cwd {
     pub authority: String,
     /// Percent-decoded filesystem path.
     pub path: String,
+    /// Whether `path` is a URI path (any OSC 7, or a `file://` or `kitty-shell-cwd://` URI from any
+    /// source), which may write a Windows drive after a separator (`/C:/x`); a bare 9;9 path is not.
+    pub uri_path: bool,
 }
 
 /// Synchronized output (DEC private mode 2026) as the parser holds it.
@@ -332,10 +388,19 @@ pub struct Parser {
     performer: Performer,
     /// The kitty APC in flight: its bounded control section and, for an image, its payload.
     apc_scratch: Option<Box<vt_kitty_stream::ApcScratch>>,
-    /// Set when a kitty event needs the host's reply, ending the advance prefix after it.
+    /// Set when a kitty event needs the host's reply, or the clipboard inboxes reach their
+    /// section bound, ending the advance prefix after it.
     kitty_yield: bool,
     pending_esc: bool,
     raw_osc: Option<RawOsc>,
+    /// Encoded clipboard chunks waiting for the host.
+    clipboard_inbox: Arc<ClipboardInbox>,
+    /// The id the last clipboard stream took.
+    clipboard_streams: u64,
+    /// Encoded OSC 5522 payloads waiting for the host, one chunk per packet.
+    kitty_clipboard_inbox: Arc<ClipboardInbox>,
+    /// The id the last OSC 5522 packet took.
+    kitty_clipboard_streams: u64,
     iterm2_metadata: [u8; MAX_ITERM2_METADATA_BYTES],
     iterm2_metadata_len: usize,
     escape_bytes_in_flight: usize,
@@ -362,14 +427,19 @@ pub struct Parser {
 /// protocol's own bound or expose whole through its public callback.
 enum RawOsc {
     /// Checking a bounded OSC prefix before choosing vte or media ownership.
-    Probe { content: [u8; ITERM2_OSC_PREFIX.len()], content_len: u8 },
-    /// Complete title, CWD, hyperlink or program-state (`9`, `777`) payload, independent of vte's
-    /// parameter count.
+    Probe { content: [u8; USER_VAR_OSC_PREFIX.len()], content_len: u8 },
+    /// Complete title, CWD, hyperlink, program-state (`9`, `777`, `7501`), color request or
+    /// OSC 1337 `SetUserVar` or `CurrentDir` payload, independent of vte's parameter count.
     Semantic { code: u16, content: Vec<u8>, pending_esc: bool },
-    /// Capturing bytes after `OSC 4 ;` until BEL or ST.
-    Palette { content: Vec<u8> },
     /// Streaming an iTerm2 file payload through the parser's staging reservation.
     Iterm2 { capture: MediaCapture, metadata_done: bool, pending_esc: bool },
+    /// Streaming an OSC 52 or OSC 1337 `Copy=:` payload to the clipboard inbox.
+    Clipboard(Box<vt_clipboard::ClipboardCollector>),
+    /// Collecting one whole OSC 5522 packet, held until its terminator.
+    KittyClipboard(Box<vt_kitty_clipboard::KittyClipboardCollector>),
+    /// Swallowing the rest of a refused over-cap `Semantic` payload through the same terminators
+    /// an accepted one ends on, retaining nothing; `pending_esc` holds an ESC that may start ST.
+    Refused { pending_esc: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -429,6 +499,10 @@ impl Parser {
             kitty_yield: false,
             pending_esc: false,
             raw_osc: None,
+            clipboard_inbox: Arc::default(),
+            clipboard_streams: 0,
+            kitty_clipboard_inbox: Arc::default(),
+            kitty_clipboard_streams: 0,
             iterm2_metadata: [0; MAX_ITERM2_METADATA_BYTES],
             iterm2_metadata_len: 0,
             escape_bytes_in_flight: 0,
@@ -537,6 +611,37 @@ impl Parser {
         }
     }
 
+    /// Resize for the terminal's own geometry (a window or pane size change). When the rows
+    /// shrink under a live prompt on the primary screen (the semantic mode is a prompt or input
+    /// with an anchor, and `redraw` is not `0`) and the cursor would fall off the new height, the
+    /// rows above it first scroll into history, so the cursor's row keeps its cells and column on
+    /// the new bottom row. Nothing is blanked; rows below the cursor are cut as [`Self::resize`]
+    /// cuts them. Every other resize is exactly [`Self::resize`].
+    pub fn resize_terminal(&mut self, cols: u16, rows: u16) -> ResizeOutcome {
+        let (_, bounded_rows) = sonicterm_grid::grid::bounded_grid_size(cols.into(), rows.into());
+        let grid = &mut self.performer.grid;
+        let semantic = grid.semantic();
+        let live_prompt = !grid.is_alt()
+            && semantic.anchor.is_some()
+            && !matches!(semantic.mode, SemanticMode::Output)
+            && semantic.options.redraw != PromptRedraw::Off;
+        let scrolled_rows = if live_prompt && bounded_rows < grid.rows {
+            // A live prompt losing rows scrolls just enough that its cursor row is the last.
+            (grid.cursor.row + 1).saturating_sub(bounded_rows)
+        } else {
+            // When: no `live_prompt` loses rows, the resize clips exactly as `resize` does.
+            0
+        };
+        if scrolled_rows > 0 {
+            // The scroll path keeps the rows in history (or recycles them with scrollback off),
+            // and the cursor follows its row up.
+            grid.scroll_up(scrolled_rows);
+            grid.cursor.row -= scrolled_rows;
+        }
+        self.resize(cols, rows);
+        ResizeOutcome { scrolled_rows }
+    }
+
     /// Borrow the hyperlink registry (OSC 8 interned uris).
     pub fn hyperlinks(&self) -> &HyperlinkRegistry {
         &self.performer.hyperlinks
@@ -553,22 +658,43 @@ impl Parser {
         self.performer.title.as_deref()
     }
 
-    /// Latest OSC 7 working-directory path (sticky), or `None` if the shell
-    /// has not reported one. Kept for tab-title compatibility; security-sensitive
-    /// consumers must use [`Self::osc7_cwd`] so authority provenance is retained.
+    /// Latest OSC 1 icon title (sticky), the tab name a program asked for, or `None` while none is
+    /// set. Program-supplied display text: never logged or evaluated.
+    pub fn icon_title(&self) -> Option<&str> {
+        self.performer.icon_title.as_deref()
+    }
+
+    /// The pane's OSC 1337 `SetUserVar` variables as a shared snapshot, cheap to take under the
+    /// parser lock and read after it. Program-supplied display metadata: never logged or evaluated.
+    pub fn user_vars(&self) -> Arc<UserVars> {
+        Arc::clone(&self.performer.user_vars)
+    }
+
+    /// Latest displayed working-directory path from OSC 7, OSC 9;9 or OSC 1337 `CurrentDir`, or
+    /// `None` if none was reported or an empty report cleared it. Kept for tab titles;
+    /// security-sensitive consumers must use [`Self::osc7_cwd`] so authority provenance is retained.
     pub fn cwd(&self) -> Option<&str> {
         self.performer.cwd.as_deref()
     }
 
-    /// Latest host-aware OSC 7 working-directory snapshot.
+    /// Latest host-aware working-directory snapshot, from any source; `None` when the latest report
+    /// was empty, malformed, cut or a bare `CurrentDir`. The app still checks its host and path.
     pub fn osc7_cwd(&self) -> Option<&Osc7Cwd> {
         self.performer.osc7_cwd.as_ref()
     }
 
-    /// Monotonic identity of the latest accepted OSC 7 update.
+    /// Monotonic identity of the latest working-directory report, revocations included.
     pub fn cwd_revision(&self) -> u64 {
         self.performer.cwd_revision
     }
+}
+
+/// What [`Parser::resize_terminal`] did beyond a plain resize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResizeOutcome {
+    /// Rows scrolled into history to keep a live prompt's cursor row visible; 0 when the resize
+    /// only clipped, as [`Parser::resize`] does.
+    pub scrolled_rows: u16,
 }
 
 /// Constant-size classification of the only supported DECRQSS selector.
@@ -590,6 +716,8 @@ struct Performer {
     shell_state: ShellIntegrationState,
     /// Set once the pane took input; a token first seen after it never latches the pane.
     shell_input_seen: Option<Arc<AtomicBool>>,
+    /// The command markers this parse section admitted, until the host takes them.
+    section_commands: vt_semantic::SectionCommands,
     fg: Color,
     bg: Color,
     flags: CellFlags,
@@ -616,7 +744,12 @@ struct Performer {
     /// Cursor saved by DECSET ?1049 when entering the alt screen.
     saved_cursor: Option<Pos>,
     bracketed_paste: bool,
-    mouse_sgr: bool,
+    /// DECSET 5522: the program asked for paste events instead of pasted text.
+    paste_events: bool,
+    /// Set-to-reset transitions of `paste_events`, by DECRST or RIS; wraps.
+    paste_events_resets: u64,
+    /// DECSET 1005/1006/1015/1016 mouse report encoding.
+    mouse_format: MouseFormat,
     /// DECCKM ?1 — application cursor keys. When set, the arrow keys (and the
     /// synthetic arrow sequences SonicTerm emits for alt-screen wheel scroll)
     /// must use the `ESC O A` form instead of `ESC [ A`.
@@ -644,16 +777,32 @@ struct Performer {
     sync_resets: u64,
     /// Latest OSC 0/2 title (sticky — survives consumed events).
     title: Option<String>,
-    /// Latest permissively-decoded OSC 7 path used only for tab titles.
+    /// Latest OSC 1 icon title, the tab name a program asked for; OSC 0, an empty or bare OSC 1
+    /// and RIS clear it, and OSC 2 leaves it.
+    icon_title: Option<String>,
+    /// OSC 1337 `SetUserVar` variables, shared with readers as a snapshot; RIS keeps them.
+    user_vars: Arc<UserVars>,
+    /// OSC 7501 records, shared with readers as a snapshot; RIS removes them.
+    program_status: Arc<ProgramStatus>,
+    /// Set when the current advance changed `program_status`, so it publishes one summary.
+    program_status_dirty: bool,
+    /// Whether `program_status` holds a `done` or `error` record, stored at each change under the
+    /// parser lock, so the host's key and focus paths read the parser's state without locking.
+    program_status_unseen: Arc<std::sync::atomic::AtomicBool>,
+    /// Discarded OSC 7501 reports, counted so their log line is rate-limited.
+    program_status_refusals: u64,
+    /// Latest permissively read directory path, from any source, used only for tab titles.
     cwd: Option<String>,
     /// Latest strictly parsed host-aware snapshot used for path resolution.
     osc7_cwd: Option<Osc7Cwd>,
-    /// Monotonic identity of OSC 7 updates, including same-value ABA changes.
+    /// Monotonic identity of directory reports, including same-value ABA changes.
     cwd_revision: u64,
     reply_tx: Option<Sender<Vec<u8>>>,
     captured_replies: std::cell::RefCell<Option<Vec<u8>>>,
     reply_queue_full_warned: std::sync::atomic::AtomicBool,
-    /// Theme default foreground (sRGB), used to answer OSC 10 `?` queries.
+    /// The colors the program set for this pane (OSC 4/10/11/12/21), over the theme defaults.
+    color_overrides: sonicterm_types::ColorOverrides,
+    /// Theme default foreground (sRGB), answering OSC 10 `?` while the program set none.
     /// `None` means the parser was never told a theme — query replies are
     /// suppressed in that case so we don't lie to the shell.
     theme_fg: Option<(u8, u8, u8)>,
@@ -665,6 +814,11 @@ struct Performer {
     /// Theme cursor colour (sRGB), used to answer OSC 12 `?` queries.
     /// Falls back to `theme_fg` if unset.
     theme_cursor: Option<(u8, u8, u8)>,
+    /// Theme selection background, selection foreground and cursor text (sRGB), answering OSC 17,
+    /// OSC 19 and the OSC 21 `cursor_text` key while the program set none.
+    theme_selection_bg: Option<(u8, u8, u8)>,
+    theme_selection_fg: Option<(u8, u8, u8)>,
+    theme_cursor_text: Option<(u8, u8, u8)>,
     /// 16-colour ANSI palette (sRGB) used to answer `OSC 4 ; <i> ; ? ST`
     /// queries (index 0..=15: 0-7 normal, 8-15 bright). Per-slot `None`
     /// suppresses that slot's reply so we never report a colour we were
@@ -684,9 +838,6 @@ struct Performer {
     kitty_notifications: kitty_notify::KittyNotifications,
     /// The cell size in pixels the host last reported, answering `CSI 16 t`; mirrors the parser's.
     report_cell_px: Option<(f32, f32)>,
-    /// SonicTerm's raw OSC4 capture handles full batched queries before vte's
-    /// capped `osc_dispatch`; suppress the immediately-following duplicate.
-    suppress_next_osc4: bool,
     /// DECSTBM scrolling region top margin (visible-row, 0-based,
     /// inclusive). `None` means "no region set — full screen".
     scroll_top: Option<u16>,
@@ -721,6 +872,8 @@ struct Performer {
     /// Each screen owns independent progressive-enhancement state, as required
     /// by the protocol. Empty stack means flags 0 and legacy encoding.
     kitty_kbd_flags: [Vec<u8>; 2],
+    /// OSC 22 pointer-shape stacks for the main and alternate screens, and the published shape.
+    pointer_shape: vt_pointer_shape::PointerShapeState,
     /// Set when a Sixel or iTerm2 image is queued, ending the advance prefix after it so the host
     /// moves the cursor past the image before the text after it is parsed.
     image_yield: bool,
@@ -739,6 +892,10 @@ fn split_once_byte(bytes: &[u8], needle: u8) -> Option<(&[u8], &[u8])> {
 #[path = "vt_tests.rs"]
 mod vt_tests;
 
+#[cfg(test)]
+#[path = "vt_resize_tests.rs"]
+mod vt_resize_tests;
+
 #[path = "vt_modes.rs"]
 mod vt_modes;
 
@@ -754,14 +911,32 @@ mod vt_dispatch;
 #[path = "vt_osc.rs"]
 mod vt_osc;
 
+#[path = "vt_semantic.rs"]
+mod vt_semantic;
+
 #[path = "vt_performer.rs"]
 mod vt_performer;
 
 #[path = "vt_raw_osc.rs"]
 mod vt_raw_osc;
 
+#[path = "vt_clipboard.rs"]
+mod vt_clipboard;
+
+#[path = "vt_color.rs"]
+mod vt_color;
+
+#[path = "vt_color_spec.rs"]
+mod vt_color_spec;
+
+#[path = "vt_x11_colors.rs"]
+mod vt_x11_colors;
+
 #[path = "vt_kitty.rs"]
 mod vt_kitty;
+
+#[path = "vt_kitty_clipboard.rs"]
+mod vt_kitty_clipboard;
 
 #[path = "vt_kitty_stream.rs"]
 mod vt_kitty_stream;
@@ -777,9 +952,32 @@ mod vt_tap;
 
 #[path = "vt_host_reports.rs"]
 mod vt_host_reports;
+
+#[path = "vt_pointer_shape.rs"]
+mod vt_pointer_shape;
+
+#[path = "vt_user_vars.rs"]
+mod vt_user_vars;
+
+#[path = "vt_program_status.rs"]
+mod vt_program_status;
 use vt_host_reports::ThemeFingerprint;
 pub use vt_kitty::{KittyAction, KittyCommand, KittyCommandError, KittyDelete, KittyMedium};
+pub use vt_kitty_clipboard::{
+    kitty_clipboard_operation, kitty_clipboard_status_reply, parse_kitty_clipboard_metadata,
+    KittyClipboardLocation, KittyClipboardMetadata, KittyClipboardMetadataError,
+    KittyClipboardOperation, KittyClipboardRequest, KittyClipboardStatus,
+    MAX_KITTY_CLIPBOARD_ID_BYTES, MAX_KITTY_CLIPBOARD_METADATA_BYTES,
+    MAX_KITTY_CLIPBOARD_MIME_BYTES, MAX_KITTY_CLIPBOARD_PACKET_BYTES,
+    MAX_KITTY_CLIPBOARD_PASSWORD_BYTES,
+};
+pub use vt_pointer_shape::{pointer_shape_of_snapshot, PointerShape};
+pub use vt_program_status::{
+    ProgramStatus, StatusKind, StatusRecord, StatusState, StatusSummary, StatusTop,
+};
+pub use vt_semantic::SectionCommands;
 pub use vt_tap::{TapAppend, TapHold, TapText, OUTPUT_TAP_CHARS};
+pub use vt_user_vars::UserVars;
 
 use vt_capture::parse_iterm2_file_event;
 pub use vt_osc::{parse_osc7_cwd, parse_osc7_cwd_snapshot};

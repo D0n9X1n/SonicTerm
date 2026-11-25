@@ -7,7 +7,7 @@ pub(super) use sonicterm_vt::vt::MouseTracking;
 pub(super) use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 
 pub(super) fn pointer_cell(pane_id: u64, row: u16, col: u16) -> PointerCell {
-    PointerCell { pane_id, row, col }
+    PointerCell { pane_id, row, col, pixel: (0, 0) }
 }
 
 /// Native V events route configured paste to the source READONLY search without taking input from composition or Rename Window.

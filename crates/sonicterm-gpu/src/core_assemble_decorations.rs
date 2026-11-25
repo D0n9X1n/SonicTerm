@@ -26,7 +26,7 @@ impl GpuRenderer {
             ..
         } = scratch;
         let pane_rects = pane_rects.as_slice();
-        // Underline quads — drawn last so they appear on top of the text.
+        // Underline and strikethrough quads — drawn last so they appear on top of the text.
         // SGR 4:n style and SGR 58 colour are stored per-cell and coalesced
         // above, matching WezTerm/xterm underline semantics instead of the
         // old single-colour single-line approximation.
@@ -41,18 +41,52 @@ impl GpuRenderer {
         // and truncated underlines on wider INACTIVE panes. Key the
         // cache by (pad_bits, pane_cols) and size it accordingly.
         let mut underline_caches: Vec<(u32, u16, Vec<f32>)> = Vec::new();
+        // Pane colors differ only while some pane's program set colors; otherwise every
+        // decoration draws with the theme and no pane is looked up. With overrides, each pane's
+        // colors are resolved once, by the origin its decorations were recorded at; the origin's
+        // y keeps vertically stacked panes, which share column edges, apart.
+        let any_overrides =
+            !underlines.is_empty() && pane_views.iter().any(|pane| pane.overrides.is_some());
+        let mut pane_colors: Vec<(u32, u32, PaneColors<'_>)> = Vec::new();
         for (entry, (origin_x, origin_y, pane_cols, row, run)) in underlines.iter().enumerate() {
             let pad_bits = origin_x.to_bits();
-            let cache = if let Some((_, _, c)) =
-                underline_caches.iter().find(|(b, pc, _)| *b == pad_bits && *pc == *pane_cols)
+            let cache = if let Some((_, _, edges)) = underline_caches
+                .iter()
+                .find(|(pad, cols, _)| *pad == pad_bits && *cols == *pane_cols)
             {
-                c
+                edges
             } else {
                 // When: the `find` returned None — no cache exists yet for this
                 // origin and column count, so one is built and memoized.
-                let c = build_snapped_cell_x(*origin_x, self.cell_w, *pane_cols);
-                underline_caches.push((pad_bits, *pane_cols, c));
-                &underline_caches.last().unwrap().2
+                let edges = build_snapped_cell_x(*origin_x, self.cell_w, *pane_cols);
+                underline_caches.push((pad_bits, *pane_cols, edges));
+                &underline_caches.last().expect("just pushed").2
+            };
+            let colors = if any_overrides {
+                let top_bits = origin_y.to_bits();
+                match pane_colors.iter().find(|(pad, top, _)| *pad == pad_bits && *top == top_bits)
+                {
+                    Some((_, _, colors)) => *colors,
+                    None => {
+                        // This origin's pane has not been looked up yet, so its colors are
+                        // resolved and memoized.
+                        let colors = pane_views
+                            .iter()
+                            .find(|pane| {
+                                pane.origin_x.to_bits() == pad_bits
+                                    && pane.origin_y.to_bits() == top_bits
+                            })
+                            .map_or(PaneColors::from(theme), |pane| {
+                                PaneColors::new(theme, pane.overrides)
+                            });
+                        pane_colors.push((pad_bits, top_bits, colors));
+                        colors
+                    }
+                }
+            } else {
+                // When: any_overrides is false, no pane holds program colors, so every decoration
+                // draws with the theme.
+                PaneColors::from(theme)
             };
             let end_exclusive = (run.end_col as usize).saturating_add(1);
             let cache_end = end_exclusive.min(cache.len().saturating_sub(1));
@@ -66,21 +100,40 @@ impl GpuRenderer {
                 .map(|r| r - x)
                 .unwrap_or_else(|| f32::from(run.end_col - run.start_col + 1) * self.cell_w);
             let y = *origin_y + f32::from(*row) * self.cell_h;
-            let underline_color =
-                chrome_color_to_linear_rgba(color_to_chrome(run.color, theme, self.fg_default));
+            let underline_color = chrome_color_to_linear_rgba(color_to_chrome(
+                run.color,
+                colors,
+                colors.default_foreground(self.fg_default),
+            ));
             let quads_before = quads.len();
-            push_underline_quads(
-                &mut *quads,
-                run.style,
-                x,
-                y,
-                w,
-                self.cell_h,
-                underline_thickness,
-                sw,
-                sh,
-                underline_color,
-            );
+            if run.strikethrough {
+                // An SGR 9 strikethrough run draws one bar through the cells' middle.
+                push_strikethrough_quad(
+                    &mut *quads,
+                    x,
+                    y,
+                    w,
+                    self.cell_h,
+                    underline_thickness,
+                    sw,
+                    sh,
+                    underline_color,
+                );
+            } else {
+                // When: `run.strikethrough` is false, the run is an underline in its SGR 4 style.
+                push_underline_quads(
+                    &mut *quads,
+                    run.style,
+                    x,
+                    y,
+                    w,
+                    self.cell_h,
+                    underline_thickness,
+                    sw,
+                    sh,
+                    underline_color,
+                );
+            }
             // Dotted and curly underlines reach below the cell, so the drawn quads join the record.
             if let Some(staged) = underline_owners.get(entry) {
                 let mut ink = crate::row_ink::InkEdges::default();

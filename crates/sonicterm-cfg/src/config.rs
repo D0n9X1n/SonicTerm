@@ -354,8 +354,28 @@ pub struct TerminalConfig {
     pub cursor_animation: CursorAnimation,
     /// Whether programs may write the clipboard with OSC 52; see [`Osc52Policy`].
     pub osc52: Osc52Policy,
+    /// Whether programs may read the clipboard with OSC 52; see [`Osc52ReadPolicy`].
+    pub osc52_read: Osc52ReadPolicy,
+    /// Most decoded bytes one OSC 52 write may stage in memory; see
+    /// [`TerminalConfig::effective_clipboard_write_limit_bytes`].
+    pub clipboard_write_limit_bytes: usize,
     /// Which macOS Option keys act as Alt instead of composing characters; read only on macOS.
     pub macos_option_as_alt: OptionAsAlt,
+    /// Whether a click in a shell prompt moves its cursor; see [`ClickToMove`].
+    pub click_to_move: ClickToMove,
+}
+
+/// Whether a plain left click inside an OSC 133 shell prompt moves the shell's cursor there.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClickToMove {
+    /// Any marked prompt: a click report when the prompt asks for one, else arrow keys (kitty).
+    #[default]
+    AnyPrompt,
+    /// Only prompts that declare `click_events` or `cl` (Ghostty).
+    Declared,
+    /// Clicks never move the cursor.
+    Off,
 }
 
 /// Which macOS Option keys send Alt chords instead of composed characters.
@@ -385,16 +405,36 @@ pub enum CursorAnimation {
     Smooth,
 }
 
-/// Whether OSC 52 clipboard writes from programs in a pane reach the system clipboard. Reads are
-/// never answered either way. `Deny` suits panes that run untrusted remote programs, since any
-/// program printing to the terminal can otherwise replace the local clipboard.
+/// Whether OSC 52 clipboard writes from programs in a pane reach the system clipboard. Reads
+/// follow [`Osc52ReadPolicy`] instead. `Deny` suits panes that run untrusted remote programs, since any
+/// program printing to the terminal can otherwise replace the local clipboard; `Ask` holds each
+/// write for a consent page in the requesting pane's window.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Osc52Policy {
-    /// Accepted writes (at most 512 KiB of UTF-8 text) reach the clipboard.
+    /// Accepted writes (at most `clipboard_write_limit_bytes` of decoded text) reach the clipboard.
     #[default]
     Allow,
+    /// Each write waits for Allow on a consent page; Deny, Escape or 120 s unanswered drop it.
+    Ask,
     /// Every write is refused before the clipboard is touched.
+    Deny,
+}
+
+/// How an OSC 52 clipboard read (`?`) from a program is answered. `Deny` stays silent, as
+/// Ghostty and WezTerm do. `Allow` reads the clipboard (at most 8 MiB) and answers with its text;
+/// `Ask` holds the read until the user answers a consent page in the requesting pane's window:
+/// Allow reads as `Allow` does, and Deny, Escape or 120 s unanswered answer it empty. Every reply
+/// is ST-terminated, one per requested destination.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Osc52ReadPolicy {
+    /// Reads wait for Allow on a consent page; Deny or no answer gets an empty reply.
+    #[default]
+    Ask,
+    /// Reads return the clipboard's text.
+    Allow,
+    /// Reads are dropped silently.
     Deny,
 }
 
@@ -419,6 +459,9 @@ pub struct NotificationsConfig {
     /// Minimum command duration, in seconds, before completion can notify.
     #[serde(default = "default_threshold_secs")]
     pub threshold_secs: u64,
+    /// Append the command's text, from an authenticated OSC 133 C, to the long-command
+    /// notification. Off by default: command text can hold secrets.
+    pub long_command_cmdline: bool,
     /// Where OSC 9 and OSC 777 program notifications go.
     pub osc9: Osc9Delivery,
     /// Mirror `OSC 9;4` progress to the taskbar, Dock or launcher.
@@ -477,6 +520,7 @@ impl Default for NotificationsConfig {
         Self {
             long_command: default_notifications_enabled(),
             threshold_secs: default_threshold_secs(),
+            long_command_cmdline: false,
             osc9: Osc9Delivery::default(),
             taskbar_progress: default_taskbar_progress(),
         }
@@ -620,11 +664,23 @@ pub const DEFAULT_CLICKABLE_PATH_CHARS: usize = MAX_CLICKABLE_PATH_CHARS;
 /// scanner's 4 KiB target cap.
 pub const MAX_CLICKABLE_PATH_CHARS: usize = 1024;
 
+/// Default for `[terminal] clipboard_write_limit_bytes`: 64 MiB of decoded OSC 52 text.
+pub const DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Ceiling on `clipboard_write_limit_bytes`; a write is held in memory, never spilled to disk.
+pub const MAX_CLIPBOARD_WRITE_LIMIT_BYTES: usize = 512 * 1024 * 1024;
+
 impl TerminalConfig {
     /// The configured path length cap clamped to `1..=MAX_CLICKABLE_PATH_CHARS`.
     #[must_use]
     pub fn effective_clickable_path_max_chars(&self) -> usize {
         self.clickable_path_max_chars.clamp(1, MAX_CLICKABLE_PATH_CHARS)
+    }
+
+    /// The configured OSC 52 write limit clamped to at most [`MAX_CLIPBOARD_WRITE_LIMIT_BYTES`].
+    #[must_use]
+    pub fn effective_clipboard_write_limit_bytes(&self) -> usize {
+        self.clipboard_write_limit_bytes.min(MAX_CLIPBOARD_WRITE_LIMIT_BYTES)
     }
 }
 
@@ -643,6 +699,9 @@ impl Default for TerminalConfig {
             cursor_shape: CursorShape::default(),
             cursor_animation: CursorAnimation::default(),
             osc52: Osc52Policy::default(),
+            osc52_read: Osc52ReadPolicy::default(),
+            clipboard_write_limit_bytes: DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES,
+            click_to_move: ClickToMove::default(),
         }
     }
 }

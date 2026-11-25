@@ -13,7 +13,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.note_frame_user_wake();
         let started = self.frame_clock_start();
         self.do_user_event(event_loop, event);
-        self.acknowledge_tab_activations();
+        self.after_dispatch();
         self.note_frame_dispatch(frame_counters::DispatchKind::UserEvent, started);
         self.emit_frame_lines(None);
     }
@@ -33,7 +33,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.note_redraw_requested(win_id);
         }
         self.do_window_event(event_loop, win_id, event);
-        self.acknowledge_tab_activations();
+        self.after_dispatch();
         if let Some(started) = started {
             // the gate is on, the window's handler time is recorded.
             self.note_window_handler(win_id, started, counted);
@@ -63,6 +63,11 @@ impl ApplicationHandler<UserEvent> for App {
         // A picker page the palette left by another route gives back its original value first.
         self.settle_abandoned_pickers();
         self.do_about_to_wait(event_loop);
+        // OSC 52 reads run after the loop's own wait is armed, waking it no later than they need.
+        self.service_clipboard_reads(event_loop);
+        // Every turn's input, output and owner changes are in, so each window's cursor is
+        // decided once and written only when it changed.
+        self.sync_window_cursors();
         self.acknowledge_tab_activations();
         self.note_frame_dispatch(frame_counters::DispatchKind::AboutToWait, started);
     }

@@ -22,6 +22,7 @@ fn pane(id: u64, grid: &mut Grid, images: Vec<InlineImage>, revision: u64) -> Pa
         scrollbar_alpha: 0.0,
         inline_images: Arc::new(images),
         inline_media_revision: revision,
+        colors: None,
     }
 }
 

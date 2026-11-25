@@ -2,7 +2,7 @@
 
 [简体中文](Crate-Reference-zh-CN)
 
-This is the canonical map of the 24 Rust crates in the Cargo workspace. The root
+This is the canonical map of the 23 Rust crates in the Cargo workspace. The root
 `Cargo.toml` supplies their version, edition, Rust version, authors, license, and
 repository metadata. `sonicterm-app` is the default workspace member. The
 shipping binaries are `sonicterm-mac`, `sonicterm-windows`, and
@@ -39,7 +39,6 @@ flowchart BT
     engine["sonicterm-engine"]
     block["sonicterm-block-glyph"]
     gpu["sonicterm-gpu"]
-    core["sonicterm-app-core"]
     app["sonicterm-app"]
     platforms["mac · windows · linux"]
     mcp["sonicterm-mcp"]
@@ -65,8 +64,6 @@ flowchart BT
     gpu --> model
     gpu --> engine
     gpu --> text
-    core --> types
-    app --> core
     app --> vt
     app --> io
     app --> cfg
@@ -76,7 +73,6 @@ flowchart BT
     app --> resource
     app --> logging
     platforms --> app
-    platforms --> core
 ```
 
 The diagram shows the main architecture edges. Each entry below gives the exact
@@ -114,7 +110,6 @@ Compatibility traits need not drive production, and this is not an unsafe-call a
 | `sonicterm-engine` | `FontStack` shares `Rc<FontConfiguration>` and owns per-stack size/weight/metric state; the renderer retains the stack. | `FontStack`, `CellMetricsPx`, shaping and atlas-tile conversion; the direct text dependency carries CPU data, not another terminal state owner. |
 | `sonicterm-block-glyph` | Callers own returned CPU bitmap tiles; block geometry uses transient raster state, not a shared renderer or font-face owner. | `BlockKey`, `SizedBlockKey`, `block_sprite_with_cell_metrics`, and `glue::BlockRasterTile`; no first-party dependency, with preserved WezTerm attribution. |
 | `sonicterm-gpu` | `GpuRenderer` owns per-window surfaces, retained frame, pipelines, atlases, caches, software frame, and font stacks. `GpuSharedContext` shares wgpu-refcounted device/queue handles, not a second device. | `GpuRenderer::new`, `new_with_shared_context`, `render`, `render_releasing`, `render_with_outcome`, `try_resize`, `retained_amounts`, and `live_renderer_count`; UI/grid types cross render-model. The retained report describes this instance, while the live count tracks lifecycle. CPU success is observable; wgpu success here is submit/present invocation. |
-| `sonicterm-app-core` | `AppStateMachine` owns backend-free transition/effect values, not live `WindowState`, parser locks, or PTYs. | `AppState`, `AppIntent`, `AppEffect`, `handle`, and effect ordering; production topology remains in App rather than being inferred from this model. |
 | `sonicterm-app` | `App` owns live `WindowState` objects, warm renderers, routing, and resource coordination. Each window owns tabs/panes; each pane owns parser/PTY/image state. | `App`, `WindowState`, `PaneState`, `run_action_for_window`, and platform `Shell` wrappers; redraw collects visible parser guards with `try_lock` and moves them into a frame source that is held only through assembly; the source and its guards drop before presentation, and a presented frame's receipts are acknowledged at the next collection. Native workers do not resolve UI windows. |
 | `sonicterm-mac` | Binary startup retains logging/session guards, installs AppKit hooks, and hands event-loop ownership to `MacShell`. | `src/main.rs` and menu/open-document/drag modules; AppKit calls remain on the main thread, terminal behavior stays in shared app/IO crates. |
 | `sonicterm-windows` | Binary startup retains logging/session guards, installs Win32 menu/backdrop/OLE hooks, and runs `WindowsShell`. | `src/main.rs`, CLI and native GUI modules, and WiX assets; PTY/ConPTY process ownership remains in `sonicterm-io`. |
@@ -126,7 +121,8 @@ Compatibility traits need not drive production, and this is not an unsafe-call a
 ### `sonicterm-types`
 
 **Role:** dependency-light contracts shared across the workspace: cells,
-geometry, colors, actions, modifier keys, glyph/window/hyperlink identifiers,
+geometry, colors (including the color overrides a pane's program sets), actions, modifier
+keys, glyph/window/hyperlink identifiers,
 shell quoting, paste encoding, resource types, and backend traits.
 
 **First-party dependencies:** none.
@@ -266,8 +262,8 @@ bar was last laid out with (`tab_width_limits_of`): config sets the process-wide
 limits at startup and on reload, and each measurement pass records them on the
 bar. Crowding and the overflow threshold use only the font/scale-derived readable
 width. While a tab
-is pressed or dragged, or the pointer rests on the bar, a changed title, badge
-or privilege marker is measured but laid out only once no tab is pressed or
+is pressed or dragged, or the pointer rests on the bar, a changed title, badge,
+privilege marker or program-status marker is measured but laid out only once no tab is pressed or
 dragged and the pointer leaves the bar; a font, scale or width-limit change
 lays the bar out at once. Whether the pointer rests on the bar comes from the
 window's own pointer, which the dispatcher records on every move and leave
@@ -459,16 +455,6 @@ its `core_assemble_*` helpers borrow geometry and scratch and emit in the existi
 The test-only `core_source.rs` corpus includes every extracted renderer phase so source guards
 and their mutation controls still cover device-gate reachability.
 
-### `sonicterm-app-core`
-
-**Role:** backend-free `AppIntent`, `AppEffect`, `AppState`, reducer, stable
-effect ordering, and state machine. Live window/tab/pane topology remains in
-`sonicterm-app`.
-
-**First-party dependencies:** `sonicterm-types`.
-
-**Read:** `src/{app_state,intent,effect,reducer,state_machine}.rs`.
-
 ### `sonicterm-app`
 
 `app/user_event.rs` holds typed events and `app/application_handler.rs` forwards native callbacks;
@@ -488,7 +474,7 @@ A live transfer preserves its reservation. `finish_session` retires every pane
 before shutdown and caches whether teardown settled; `ShellRunResult` keeps that
 answer separate from the original application result.
 
-**First-party dependencies:** `sonicterm-app-core`, `sonicterm-cfg`,
+**First-party dependencies:** `sonicterm-cfg`,
 `sonicterm-gpu`, `sonicterm-grid`, `sonicterm-io`, `sonicterm-logging`,
 `sonicterm-render-model`, `sonicterm-resource`, `sonicterm-text`,
 `sonicterm-types`, `sonicterm-ui`, `sonicterm-vt`.
@@ -503,7 +489,7 @@ tokio). `accesskit_winit` resolves to the vendored winit through the workspace p
 `objc2-quartz-core`, already in the lockfile through other crates, for the
 per-window `NSView.displayLink` and its tick target (`src/app/display_link.rs`).
 
-**Read:** `src/app/{mod,window_state,window_registry,session,input_dispatch,effects}.rs`,
+**Read:** `src/app/{mod,window_state,window_registry,session,input_dispatch}.rs`,
 `src/app/{event_loop,window_event,window_keyboard,window_pointer,spawn_pane,reaper_driver,keymap_dispatch,path_target,tear_out}.rs`,
 `src/shell.rs`.
 
@@ -515,7 +501,7 @@ per-window `NSView.displayLink` and its tick target (`src/app/display_link.rs`).
 open-URL events with executable classification, NSPasteboard tab handoff, NSWindow
 setup, and bundle entry point.
 
-**First-party dependencies:** `sonicterm-app`, `sonicterm-app-core`,
+**First-party dependencies:** `sonicterm-app`,
 `sonicterm-cfg`, `sonicterm-logging`, `sonicterm-types`.
 
 **Read:** `src/{main,menubar,open_documents,open_urls,executable_classify,os_drag_mac,tab_drag_os}.rs`.
@@ -527,7 +513,7 @@ Native details belong on [Platform Integration](Platform-Integration).
 backdrop, OLE tab drag/drop, software presentation support, Win32 resources, and
 WiX metadata. ConPTY remains behind `sonicterm-io`.
 
-**First-party dependencies:** `sonicterm-app`, `sonicterm-app-core`,
+**First-party dependencies:** `sonicterm-app`,
 `sonicterm-cfg`, `sonicterm-logging`, `sonicterm-types`.
 
 **Read:** `src/{main,cli,startup,backdrop,menubar,os_drag_win,software_presenter}.rs`,
@@ -539,7 +525,7 @@ WiX metadata. ConPTY remains behind `sonicterm-io`.
 normalization, diagnostics, packaged-font preflight, and desktop/AppStream
 metadata.
 
-**First-party dependencies:** `sonicterm-app`, `sonicterm-app-core`,
+**First-party dependencies:** `sonicterm-app`,
 `sonicterm-cfg`, `sonicterm-engine`, `sonicterm-logging`.
 
 **Read:** `src/main.rs`, `resources/`.

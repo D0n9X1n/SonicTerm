@@ -20,6 +20,7 @@ use sonicterm_ui::{
 use sonicterm_vt::vt::MouseTracking;
 use std::time::Instant;
 
+use super::prompt_click::PromptPress;
 use super::{selection_gesture, WindowState, MULTI_CLICK_MS};
 
 /// Press-time identity of a local selection gesture.
@@ -44,6 +45,22 @@ pub(crate) struct SelectionAnchor {
 }
 
 impl SelectionAnchor {
+    /// The pane that received the press.
+    pub(super) fn pane_id(self) -> u64 {
+        self.pane_id
+    }
+
+    /// The pressed cell's absolute row and column.
+    pub(super) fn cell(self) -> (u64, u16) {
+        self.cell
+    }
+
+    /// Whether the pressed cell is still at its press address in `grid`: the same screen, epoch,
+    /// size and eviction count, with its row still retained.
+    pub(super) fn unmoved(self, grid: &Grid) -> bool {
+        self.rebase(grid) == Some(self)
+    }
+
     /// Re-measure the anchored cell against `grid`, or `None` when its content is gone.
     ///
     /// A changed screen, screen epoch, or size generation, a backwards eviction
@@ -181,7 +198,8 @@ impl WindowState {
             3 => SelectMode::Line,
             _ => SelectMode::Cell,
         };
-        let Some((anchor, selection)) = self.capture_local_press(pane_id, viewport_cell, mode)
+        let Some((anchor, selection, prompt)) =
+            self.capture_local_press(pane_id, viewport_cell, mode)
         else {
             // When: `capture_local_press` found no coherent in-grid press; bind no gesture.
             self.cancel_local_selection();
@@ -195,8 +213,10 @@ impl WindowState {
         self.pointer_gesture = Some(PointerGesture {
             owner: PointerGestureOwner::Local,
             press_pane: pane_id,
-            last_cell: PointerCell { pane_id, row, col },
+            // A local gesture reports nothing, so its pixel is never read.
+            last_cell: PointerCell { pane_id, row, col, pixel: (0, 0) },
             anchor: Some(anchor),
+            prompt,
         });
         if let Some(change) = focus_change {
             self.finish_pointer_pane_focus_change(change);
@@ -204,7 +224,8 @@ impl WindowState {
         true
     }
 
-    /// Anchor and initial selection for a press in `pane_id`, from one snapshot.
+    /// Anchor, initial selection and, for a single click, the prompt under the press in
+    /// `pane_id`, all from one snapshot.
     ///
     /// `None` when `pane_id` is not in the active tab, its parser is contended,
     /// or the pressed cell is outside its held grid.
@@ -213,7 +234,7 @@ impl WindowState {
         pane_id: u64,
         viewport_cell: (u16, u16),
         mode: SelectMode,
-    ) -> Option<(SelectionAnchor, Selection)> {
+    ) -> Option<(SelectionAnchor, Selection, Option<PromptPress>)> {
         let tab = (self.tabs.active()?.id, self.tabs.activation());
         let tab_state = self.tab_states.get(self.tabs.active_index())?;
         if !tab_state.tree.contains_pane(pane_id)
@@ -226,7 +247,12 @@ impl WindowState {
         let parser = pane.parser.try_lock()?;
         let grid = parser.grid();
         let view_top = pane.resolved_view_top(grid);
-        capture_press(grid, pane_id, tab, view_top, viewport_cell, mode)
+        let (anchor, selection) = capture_press(grid, pane_id, tab, view_top, viewport_cell, mode)?;
+        // Only a single click can become a prompt click; word and line clicks select.
+        let prompt = (mode == SelectMode::Cell)
+            .then(|| PromptPress::latch(&parser, view_top, self.modifiers))
+            .flatten();
+        Some((anchor, selection, prompt))
     }
 
     /// Extend the local selection toward a pointer at physical pixels `pointer_x`, `pointer_y`.
@@ -302,6 +328,12 @@ impl WindowState {
         let cursor = (pane.resolved_view_top(grid) + u64::from(row), col);
         let replacement = drag_selection(grid, rebased, cursor, self.select_mode);
         drop(parser);
+        // A pointer that left the pressed cell makes the gesture a drag, never a prompt click.
+        if cursor != rebased.cell {
+            if let Some(gesture) = self.pointer_gesture.as_mut() {
+                gesture.prompt = None;
+            }
+        }
         let replaces = match (self.select_mode, self.selection.as_ref()) {
             (_, None) => false,
             (SelectMode::Cell, Some(current)) => !current.anchored,
@@ -327,7 +359,7 @@ impl WindowState {
     }
 
     /// Whether the press pane is still a leaf of its press tab, with no tab switch since.
-    fn anchor_topology_holds(&self, anchor: SelectionAnchor) -> bool {
+    pub(super) fn anchor_topology_holds(&self, anchor: SelectionAnchor) -> bool {
         let active_tab = self.tabs.active().map(|tab| tab.id);
         let tab = self.tab_states.get(self.tabs.active_index());
         active_tab == Some(anchor.tab_id)
@@ -367,6 +399,8 @@ pub(super) struct PointerCell {
     pub(super) pane_id: u64,
     pub(super) row: u16,
     pub(super) col: u16,
+    /// The pointer's physical pixel from the pane's cell-area origin, which 1016 reports.
+    pub(super) pixel: (i32, i32),
 }
 
 /// Owner chosen once when a left-button grid gesture begins.
@@ -374,8 +408,9 @@ pub(super) struct PointerCell {
 pub(super) enum PointerGestureOwner {
     /// SonicTerm selection owns the gesture until release.
     Local,
-    /// The terminal owns the gesture with its press-time protocol profile.
-    Terminal { tracking: MouseTracking, sgr: bool },
+    /// The terminal owns the gesture with its press-time protocol profile: tracking, format and
+    /// whether the alternate screen was showing, all from one read of the pane's published modes.
+    Terminal { tracking: MouseTracking, format: sonicterm_vt::vt::MouseFormat, is_alt: bool },
 }
 
 /// Left-button gesture retained independently by each terminal window.
@@ -387,6 +422,8 @@ pub(crate) struct PointerGesture {
     /// Press anchor of a local selection gesture, bound from its press snapshot; `None` before
     /// that and for terminal-owned gestures.
     pub(super) anchor: Option<selection_gesture::SelectionAnchor>,
+    /// The prompt a local single click landed on, from the anchor's snapshot; cleared by a drag.
+    pub(super) prompt: Option<PromptPress>,
 }
 
 impl WindowState {

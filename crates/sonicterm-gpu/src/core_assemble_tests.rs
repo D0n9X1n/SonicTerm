@@ -267,3 +267,36 @@ fn run_flush_clones_no_cells() {
     assert!(!build.contains("cell_by_col"), "build_shape_run builds no column-to-cell table");
     assert!(!build.contains("c.clone()"), "build_shape_run clones no cell");
 }
+
+/// Production order of the selection colors: the highlight is pushed, then selected glyphs take
+/// the program selection foreground, then copy mode's selected range takes it too, then the
+/// copy-mode and block cursors recolor their glyphs, so cursor text wins over the selection
+/// foreground on the cursor cell. Both selection recolors read only the active pane's glyph rows and
+/// move every row span past the parts they cut.
+/// The active pane's colors come from a checked lookup, and the palette and search fields never
+/// read a pane's program colors, so an OSC cannot recolor them (their pixels are pinned in
+/// `wezterm_pipeline_pane_colors_tests`). Line endings are normalized before scanning.
+#[test]
+fn selection_colors_apply_before_cursor_text_and_never_reach_ui_fields() {
+    let selection = include_str!("core_assemble_selection.rs").replace("\r\n", "\n");
+    let highlight = selection.find("push_selection_quads(").expect("the highlight");
+    let selected = selection.find("recolor_selected_glyphs(").expect("the selected glyphs");
+    let copy_selected = selection.find("recolor_copy_mode_glyphs(").expect("copy mode's range");
+    let first_cursor = selection.find("recolor_cursor_glyphs_in(").expect("a cursor recolor");
+    assert!(highlight < selected && selected < copy_selected && copy_selected < first_cursor);
+    // Both selection recolors read the active pane's rows and move every row span by their cuts.
+    assert_eq!(
+        selection.matches("&mut *row_spans,\n").count(),
+        2,
+        "both selection recolors take every row span"
+    );
+    assert_eq!(selection.matches("active_rows.clone(),").count(), 2, "and the active rows");
+    assert!(selection.contains("pane_views.get(plan.active_index)"));
+    assert!(!selection.contains("pane_views[plan.active_index]"));
+    for field_source in
+        [include_str!("core_assemble_palette.rs"), include_str!("core_assemble_search.rs")]
+    {
+        assert!(!field_source.contains("PaneColors"));
+        assert!(!field_source.contains(".overrides"));
+    }
+}

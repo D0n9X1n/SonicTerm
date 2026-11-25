@@ -6,11 +6,11 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
-use sonicterm_cfg::config::{McpConfig, McpControl};
+use sonicterm_cfg::config::{McpConfig, McpControl, McpRead};
 use sonicterm_resource::CommittedReservation;
 use sonicterm_types::{OwnerKind, ResourceAmount, ResourceClass};
 
-use super::{LoopCall, LoopReply, LoopRequest, McpShared, PaneEntry, PaneMetadata};
+use super::{LoopCall, LoopReply, LoopRequest, McpShared, PaneEntry, PaneMetadata, TabTitle};
 use crate::app::owners::{tracking_only_owner_limits, OwnerGuard};
 use crate::app::{App, CopyModeState, WindowId};
 
@@ -86,6 +86,10 @@ impl App {
                 // scope, as a `control` change does.
                 server.shared.set_agent_scope(wanted.isolation, wanted.create_anchor);
             }
+            if previous.program_status_text != wanted.program_status_text {
+                // A changed free-text opt-in revokes calls admitted under the old one.
+                server.shared.set_program_status_text(wanted.program_status_text);
+            }
             server.config = wanted;
             tracing::info!(
                 target: "mcp",
@@ -100,6 +104,7 @@ impl App {
         let shared = McpShared::new(wanted.control, self.event_loop_proxy.clone());
         shared.set_read(wanted.read());
         shared.set_agent_scope(wanted.isolation, wanted.create_anchor);
+        shared.set_program_status_text(wanted.program_status_text);
         shared.set_connection_limit(wanted.max_connections());
         match super::start_listener(&shared) {
             Ok((endpoint, guard)) => {
@@ -244,6 +249,20 @@ impl App {
             LoopCall::ListPanes => {
                 let mut entries = self.mcp_pane_entries();
                 entries.retain(readable);
+                for entry in &mut entries {
+                    // A label is program text from its source pane, so it is listed only to a caller
+                    // that may read that pane; a gone source is readable only under `read = "any"`.
+                    if let Some(TabTitle::Label { source, .. }) = entry.tab_title.as_deref() {
+                        let source_readable = match source {
+                            Some(creator) => access.reads(shared.read(), *creator),
+                            None => shared.read() == McpRead::Any,
+                        };
+                        if !source_readable {
+                            // The label's `source` pane is not readable, so it is withheld.
+                            entry.tab_title = Some(Box::new(TabTitle::Unreadable));
+                        }
+                    }
+                }
                 LoopReply::Panes(entries)
             }
             LoopCall::Notice { text, .. } => {
@@ -365,6 +384,18 @@ impl App {
         pane_id: u64,
     ) -> Option<PaneEntry> {
         let pane = window.panes.get(&pane_id)?;
+        // The label comes from the tab bar, not the parser, so it is what the tab shows. Its source
+        // is the pane it was last built from, else the tab's active pane, which a new tab starts on.
+        let tab_title = position.and_then(|(_, tab_index)| {
+            let tab = window.tabs.tabs().get(tab_index)?;
+            let source_pane = tab
+                .label_source_pane
+                .or_else(|| window.tab_states.get(tab_index).map(|state| state.active_pane));
+            let source = source_pane
+                .and_then(|source_pane| window.panes.get(&source_pane))
+                .map(|source| source.creator);
+            Some(Box::new(TabTitle::Label { text: tab.title.clone(), source }))
+        });
         let metadata = match position {
             Some((window_index, tab_index)) => {
                 let tab_state = window.tab_states.get(tab_index)?;
@@ -383,6 +414,7 @@ impl App {
         Some(PaneEntry {
             pane_id,
             metadata,
+            tab_title,
             creator: pane.creator,
             parser: Arc::clone(&pane.parser),
             output_generation: Arc::clone(&pane.output_generation),

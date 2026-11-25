@@ -25,7 +25,8 @@ Release tag 会增加 `v` 前缀。`scripts/prepare-release-assets.py check-vers
 不能匹配每个 workspace package 的 tag。第一方打包可执行脚本都直接位于 `scripts/`。
 
 每种安装包都将固定源码并静态链接的 winit 依赖的 `crates/sonicterm-winit/LICENSE`
-以 `LICENSE-winit-Apache-2.0` 文件名附带。
+以 `LICENSE-winit-Apache-2.0` 文件名附带，并将编译进解析器的 X11 颜色名表的 X.Org 声明
+`crates/sonicterm-vt/LICENSE-X11-rgb` 以 `LICENSE-X11-rgb` 文件名附带。
 
 ## 应用图标
 
@@ -149,7 +150,7 @@ Homebrew。
 DMG 会校验失败。桥接程序在原生 bundle 步骤之后、bundle 封签之前单独做 ad-hoc 签名：Intel 链接器产出的
 桥接程序未签名，而封签会拒绝未签名的嵌套可执行文件。
 
-原生依赖收集完成后，脚本将 `LICENSE-winit-Apache-2.0` 加入
+原生依赖收集完成后，脚本将 `LICENSE-winit-Apache-2.0` 和 `LICENSE-X11-rgb` 加入
 `Contents/Resources/licenses`。所有资源组装完成后，再施加并校验 ad-hoc 签名。
 它不使用 Apple Developer ID，也不做 notarize。下载的安装包可能显示标准的
 “无法验证开发者”提示；首次启动可使用 Finder
@@ -268,6 +269,7 @@ SonicTerm/
 ├── sonicterm-windows.exe
 ├── sonicterm-mcp.exe
 ├── LICENSE-winit-Apache-2.0
+├── LICENSE-X11-rgb
 ├── conpty/
 │   ├── conpty.dll
 │   ├── OpenConsole.exe
@@ -355,6 +357,7 @@ SonicTerm-<tag>-linux-x86_64/
 ├── LICENSE
 ├── LICENSE-SymbolsNerdFont-MIT
 ├── LICENSE-winit-Apache-2.0
+├── LICENSE-X11-rgb
 └── README.md
 ```
 
@@ -370,7 +373,7 @@ Debian package 为 `SonicTerm-<tag>-linux-x86_64.deb`，安装到：
 /usr/share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
 /usr/share/icons/hicolor/{16,22,24,32,48,64,128,256,512}x…/apps/com.d0n9x1n.SonicTerm.png
 /usr/share/icons/hicolor/scalable/apps/com.d0n9x1n.SonicTerm.svg
-/usr/share/doc/sonicterm/{copyright,LICENSE-SymbolsNerdFont-MIT,LICENSE-winit-Apache-2.0,README.md}
+/usr/share/doc/sonicterm/{copyright,LICENSE-SymbolsNerdFont-MIT,LICENSE-winit-Apache-2.0,LICENSE-X11-rgb,README.md}
 ```
 
 Builder 会检查 x86_64 ELF，并拒绝高于 2.35 的 GLIBC requirement。`dpkg-shlibdeps`

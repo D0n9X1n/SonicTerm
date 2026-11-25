@@ -98,18 +98,14 @@ fn press(app: &mut App, key: NamedKey) {
 #[test]
 fn startup_and_reload_never_call_the_backend() {
     let calls = Arc::new(Mutex::new(Calls::default()));
-    let mut app = crate::shell::LinuxShell::new(
-        sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default()),
-        Theme::default(),
-        Config::default(),
-        Keymap::default(),
-    )
-    .with_default_handlers(Box::new(RecordingBackend {
-        calls: Arc::clone(&calls),
-        plan: Ok(two_item_plan()),
-        immediate: Vec::new(),
-    }))
-    .into_app_for_test();
+    let mut app =
+        crate::shell::LinuxShell::new(Theme::default(), Config::default(), Keymap::default())
+            .with_default_handlers(Box::new(RecordingBackend {
+                calls: Arc::clone(&calls),
+                plan: Ok(two_item_plan()),
+                immediate: Vec::new(),
+            }))
+            .into_app_for_test();
     app.__test_seed_tab("main");
     app.apply_new_config(Config::default());
     let scratch = tempfile::tempdir().unwrap();

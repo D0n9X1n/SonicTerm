@@ -107,6 +107,19 @@ impl CommandPalette {
         cancel: impl Into<String>,
         items: Vec<String>,
     ) {
+        self.start_confirm_with_choices(title, apply, cancel, Vec::new(), items);
+    }
+
+    /// Open a confirmation page whose `choices` follow Cancel as extra selectable answers, before
+    /// the items; Cancel is still highlighted first.
+    pub fn start_confirm_with_choices(
+        &mut self,
+        title: impl Into<String>,
+        apply: impl Into<String>,
+        cancel: impl Into<String>,
+        choices: Vec<String>,
+        items: Vec<String>,
+    ) {
         self.session = self.session.wrapping_add(1);
         self.open = true;
         self.mode = CommandPaletteMode::Confirm;
@@ -117,6 +130,7 @@ impl CommandPalette {
         self.confirm_title = title.into();
         self.confirm_rows =
             vec![ConfirmRow::Apply(apply.into()), ConfirmRow::Cancel(cancel.into())];
+        self.confirm_rows.extend(choices.into_iter().map(ConfirmRow::Choice));
         self.confirm_rows.extend(items.into_iter().map(ConfirmRow::Item));
         self.items = (0..self.confirm_rows.len()).collect();
         self.selected = CONFIRM_CANCEL_ROW;
@@ -403,8 +417,21 @@ impl CommandPalette {
     }
 
     /// Alternate between Apply and Cancel; with two choices, up and down are the same step.
-    pub(super) fn step_confirm_selection(&mut self) {
-        self.selected = (self.selected.min(CONFIRM_ACTION_ROWS - 1) + 1) % CONFIRM_ACTION_ROWS;
+    pub(super) fn step_confirm_selection(&mut self, down: bool) {
+        // Apply, Cancel and the choices lead the page; the items after them are never selected.
+        let actions = self
+            .confirm_rows
+            .iter()
+            .take_while(|row| !matches!(row, ConfirmRow::Item(_)))
+            .count()
+            .max(1);
+        let current = self.selected.min(actions - 1);
+        self.selected = if down {
+            (current + 1) % actions
+        } else {
+            // When: down is false, the highlight steps back, wrapping to the last action row.
+            (current + actions - 1) % actions
+        };
         self.scroll_offset = 0;
     }
 
@@ -421,7 +448,7 @@ impl CommandPalette {
         let selectable = self.mode == CommandPaletteMode::Confirm
             && matches!(
                 self.confirm_rows.get(index),
-                Some(ConfirmRow::Apply(_) | ConfirmRow::Cancel(_))
+                Some(ConfirmRow::Apply(_) | ConfirmRow::Cancel(_) | ConfirmRow::Choice(_))
             );
         if selectable {
             self.selected = index;
@@ -433,6 +460,19 @@ impl CommandPalette {
     pub fn confirm_applies(&self) -> bool {
         self.mode == CommandPaletteMode::Confirm
             && matches!(self.confirm_rows.get(self.selected), Some(ConfirmRow::Apply(_)))
+    }
+
+    /// The position among the choices of the highlighted choice row; `None` when Apply, Cancel or
+    /// no confirmation page is highlighted.
+    pub fn confirm_choice(&self) -> Option<usize> {
+        if self.mode != CommandPaletteMode::Confirm {
+            // When: `mode` is not Confirm, no page answers.
+            return None;
+        }
+        let first_choice =
+            self.confirm_rows.iter().position(|row| matches!(row, ConfirmRow::Choice(_)))?;
+        matches!(self.confirm_rows.get(self.selected), Some(ConfirmRow::Choice(_)))
+            .then(|| self.selected - first_choice)
     }
 }
 

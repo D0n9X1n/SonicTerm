@@ -96,7 +96,7 @@ Windows 策略默认为严格模式：混合测试、doctest、workspace 脚本�
 步骤时运行退出码为 0，但只要发生清理，总 verdict 仍为 `CLEANED_NOT_NATURAL`。
 混合冷构建步骤仍可能失败，不使用进程名豁免改变这一边界。
 
-Windows 上，`pty-close-baseline`、`windows-warp-allocator`、`perf-scenarios-tests`、
+Windows 上，`pty-close-baseline`、`windows-warp-allocator`、`windows-conpty-forms`、`perf-scenarios-tests`、
 `perf-scenarios-counters-tests`、`perf-scenarios-frame-texture-tests` 和
 `perf-scenarios-echo-trace-tests` 先在 `--` 前插入 `--no-run`（没有 `--` 时追加到末尾），
 编译原命令选中的测试，保留原有 feature 参数。Harness-API 测试步骤仍走单独的目标级编译路径，
@@ -211,12 +211,20 @@ DX12 WARP adapter 和 allocator report。生产策略 reserved bytes 必须低�
 `main` CI 运行。只有 Windows CI 能可靠编译并运行
 `#![cfg(target_os = "windows")]` 测试；在 macOS 上，这类文件可能编译成零个测试。
 
+`windows-conpty-forms` 步骤运行 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN) 中描述的真实
+ConPTY 协议夹具。它的两个测试二进制都是 `#[ignore]`，因此 `workspace-crates` 在每个主机上
+都会编译它们但不运行；本步骤用 `--ignored` 运行它们。除非
+`SONICTERM_CONPTY_FIXTURE_RUNTIME_DIR` 指向该命令已放置好的目录，否则每个二进制都用
+`python scripts/setup-windows-conpty.py` 放置固定版本的运行时，这需要网络访问。本地运行时，先用
+`python scripts/setup-windows-conpty.py --destination <dir>` 放置一次，设置
+`SONICTERM_CONPTY_FIXTURE_RUNTIME_DIR=<dir>`，再运行该步骤的命令。
+
 可选的 `windows-target` 步骤是 macOS 上的 pre-push 辅助检查，绝不是 CI gate。
 `scripts/check-windows-target.sh` 在某个 workspace 成员不属于它的两个列表中任何一个时失败，
-随后对不需要 Windows C 工具链的 14 个成员运行
+随后对不需要 Windows C 工具链的 13 个成员运行
 `cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings`：
 `sonicterm-types`、`-grid`、`-vt`、`-cfg`、`-logging`、`-mcp`、`-resource`、`-text`、`-ui`、
-`-app-core`、`-io`（包括其 ConPTY 代码与 Windows-gated 测试）、`-render-model`、
+`-io`（包括其 ConPTY 代码与 Windows-gated 测试）、`-render-model`、
 `-block-glyph` 与 `-font-config`。检查范围是默认 feature、全部 target，以及该 target 专属的
 dev 与 build 依赖闭包，并使用独立的 target 目录。它还对固定版本的 winit 以 `serde` 运行
 `cargo check --locked`，使其 Windows 键盘测试得到编译；缺少该 target 时，它会给出

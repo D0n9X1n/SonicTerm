@@ -599,3 +599,29 @@ fn tab_bar_hash_ignores_the_running_seconds_of_an_unbadged_tab() {
     assert_eq!(early, tab_bar_hash_with_limits(&tabs, at(4), 240.0, 320.0));
     assert_ne!(early, tab_bar_hash_with_limits(&tabs, at(6), 240.0, 320.0), "inactive badge");
 }
+
+/// A program-status marker is drawn in the tab text, so a status-only change is part of the tab
+/// hash: `[10%]` to `[20%]` measures the same width, and while widths are held a marker change
+/// keeps the laid-out geometry, yet each repaints the retained strip.
+#[test]
+fn a_status_only_change_invalidates_the_retained_tab_strip() {
+    use sonicterm_render_model::boundary::ui::tabs::{StatusMarker, Tab};
+    let now = Instant::now();
+    let mut tabs = TabBar::new();
+    tabs.push(Tab::new("zsh"));
+    tabs.push(Tab::new("vim"));
+    assert!(tabs.set_status_marker(1, Some(StatusMarker::Working(Some(10)))));
+    tabs.refresh_content_widths(now, false, 1, false, ten_px_per_char);
+    let (ten, ten_width) = (tab_bar_hash(&tabs, now), tabs.tabs()[1].content_width_px());
+
+    assert!(tabs.set_status_marker(1, Some(StatusMarker::Working(Some(20)))));
+    tabs.refresh_content_widths(now, false, 1, false, ten_px_per_char);
+    assert_eq!(tabs.tabs()[1].content_width_px(), ten_width, "same measured width");
+    let twenty = tab_bar_hash(&tabs, now);
+    assert_ne!(twenty, ten, "a progress change must repaint the strip");
+
+    assert!(tabs.set_status_marker(1, Some(StatusMarker::Blocked)));
+    tabs.refresh_content_widths(now, false, 1, true, ten_px_per_char);
+    assert_eq!(tabs.tabs()[1].content_width_px(), ten_width, "held width");
+    assert_ne!(tab_bar_hash(&tabs, now), twenty, "a held marker change must repaint the strip");
+}

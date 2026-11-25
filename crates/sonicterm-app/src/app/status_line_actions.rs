@@ -98,8 +98,23 @@ impl App {
             ClipWriteOutcome::Written => ClipOutcome::Written(bytes as u64),
             ClipWriteOutcome::Failed => ClipOutcome::Failed,
             ClipWriteOutcome::Denied => ClipOutcome::Denied,
+            ClipWriteOutcome::TooLarge => ClipOutcome::TooLarge,
         };
         self.status_line.clip_write.insert(pane_id, outcome);
+    }
+
+    /// Show a write's `outcome` from `pane_id` that settled outside a VT batch (a consent page's
+    /// answer), counting no new request: the request was counted when its batch arrived.
+    pub(in crate::app) fn show_clip_outcome(
+        &mut self,
+        pane_id: u64,
+        outcome: super::super::event_loop::ClipWriteOutcome,
+        bytes: usize,
+        now: Instant,
+    ) {
+        self.note_clip_write(pane_id, bytes, outcome);
+        let settled = super::super::spawn_pane::ClipAttempts::default();
+        self.note_clip_attempts(pane_id, settled, now);
     }
 
     /// Record one VT batch's OSC 52 requests from `pane_id`: the display shows its last request and
@@ -119,6 +134,7 @@ impl App {
             }
             Some(Osc52Refusal::TooLarge) => Some(ClipOutcome::TooLarge),
             Some(Osc52Refusal::Invalid) => Some(ClipOutcome::Invalid),
+            Some(Osc52Refusal::Busy) => Some(ClipOutcome::Busy),
         };
         let Some(outcome) = outcome else {
             // When: outcome is None, the batch's accepted write left no result, so nothing is shown.

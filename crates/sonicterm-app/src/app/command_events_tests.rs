@@ -55,7 +55,7 @@ fn command_event_queue_retains_only_newest_entries() {
 #[test]
 fn command_event_queue_holds_no_more_memory_than_its_class_records() {
     /// The per-pane figure the coverage table records for `CommandEvents`.
-    const CLAIMED_PER_PANE_BYTES: usize = 40 * 1024;
+    const CLAIMED_PER_PANE_BYTES: usize = 41 * 1024;
 
     // A burst from one 64 KiB parse batch of prompt markers.
     const BURST: usize = 8 * 1024;
@@ -70,9 +70,14 @@ fn command_event_queue_holds_no_more_memory_than_its_class_records() {
         }),
     );
 
-    // `PaneCommandEvent` holds no pointer to further heap, so the retained
-    // bytes are exactly the allocation the capacity describes.
-    let retained = queue.capacity() * std::mem::size_of::<PaneCommandEvent>();
+    // `PaneCommandEvent` holds no pointer to further heap, so the records'
+    // bytes are exactly the allocation the capacity describes; the queue's one
+    // command text is counted at its largest.
+    let text =
+        sonicterm_grid::grid::CmdlineText::new("x".repeat(sonicterm_grid::grid::MAX_CMDLINE_BYTES));
+    queue.cmdline = text.map(|text| (text, None));
+    let slot = queue.cmdline.as_ref().map_or(0, |(text, _)| text.capacity());
+    let retained = queue.capacity() * std::mem::size_of::<PaneCommandEvent>() + slot;
 
     assert_eq!(queue.len(), MAX_PANE_COMMAND_EVENTS, "precondition: the cap still bounds length");
     assert!(
@@ -226,14 +231,40 @@ fn long_command_notifications_follow_only_their_own_setting() {
         config.notifications.long_command = true;
         config.notifications.osc9 = osc9;
         assert_eq!(
-            long_command_message(&config, long, Some(0)).as_deref(),
+            long_command_message(&config, long, Some(0), None).as_deref(),
             Some("Command completed successfully after 120s"),
             "{osc9:?}"
         );
-        assert_eq!(long_command_message(&config, Some(Duration::from_secs(1)), Some(0)), None);
+        assert_eq!(
+            long_command_message(&config, Some(Duration::from_secs(1)), Some(0), None),
+            None
+        );
         config.notifications.long_command = false;
-        assert_eq!(long_command_message(&config, long, Some(1)), None);
+        assert_eq!(long_command_message(&config, long, Some(1), None), None);
     }
+}
+
+/// A long command's text is shown only with `long_command_cmdline` on (default off); shown, its
+/// control and format characters become spaces and it is cut to 120 characters.
+#[test]
+fn cmdline_not_shown_unless_opted_in() {
+    let long = Some(Duration::from_secs(20));
+    let text = sonicterm_grid::grid::CmdlineText::new("make\ttest\u{202e}x".to_owned());
+    let mut config = Config::default();
+    config.notifications.long_command = true;
+    assert!(!config.notifications.long_command_cmdline, "the default keeps command text private");
+    assert_eq!(
+        long_command_message(&config, long, Some(0), text.as_ref()).as_deref(),
+        Some("Command completed successfully after 20s")
+    );
+    config.notifications.long_command_cmdline = true;
+    assert_eq!(
+        long_command_message(&config, long, Some(2), text.as_ref()).as_deref(),
+        Some("Command failed with exit code 2: make test x")
+    );
+    let wide = sonicterm_grid::grid::CmdlineText::new("y".repeat(300));
+    let message = long_command_message(&config, long, None, wide.as_ref()).unwrap();
+    assert_eq!(message, format!("Command completed after 20s: {}", "y".repeat(120)));
 }
 
 /// Native ids carry the pane and a per-process nonce, so two panes, or two SonicTerm processes,

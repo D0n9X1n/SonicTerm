@@ -1,0 +1,969 @@
+use super::*;
+use sonicterm_cfg::config::Osc52Policy;
+use sonicterm_grid::grid::Grid;
+use sonicterm_vt::vt::{CaptureStagingPool, Parser, VtEvent};
+
+/// A parser, one pane's transaction and its private staging: wire bytes go through the real
+/// collector, so each test exercises framing, metadata and the transaction together.
+struct Rig {
+    parser: Parser,
+    tx: KittyClipboardTx,
+    staging: Arc<ClipboardStaging>,
+}
+
+fn rig_with(budget_bytes: usize, limit_bytes: usize, policy: Osc52Policy) -> Rig {
+    let staging = ClipboardStaging::with_budget(budget_bytes, limit_bytes);
+    staging.set_write_policy(policy);
+    let mut tx = KittyClipboardTx::new(staging.clone(), Arc::default());
+    // Text only, so every platform answers these tests alike; the offer tests widen it.
+    tx.set_holds(text_only);
+    let parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, CaptureStagingPool::new());
+    Rig { parser, tx, staging }
+}
+
+fn rig() -> Rig {
+    rig_with(1 << 20, 1 << 16, Osc52Policy::Allow)
+}
+
+fn b64(text: &str) -> String {
+    base64::engine::general_purpose::STANDARD.encode(text)
+}
+
+impl Rig {
+    /// Feed one OSC 5522 body (between `ESC ] 5522;` and ST) and return every step it produced.
+    fn send(&mut self, body: &str) -> Vec<KittyStep> {
+        self.send_at(body, Instant::now())
+    }
+
+    /// [`Self::send`], with the packet arriving at `now`.
+    fn send_at(&mut self, body: &str, now: Instant) -> Vec<KittyStep> {
+        let events = self.parser.advance(format!("\x1b]5522;{body}\x1b\\").as_bytes());
+        let inbox = self.parser.kitty_clipboard_inbox().clone();
+        events
+            .into_iter()
+            .filter_map(|event| match event {
+                VtEvent::KittyClipboard { stream, request, bel } => {
+                    Some(self.tx.handle(&inbox, stream, request, bel, 0, now))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The one status reply `body` produced, as text.
+    fn reply(&mut self, body: &str) -> String {
+        match self.send(body).pop() {
+            Some(KittyStep::Reply(bytes)) => String::from_utf8(bytes).expect("ASCII reply"),
+            other => panic!("expected a reply to {body:?}, got {other:?}"),
+        }
+    }
+
+    /// The text of the write `body` committed.
+    fn posted(&mut self, body: &str) -> String {
+        match self.send(body).pop() {
+            Some(KittyStep::Post(job)) => job.text.clone(),
+            other => panic!("expected a posted write for {body:?}, got {other:?}"),
+        }
+    }
+
+    /// Feed a `wdata` chunk of `mime`, expecting no reply.
+    fn data(&mut self, mime: &str, payload: &str) {
+        let steps = self.send(&format!("type=wdata:mime={};{payload}", b64(mime)));
+        assert!(steps.iter().all(|step| matches!(step, KittyStep::Silent)), "{steps:?}");
+    }
+}
+
+fn status(status: &str, id: &str) -> String {
+    let id = if id.is_empty() { String::new() } else { format!(":id={id}") };
+    format!("\x1b]5522;type=write:status={status}{id}\x1b\\")
+}
+
+/// Contract: every write status echoes the sanitized id of the opening `write`, not of the packet
+/// that ended it.
+#[test]
+fn id_sanitized_and_opening_id_echoed() {
+    let mut rig = rig();
+    rig.send("type=write:id=a$1");
+    assert!(rig.tx.is_open());
+    let reply = rig.reply(&format!("type=wdata:id=other:mime={};!!!!", b64("text/plain")));
+    assert_eq!(reply, status("EINVAL", "a1"));
+    assert!(!rig.tx.is_open());
+}
+
+/// Contract: a second `write` silently replaces the open one, releasing what it staged.
+#[test]
+fn write_replaces_silently() {
+    let mut rig = rig();
+    rig.send("type=write:id=first");
+    rig.data("text/plain", &b64("old"));
+    assert!(rig.staging.reserved_bytes() > 0);
+    assert!(rig.send("type=write:id=second").iter().all(|step| matches!(step, KittyStep::Silent)));
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+    assert_eq!(rig.posted("type=wdata"), "");
+}
+
+/// Contract: under `osc52 = "deny"` a `write` answers `EPERM` at once and opens nothing, so later
+/// `wdata` is ignored.
+#[test]
+fn deny_at_begin_eperm_then_wdata_ignored() {
+    let mut rig = rig_with(1 << 20, 1 << 16, Osc52Policy::Deny);
+    assert_eq!(rig.reply("type=write:id=w"), status("EPERM", "w"));
+    assert!(!rig.tx.is_open());
+    rig.data("text/plain", &b64("x"));
+    assert!(rig.send("type=wdata").iter().all(|step| matches!(step, KittyStep::Silent)));
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+}
+
+/// Contract: one MIME type's payloads form one Base64 stream split anywhere, and a packet ending on
+/// padding restarts the stream, so independently padded chunks concatenate.
+#[test]
+fn stream_split_and_padding_restart() {
+    let mut rig = rig();
+    rig.send("type=write");
+    rig.data("text/plain", "aGVs");
+    rig.data("text/plain", "bG8=");
+    rig.data("text/plain", &b64(" world"));
+    assert_eq!(rig.posted("type=wdata"), "hello world");
+}
+
+/// Contract: a stream that ends without its required padding fails the write with `EINVAL` at commit.
+#[test]
+fn bad_final_padding_einval() {
+    let mut rig = rig();
+    rig.send("type=write:id=p");
+    rig.data("text/plain", "aGk");
+    assert_eq!(rig.reply("type=wdata"), status("EINVAL", "p"));
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+}
+
+/// Contract: the stream is strict Base64 on the wire: a padded group ends its packet, so more data
+/// after it in the same packet ends the write `EINVAL` at that packet, and so does a padded group
+/// whose unused low bits are not zero (`aGl=` is not the canonical `aGk=`).
+#[test]
+fn padded_group_ends_its_packet_and_unused_bits_are_zero() {
+    for (payload, label) in
+        [("aGk=aGk=", "data after padding in one packet"), ("aGl=", "unused bits")]
+    {
+        let mut rig = rig();
+        rig.send("type=write:id=s");
+        let packet = format!("type=wdata:mime={};{payload}", b64("text/plain"));
+        assert_eq!(rig.reply(&packet), status("EINVAL", "s"), "{label}");
+        assert_eq!(rig.staging.reserved_bytes(), 0, "{label}");
+    }
+}
+
+/// Contract: switching MIME type finishes the previous stream, which must then be complete; a
+/// repeated MIME type restarts its region.
+#[test]
+fn mime_switch_finishes() {
+    let mut rig = rig();
+    rig.send("type=write:id=m");
+    rig.data("text/plain", "aGk");
+    assert_eq!(
+        rig.reply(&format!("type=wdata:mime={};aGk=", b64("text/html"))),
+        status("EINVAL", "m")
+    );
+    let mut rig = self::rig();
+    rig.send("type=write");
+    rig.data("text/plain", &b64("first"));
+    rig.data("text/html", &b64("<b>"));
+    rig.data("text/plain", &b64("second"));
+    assert_eq!(rig.posted("type=wdata"), "second");
+}
+
+/// Contract: past 64 MIME entries further types are ignored, and past 64 aliases further aliases
+/// are ignored; the transaction itself goes on.
+#[test]
+fn sixty_fifth_mime_and_alias_ignored() {
+    let mut rig = rig();
+    rig.send("type=write:id=e");
+    for index in 0..64 {
+        rig.data(&format!("image/x-{index}"), &b64("i"));
+    }
+    rig.data("text/plain", &b64("dropped"));
+    assert_eq!(rig.reply("type=wdata"), status("ENOSYS", "e"));
+    let mut rig = self::rig();
+    rig.send("type=write");
+    rig.data("image/png", &b64("png"));
+    let fillers: Vec<String> = (0..64).map(|index| format!("x/{index}")).collect();
+    rig.send(&format!("type=walias:mime={};{}", b64("image/png"), b64(&fillers.join(" "))));
+    rig.send(&format!("type=walias:mime={};{}", b64("image/png"), b64("text/plain")));
+    assert!(matches!(rig.send("type=wdata").pop(), Some(KittyStep::Reply(_))));
+}
+
+/// Contract: aliases resolve over every staged representation before the text is chosen, so an
+/// alias naming a text type for a non-text entry still yields text.
+#[test]
+fn alias_to_non_text_entry_yields_text() {
+    let mut rig = rig();
+    rig.send("type=write");
+    rig.data("application/json", &b64("{\"a\":1}"));
+    let steps =
+        rig.send(&format!("type=walias:mime={};{}", b64("application/json"), b64("text/plain")));
+    assert!(steps.iter().all(|step| matches!(step, KittyStep::Silent)), "{steps:?}");
+    assert_eq!(rig.posted("type=wdata"), "{\"a\":1}");
+}
+
+/// Contract: aliases apply in order over the evolving map, so a chain resolves through an earlier
+/// alias and a later alias overwrites an existing name.
+#[test]
+fn alias_chain_order() {
+    let mut rig = rig();
+    rig.send("type=write");
+    rig.data("text/html", &b64("<b>x</b>"));
+    rig.data("x/source", &b64("source"));
+    rig.send(&format!("type=walias:mime={};{}", b64("x/source"), b64("x/middle")));
+    rig.send(&format!("type=walias:mime={};{}", b64("x/middle"), b64("text/plain")));
+    assert_eq!(rig.posted("type=wdata"), "source");
+    let mut rig = self::rig();
+    rig.send("type=write:id=a");
+    assert_eq!(rig.reply(&format!("type=walias;{}", b64("text/plain"))), status("EINVAL", "a"));
+}
+
+/// Contract: a commit with no representation clears the clipboard: it posts an empty write.
+#[test]
+fn empty_commit_clears_done() {
+    let mut rig = rig();
+    rig.send("type=write");
+    assert_eq!(rig.posted("type=wdata"), "");
+}
+
+/// Contract: a commit with representations but none the platform can hold answers `ENOSYS` and
+/// releases its staging; `loc=primary` off Linux is unavailable too.
+#[test]
+fn no_holdable_enosys() {
+    let mut rig = rig();
+    rig.send("type=write:id=n");
+    rig.data("image/png", &b64("png"));
+    assert_eq!(rig.reply("type=wdata"), status("ENOSYS", "n"));
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+    if !cfg!(target_os = "linux") {
+        let mut rig = self::rig();
+        rig.send("type=write:loc=primary");
+        rig.data("text/plain", &b64("p"));
+        assert_eq!(rig.reply("type=wdata"), "\x1b]5522;type=write:status=ENOSYS:loc=primary\x1b\\");
+    }
+}
+
+/// Contract: data past the transaction limit answers `EFBIG` before the buffer grows past it, and
+/// the staging is released.
+#[test]
+fn limit_efbig_before_allocation() {
+    let mut rig = rig_with(1 << 20, 8, Osc52Policy::Allow);
+    rig.send("type=write:id=f");
+    rig.data("text/plain", &b64("12345678"));
+    // The lease covers the data buffer, never past the limit, and the MIME name.
+    assert!(rig.staging.reserved_bytes() <= 8 + "text/plain".len());
+    assert_eq!(
+        rig.reply(&format!("type=wdata:mime={};{}", b64("text/plain"), b64("9"))),
+        status("EFBIG", "f")
+    );
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+}
+
+/// Contract: data the staging budget cannot cover answers `EBUSY`, reserving nothing.
+#[test]
+fn budget_ebusy() {
+    let mut rig = rig_with(4, 1 << 16, Osc52Policy::Allow);
+    rig.send("type=write:id=b");
+    assert_eq!(
+        rig.reply(&format!("type=wdata:mime={};{}", b64("text/plain"), b64("too long"))),
+        status("EBUSY", "b")
+    );
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+}
+
+/// Contract: an overflow or a decoded-field error finishes an open write with `EFBIG` or `EINVAL`
+/// only for `wdata`/`walias`; with no write open, or for other operations, nothing answers.
+#[test]
+fn overflow_and_invalid_value_finish_only_an_open_write() {
+    let mut rig = rig();
+    let inbox = rig.parser.kitty_clipboard_inbox().clone();
+    let now = Instant::now();
+    let overflow = KittyClipboardRequest::Overflow(KittyClipboardOperation::Wdata);
+    assert!(matches!(rig.tx.handle(&inbox, 1, overflow.clone(), false, 0, now), KittyStep::Silent));
+    rig.send("type=write:id=o");
+    let invalid = KittyClipboardRequest::InvalidValue(KittyClipboardOperation::Write);
+    assert!(matches!(rig.tx.handle(&inbox, 2, invalid, false, 0, now), KittyStep::Silent));
+    assert!(rig.tx.is_open());
+    match rig.tx.handle(&inbox, 3, overflow, true, 0, now) {
+        KittyStep::Reply(bytes) => assert_eq!(bytes, b"\x1b]5522;type=write:status=EFBIG:id=o\x07"),
+        other => panic!("expected EFBIG, got {other:?}"),
+    }
+    assert!(!rig.tx.is_open());
+}
+
+/// Contract: with the child silent, an open write expires at its idle deadline (30 s since the
+/// last packet) or its absolute deadline (10 min since `write`) with `EBUSY`, releasing it.
+#[test]
+fn silent_child_idle_and_absolute_deadlines_ebusy() {
+    let mut rig = rig();
+    rig.send("type=write:id=i");
+    rig.data("text/plain", &b64("x"));
+    let opened = Instant::now();
+    let deadline = rig.tx.deadline().expect("an open write has a deadline");
+    assert!(deadline <= opened + KITTY_WRITE_IDLE_TIMEOUT);
+    assert!(rig.tx.service(deadline - Duration::from_millis(1)).is_none());
+    let reply = rig.tx.service(deadline).expect("expired");
+    assert_eq!(reply, status("EBUSY", "i").into_bytes());
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+    assert!(rig.tx.deadline().is_none());
+    // A write kept busy (a packet every 25 s, the last 25 s before its absolute deadline) still
+    // ends at that deadline.
+    // A future instant, which the admission clock keeps, so the deadlines below are exact.
+    let start = Instant::now() + Duration::from_secs(1);
+    rig.send_at("type=write:id=j", start);
+    keep_busy(&mut rig, start, 23);
+    let absolute = start + KITTY_WRITE_ABSOLUTE_TIMEOUT;
+    assert_eq!(rig.tx.deadline(), Some(absolute));
+    assert!(rig.tx.service(absolute - Duration::from_millis(1)).is_none());
+    assert_eq!(rig.tx.service(absolute).expect("expired"), status("EBUSY", "j").into_bytes());
+}
+
+/// Send a `text/plain` chunk every 25 s after `start`, `count` times, so the write never idles.
+fn keep_busy(rig: &mut Rig, start: Instant, count: u32) {
+    for tick in 1..=count {
+        let at = start + Duration::from_secs(25) * tick;
+        let steps = rig.send_at(&format!("type=wdata:mime={};{}", b64("text/plain"), b64("x")), at);
+        assert!(steps.iter().all(|step| matches!(step, KittyStep::Silent)), "{steps:?}");
+    }
+}
+
+/// The status replies among `steps`, as text.
+fn replies_of(steps: &[KittyStep]) -> Vec<String> {
+    steps
+        .iter()
+        .filter_map(|step| match step {
+            KittyStep::Reply(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Contract: a packet that changes an open write is checked against the write's deadlines before
+/// it refreshes them. Data arriving after the idle deadline ends the write `EBUSY` rather than
+/// reviving it, so the commit that follows finds no write and posts nothing.
+#[test]
+fn late_data_never_revives_an_expired_write() {
+    let mut rig = rig();
+    rig.send("type=write:id=l");
+    // Its last packet was 31 s ago, so the idle deadline passed.
+    rig.tx.age_open(Duration::from_secs(31));
+    let steps = rig.send(&format!("type=wdata:mime={};{}", b64("text/plain"), b64("x")));
+    assert_eq!(replies_of(&steps), [status("EBUSY", "l")], "the late data ends the write");
+    let steps = rig.send("type=wdata");
+    assert!(!steps.iter().any(|step| matches!(step, KittyStep::Post(_))), "nothing is posted");
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+}
+
+/// Contract: a commit that enters before the absolute deadline but plans past it posts nothing: the
+/// deadline is checked again after planning, against the time the commit has taken.
+#[test]
+fn stalled_planner_crossing_the_absolute_deadline_posts_nothing() {
+    let mut rig = rig();
+    // Planning asks the clipboard which formats it holds; this one takes 600 ms to answer.
+    rig.tx.set_holds(|format, _| {
+        std::thread::sleep(Duration::from_millis(600));
+        *format == NativeFormat::Text
+    });
+    let start = Instant::now();
+    rig.send_at("type=write:id=s", start);
+    keep_busy(&mut rig, start, 23);
+    let commit_at = start + KITTY_WRITE_ABSOLUTE_TIMEOUT - Duration::from_millis(300);
+    let steps = rig.send_at("type=wdata", commit_at);
+    assert!(!steps.iter().any(|step| matches!(step, KittyStep::Post(_))), "nothing is posted");
+    assert_eq!(replies_of(&steps), [status("EBUSY", "s")]);
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+}
+
+/// Contract: a commit whose planning crosses the absolute deadline answers `EBUSY` even when the
+/// plan omitted every format: the deadline is checked before the plan is read, so an expired write
+/// never answers `ENOSYS`.
+#[test]
+fn stalled_planner_omitting_every_format_answers_ebusy() {
+    let mut rig = rig();
+    // Planning asks the clipboard which formats it holds; this one takes 600 ms and holds none.
+    rig.tx.set_holds(|_, _| {
+        std::thread::sleep(Duration::from_millis(600));
+        false
+    });
+    let start = Instant::now();
+    rig.send_at("type=write:id=n", start);
+    keep_busy(&mut rig, start, 23);
+    let commit_at = start + KITTY_WRITE_ABSOLUTE_TIMEOUT - Duration::from_millis(300);
+    let steps = rig.send_at("type=wdata", commit_at);
+    assert_eq!(replies_of(&steps), [status("EBUSY", "n")]);
+}
+
+/// Contract: an accepted packet records the admission clock it was checked against, not its
+/// section's older stamp, so a packet delayed by earlier work in its section still gets its whole
+/// idle window: a commit 6 s after it posts. A write opened under an old stamp is timed the same
+/// way.
+#[test]
+fn accepted_packet_records_its_admission_time() {
+    let stamped = || Instant::now().checked_sub(Duration::from_secs(25)).expect("a past instant");
+    let data = format!("type=wdata:mime={};{}", b64("text/plain"), b64("x"));
+    {
+        let mut rig = rig();
+        rig.send("type=write:id=t");
+        assert!(replies_of(&rig.send_at(&data, stamped())).is_empty(), "the packet is in time");
+        let steps = rig.send_at("type=wdata", Instant::now() + Duration::from_secs(6));
+        assert!(steps.iter().any(|step| matches!(step, KittyStep::Post(_))), "data: {steps:?}");
+    }
+    let mut rig = rig();
+    rig.send_at("type=write:id=o", stamped());
+    let steps = rig.send_at("type=wdata", Instant::now() + Duration::from_secs(6));
+    assert!(steps.iter().any(|step| matches!(step, KittyStep::Post(_))), "open: {steps:?}");
+}
+
+/// Contract: an error packet meeting an expired write answers `EBUSY`, as a data packet would,
+/// rather than `EFBIG` or `EINVAL`: the write's deadlines are checked before the error is. A late
+/// `walias` ends it the same way.
+#[test]
+fn late_error_packet_on_an_expired_write_answers_ebusy() {
+    let errors = [
+        ("overflow", KittyClipboardRequest::Overflow(KittyClipboardOperation::Wdata)),
+        ("invalid", KittyClipboardRequest::InvalidValue(KittyClipboardOperation::Walias)),
+    ];
+    for (label, request) in errors {
+        let mut rig = rig();
+        rig.send("type=write:id=e");
+        rig.tx.age_open(Duration::from_secs(31));
+        let inbox = rig.parser.kitty_clipboard_inbox().clone();
+        let KittyStep::Reply(bytes) = rig.tx.handle(&inbox, 9, request, false, 0, Instant::now())
+        else {
+            panic!("{label}: expected a reply");
+        };
+        assert_eq!(String::from_utf8(bytes).unwrap(), status("EBUSY", "e"), "{label}");
+    }
+    let mut rig = rig();
+    rig.send("type=write:id=e");
+    rig.tx.age_open(Duration::from_secs(31));
+    let alias = format!("type=walias:mime={};{}", b64("text/plain"), b64("text/x-alias"));
+    assert_eq!(rig.reply(&alias), status("EBUSY", "e"), "walias");
+}
+
+/// Contract: a commit reads the clock itself. A write whose section was stamped before its idle
+/// deadline but is committed after it answers `EBUSY` and posts nothing, so one timestamp for a
+/// whole section cannot carry a write past its deadline.
+#[test]
+fn commit_checks_the_deadline_against_the_clock() {
+    let mut rig = rig();
+    rig.send("type=write:id=c");
+    rig.data("text/plain", &b64("x"));
+    // Its last packet is 29.2 s old, so the write is still in time for 0.8 s.
+    rig.tx.age_open(Duration::from_millis(29_200));
+    // The commit's section is stamped now, in time; it is parsed after the deadline passed.
+    let stale = Instant::now();
+    std::thread::sleep(Duration::from_millis(1_000));
+    let steps = rig.send_at("type=wdata", stale);
+    assert!(!steps.iter().any(|step| matches!(step, KittyStep::Post(_))), "nothing is posted");
+    assert_eq!(replies_of(&steps), [status("EBUSY", "c")]);
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+}
+
+/// Contract: a policy now `deny` finishes an open write with `EPERM` and releases its staging,
+/// even while the child prints nothing; the policy wakeup reaches the worker's receiver.
+#[test]
+fn policy_revoked_while_child_silent_eperm_releases() {
+    let mut rig = rig();
+    let wakeups = rig.staging.register_policy_waker();
+    rig.send("type=write:id=r");
+    rig.data("text/plain", &b64("staged"));
+    rig.staging.set_write_policy(Osc52Policy::Deny);
+    rig.staging.wake_policy_workers();
+    assert!(wakeups.try_recv().is_ok(), "the worker is woken");
+    let reply = rig.tx.service(Instant::now()).expect("revoked");
+    assert_eq!(reply, status("EPERM", "r").into_bytes());
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+}
+
+/// Contract: RIS or retire releases an open write silently.
+#[test]
+fn release_is_silent() {
+    let mut rig = rig();
+    rig.send("type=write");
+    rig.data("text/plain", &b64("x"));
+    rig.tx.release();
+    assert!(!rig.tx.is_open());
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+}
+
+/// Contract: a committed write's lease moves into its job and stays reserved until the job is
+/// dropped, which the clipboard worker does only after the native call returns.
+#[test]
+fn lease_through_worker_custody() {
+    let mut rig = rig();
+    rig.send("type=write");
+    rig.data("text/plain", &b64("held"));
+    let job = match rig.send("type=wdata").pop() {
+        Some(KittyStep::Post(job)) => job,
+        other => panic!("expected a posted write, got {other:?}"),
+    };
+    assert!(rig.staging.reserved_bytes() >= 4);
+    assert!(job.kitty.is_some(), "the job carries its reply");
+    drop(job);
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+}
+
+/// Contract: an asked commit's consent ticket is stamped with the admission clock, not its
+/// section's older stamp, so the ticket's 120 s lifetime counts from when it was admitted.
+#[test]
+fn ask_commit_ticket_is_stamped_with_the_admission_clock() {
+    let mut rig = rig_with(1 << 20, 1 << 16, Osc52Policy::Ask);
+    rig.send("type=write");
+    rig.data("text/plain", &b64("asked"));
+    let stale = Instant::now().checked_sub(Duration::from_secs(25)).expect("a past instant");
+    let before = Instant::now();
+    let Some(KittyStep::Ticket(ticket)) = rig.send_at("type=wdata", stale).pop() else {
+        panic!("an asked commit takes a ticket");
+    };
+    assert!(ticket.binding().created_at >= before, "stamped when admitted");
+}
+
+/// Contract: under `ask` a commit takes a consent ticket holding its job; nothing is posted.
+#[test]
+fn ask_commit_takes_a_ticket() {
+    let mut rig = rig_with(1 << 20, 1 << 16, Osc52Policy::Ask);
+    rig.send("type=write");
+    rig.data("text/plain", &b64("asked"));
+    assert!(matches!(rig.send("type=wdata").pop(), Some(KittyStep::Ticket(_))));
+}
+
+/// Contract: under `osc52_read = "deny"` a read answers `EPERM` at once, with its id and
+/// terminator, and takes no ticket.
+#[test]
+fn deny_eperm() {
+    let mut rig = rig();
+    rig.staging.set_read_policy(sonicterm_cfg::config::Osc52ReadPolicy::Deny);
+    assert_eq!(
+        rig.reply("type=read:id=q;dGV4dC9wbGFpbg=="),
+        "\x1b]5522;type=read:status=EPERM:id=q\x1b\\"
+    );
+    assert_eq!(rig.staging.ticket_slots_in_use(), 0);
+}
+
+/// Contract: `osc52_read = "deny"` decides a valid read before anything else: a PRIMARY read off
+/// Linux and a read the staging budget cannot cover both answer `EPERM`, not `ENOSYS` or `EBUSY`.
+#[test]
+fn deny_precedes_enosys_and_ebusy() {
+    let deny = sonicterm_cfg::config::Osc52ReadPolicy::Deny;
+    if !cfg!(target_os = "linux") {
+        // PRIMARY exists only on Linux; elsewhere it would answer `ENOSYS` without the policy.
+        let mut rig = rig();
+        rig.staging.set_read_policy(deny);
+        let reply = rig.reply("type=read:id=p:loc=primary;dGV4dC9wbGFpbg==");
+        assert_eq!(reply, "\x1b]5522;type=read:status=EPERM:loc=primary:id=p\x1b\\");
+    }
+    // A budget smaller than the payload would answer `EBUSY` without the policy.
+    let mut rig = rig_with(4, 1 << 16, Osc52Policy::Allow);
+    rig.staging.set_read_policy(deny);
+    let reply = rig.reply("type=read:id=b;dGV4dC9wbGFpbg==");
+    assert_eq!(reply, "\x1b]5522;type=read:status=EPERM:id=b\x1b\\");
+}
+
+/// The ticket one read packet `body` admitted.
+fn read_ticket(rig: &mut Rig, body: &str) -> crate::app::osc52_read_ticket::ConsentTicket {
+    match rig.send(body).pop() {
+        Some(KittyStep::Ticket(ticket)) => ticket,
+        other => panic!("expected a read ticket for {body:?}, got {other:?}"),
+    }
+}
+
+/// Contract: a read takes a consent ticket carrying its request: readable at once under `allow`
+/// and for a listing-only request under `ask`, which skips the prompt; a data read under `ask`
+/// waits. A payload that is not strict Base64 is dropped with no reply and no ticket.
+#[test]
+fn read_takes_a_ticket_and_listing_skips_the_prompt() {
+    use sonicterm_cfg::config::Osc52ReadPolicy;
+    let mut rig = rig();
+    rig.staging.set_read_policy(Osc52ReadPolicy::Allow);
+    let ticket = read_ticket(&mut rig, "type=read:id=a;dGV4dC9wbGFpbg==");
+    assert!(ticket.readable());
+    assert_eq!(ticket.kitty_read().map(|read| read.types.clone()), Some(vec!["text/plain".into()]));
+    drop(ticket);
+    rig.staging.set_read_policy(Osc52ReadPolicy::Ask);
+    assert!(read_ticket(&mut rig, "type=read;Lg==").readable(), "a listing skips the prompt");
+    assert!(!read_ticket(&mut rig, "type=read;dGV4dC9wbGFpbg==").readable(), "data waits");
+    assert!(rig.send("type=read;!!!!").iter().all(|step| matches!(step, KittyStep::Silent)));
+    assert_eq!(rig.staging.ticket_slots_in_use(), 0);
+}
+
+/// Contract: a malformed read payload is dropped with no reply even when the staging budget cannot
+/// cover decoding it, under `deny` as under `ask`: it is validated before the budget or the policy
+/// chooses a status. A valid payload under that budget still answers.
+#[test]
+fn malformed_read_under_full_budget_is_silent() {
+    use sonicterm_cfg::config::Osc52ReadPolicy;
+    // Bad alphabet, a non-UTF-8 byte (`/w==` is 0xFF), a bad length and padding mid-stream; each
+    // payload is longer than the 2-byte budget.
+    let malformed = ["!!!!", "/w==", "dGV4dC9wbGFpbg=", "dA==dA=="];
+    for policy in [Osc52ReadPolicy::Ask, Osc52ReadPolicy::Deny] {
+        for payload in malformed {
+            let mut rig = rig_with(2, 1 << 16, Osc52Policy::Allow);
+            rig.staging.set_read_policy(policy);
+            let steps = rig.send(&format!("type=read:id=m;{payload}"));
+            let silent = steps.iter().all(|step| matches!(step, KittyStep::Silent));
+            assert!(silent, "{policy:?} {payload:?}: {steps:?}");
+        }
+    }
+    let mut rig = rig_with(2, 1 << 16, Osc52Policy::Allow);
+    rig.staging.set_read_policy(Osc52ReadPolicy::Ask);
+    let reply = rig.reply("type=read:id=v;dGV4dC9wbGFpbg==");
+    assert_eq!(reply, "\x1b]5522;type=read:status=EBUSY:id=v\x1b\\", "a valid read still answers");
+}
+
+/// Contract: a read while the same pane holds a read ticket answers `EPERM`; a read while every
+/// process slot is taken answers `EBUSY`.
+#[test]
+fn same_pane_busy_eperm_and_full_gate_ebusy() {
+    let mut rig = rig();
+    rig.staging.set_read_policy(sonicterm_cfg::config::Osc52ReadPolicy::Allow);
+    let held = read_ticket(&mut rig, "type=read;dGV4dC9wbGFpbg==");
+    let busy = rig.reply("type=read:id=s;dGV4dC9wbGFpbg==");
+    assert_eq!(busy, "\x1b]5522;type=read:status=EPERM:id=s\x1b\\");
+    drop(held);
+    let max = crate::app::osc52_read::MAX_TICKETS;
+    let taken = (0..max).filter(|_| rig.staging.try_take_ticket_slot()).count();
+    assert_eq!(taken, max);
+    let full = rig.reply("type=read:id=g;dGV4dC9wbGFpbg==");
+    assert_eq!(full, "\x1b]5522;type=read:status=EBUSY:id=g\x1b\\");
+    (0..max).for_each(|_| rig.staging.release_ticket_slot());
+}
+
+/// Contract: an OSC 5522 write the event loop refuses (`osc52` changed to `deny` after the commit
+/// was posted) is answered `EPERM` on its source pane through the sensitive-reply path.
+#[test]
+fn event_loop_denial_answers_eperm_on_source_pane() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    let mut rig = rig();
+    rig.send("type=write:id=d");
+    rig.data("text/plain", &b64("x"));
+    let job = match rig.send("type=wdata").pop() {
+        Some(KittyStep::Post(job)) => job,
+        other => panic!("expected a posted write, got {other:?}"),
+    };
+    let mut app = super::super::App::new(Theme::default(), Config::default(), Keymap::default());
+    app.config.terminal.osc52 = Osc52Policy::Deny;
+    let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = delivered.clone();
+    app.clip_state.reads.port = Some(Box::new(move |pane_id, reply| {
+        sink.lock().unwrap().push((pane_id, reply.bytes().to_vec()));
+        Ok(())
+    }));
+    let outcome = app.submit_program_clipboard(7, job, false);
+    assert_eq!(outcome, Some(super::super::event_loop::ClipWriteOutcome::Denied));
+    assert_eq!(*delivered.lock().unwrap(), vec![(7, status("EPERM", "d").into_bytes())]);
+}
+
+/// A native clipboard whose every write panics, as a crashing clipboard worker does.
+struct PanickingSink;
+
+impl super::super::clipboard_worker::ClipboardSink for PanickingSink {
+    fn write(
+        &mut self,
+        _request: super::super::clipboard_worker::WriteRequest<'_>,
+    ) -> super::super::clipboard_worker::WriteResult {
+        panic!("the clipboard worker dies in its native call");
+    }
+}
+
+/// Contract: an OSC 5522 write posted to the clipboard worker is answered `EIO` on its source
+/// pane when the worker dies before reporting it, never dropped without a status.
+#[test]
+fn worker_loss_answers_eio_on_source_pane() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    let mut rig = rig();
+    rig.send("type=write:id=lost");
+    rig.data("text/plain", &b64("x"));
+    let job = match rig.send("type=wdata").pop() {
+        Some(KittyStep::Post(job)) => job,
+        other => panic!("expected a posted write, got {other:?}"),
+    };
+    let mut app = super::super::App::new(Theme::default(), Config::default(), Keymap::default());
+    let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = delivered.clone();
+    app.clip_state.reads.port = Some(Box::new(move |pane_id, reply| {
+        sink.lock().unwrap().push((pane_id, reply.bytes().to_vec()));
+        Ok(())
+    }));
+    let started =
+        app.clip_state.domain.start_worker(Box::new(PanickingSink), None, Box::new(|| {}));
+    assert!(started);
+    assert_eq!(app.submit_program_clipboard(9, job, false), None, "posted to the worker");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while app.clip_state.domain.has_worker() {
+        assert!(Instant::now() < deadline, "the worker's loss was never noticed");
+        app.drain_clipboard_completions();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(*delivered.lock().unwrap(), vec![(9, status("EIO", "lost").into_bytes())]);
+    assert_eq!(rig.staging.reserved_bytes(), 0, "the lost job's lease was released");
+}
+
+/// A clipboard that holds text only.
+fn text_only(format: &NativeFormat, _bytes: &[u8]) -> bool {
+    *format == NativeFormat::Text
+}
+
+/// A clipboard that holds text and HTML.
+fn text_and_html(format: &NativeFormat, _bytes: &[u8]) -> bool {
+    matches!(format, NativeFormat::Text | NativeFormat::Html)
+}
+
+/// The job `body` posted.
+fn posted_job(rig: &mut Rig, body: &str) -> ClipboardJob {
+    match rig.send(body).pop() {
+        Some(KittyStep::Post(job)) => job,
+        other => panic!("expected a posted write for {body:?}, got {other:?}"),
+    }
+}
+
+/// Contract: where the clipboard holds HTML, a commit of HTML beside text posts one job carrying
+/// both representations in the commit's order, and the type it cannot hold is omitted.
+#[test]
+fn html_beside_text_posts_one_offer() {
+    let mut rig = rig();
+    rig.tx.set_holds(text_and_html);
+    rig.send("type=write:id=m");
+    rig.data("text/html", &b64("<b>x</b>"));
+    rig.data("image/png", &b64("png"));
+    rig.data("text/plain", &b64("x"));
+    let job = posted_job(&mut rig, "type=wdata");
+    let offer = job.offer.as_ref().expect("a multi-representation offer");
+    let kept: Vec<_> =
+        offer.representations().map(|(format, bytes)| (format.clone(), bytes)).collect();
+    assert_eq!(kept, [(NativeFormat::Html, &b"<b>x</b>"[..]), (NativeFormat::Text, &b"x"[..])]);
+    assert_eq!(offer.omitted(), 1, "image/png is omitted");
+    assert!(job.lease.bytes() >= offer.reserved_bytes(), "the native copies are reserved");
+}
+
+/// Contract: the X11 text atoms name text, so a write of `UTF8_STRING` alone is written as text.
+#[test]
+fn utf8_string_alias_is_text() {
+    let mut rig = rig();
+    rig.send("type=write");
+    rig.data("UTF8_STRING", &b64("atom"));
+    assert_eq!(rig.posted("type=wdata"), "atom");
+}
+
+/// Contract: an offer's native copies are reserved before it is posted: when the budget cannot
+/// cover them the commit answers `EBUSY` and releases everything, while the same bytes as text
+/// alone still fit.
+#[test]
+fn native_copies_reserved_or_ebusy() {
+    // Large enough that the offer's native copies, not planning's fixed workspace, decide the fit.
+    let payload = "y".repeat(1024);
+    // The budget covers both staged types and planning's workspace, then the text path's staged
+    // text plus its native copy, which is UTF-16 and a terminator on Windows and UTF-8 elsewhere,
+    // with a little slack.
+    let names = ["text/plain".len(), "text/html".len()].into_iter();
+    let staged = 2 * (payload.len() + "text/plain".len()) + super::plan_workspace_bytes(names);
+    let text_alone = payload.len() + super::super::osc52_stream::native_clipboard_bytes(&payload);
+    let budget = staged.max(text_alone) + 16;
+    let both = vec![
+        ("text/plain".to_owned(), payload.clone().into_bytes()),
+        ("text/html".to_owned(), payload.clone().into_bytes()),
+    ];
+    let OfferPlan::Offer(offer) = plan(both, &[], &text_and_html) else { panic!("an offer") };
+    assert!(budget < offer.reserved_bytes(), "{budget} must not cover the offer");
+    for (holds, posts) in
+        [(text_and_html as fn(&NativeFormat, &[u8]) -> bool, false), (text_only, true)]
+    {
+        let mut rig = rig_with(budget, 1 << 16, Osc52Policy::Allow);
+        rig.tx.set_holds(holds);
+        rig.send("type=write:id=b");
+        rig.data("text/plain", &b64(&payload));
+        rig.data("text/html", &b64(&payload));
+        match rig.send("type=wdata").pop() {
+            Some(KittyStep::Post(job)) => assert!(posts, "{}", job.text.len()),
+            Some(KittyStep::Reply(bytes)) => {
+                assert!(!posts);
+                assert_eq!(String::from_utf8(bytes).unwrap(), status("EBUSY", "b"));
+                assert_eq!(rig.staging.reserved_bytes(), 0, "nothing stays reserved");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}
+
+/// Contract: the per-commit limit is on the sum of every type, so two types each under the limit
+/// answer `EFBIG` together.
+#[test]
+fn aggregate_limit_efbig() {
+    let mut rig = rig_with(1 << 20, 8, Osc52Policy::Allow);
+    rig.tx.set_holds(text_and_html);
+    rig.send("type=write:id=g");
+    rig.data("text/plain", &b64("12345"));
+    let reply = rig.reply(&format!("type=wdata:mime={};{}", b64("text/html"), b64("12345")));
+    assert_eq!(reply, status("EFBIG", "g"));
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+}
+
+/// Contract: an offer job routed through the event loop answers `DONE` only when the publish took
+/// every representation and `EIO` when it failed, on its source pane; the test seam takes the
+/// offer's text so no system clipboard is touched.
+#[test]
+fn offer_job_answers_done_or_eio_never_partial() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    for (fail, outcome, reply) in [
+        (false, super::super::event_loop::ClipWriteOutcome::Written, "DONE"),
+        (true, super::super::event_loop::ClipWriteOutcome::Failed, "EIO"),
+    ] {
+        let mut rig = rig();
+        rig.tx.set_holds(text_and_html);
+        rig.send("type=write:id=o");
+        rig.data("text/plain", &b64("both"));
+        rig.data("text/html", &b64("<i>both</i>"));
+        let job = posted_job(&mut rig, "type=wdata");
+        assert!(job.offer.is_some(), "an offer job");
+        let mut app =
+            super::super::App::new(Theme::default(), Config::default(), Keymap::default());
+        app.config.terminal.osc52 = Osc52Policy::Allow;
+        app.testing.test_clipboard_text = Some(String::new());
+        app.testing.test_clipboard_write_failure = fail;
+        let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = delivered.clone();
+        app.clip_state.reads.port = Some(Box::new(move |pane_id, reply| {
+            sink.lock().unwrap().push((pane_id, reply.bytes().to_vec()));
+            Ok(())
+        }));
+        assert_eq!(app.submit_program_clipboard(9, job, false), Some(outcome));
+        assert_eq!(*delivered.lock().unwrap(), vec![(9, status(reply, "o").into_bytes())]);
+        let expected = if fail { "" } else { "both" };
+        assert_eq!(app.testing.test_clipboard_text.as_deref(), Some(expected));
+        assert_eq!(rig.staging.reserved_bytes(), 0, "the lease ends with the publish");
+    }
+}
+
+/// Contract: a `walias` packet keeps its decoded names reserved while it records them, and a
+/// repeated alias reserves its new target before replacing the old one: under a budget that
+/// covers the staged data but not the names, the packet answers `EBUSY` and leaves nothing behind.
+#[test]
+fn alias_names_and_retargets_are_reserved() {
+    let mut rig = rig();
+    rig.send("type=write:id=a");
+    rig.data("text/plain", &b64("x"));
+    let reserved_before = rig.staging.reserved_bytes();
+    let alias = format!("type=walias:mime={};{}", b64("text/plain"), b64("text/x-a text/x-b"));
+    assert!(rig.send(&alias).iter().all(|step| matches!(step, KittyStep::Silent)));
+    let with_aliases = rig.staging.reserved_bytes();
+    let names = "text/x-a".len() + "text/x-b".len() + 2 * "text/plain".len();
+    assert_eq!(with_aliases, reserved_before + names, "each alias pair is reserved, no more");
+    // Retarget one alias at a longer type: the reservation moves by the targets' length difference.
+    let retarget = format!("type=walias:mime={};{}", b64("text/html"), b64("text/x-a"));
+    assert!(rig.send(&retarget).iter().all(|step| matches!(step, KittyStep::Silent)));
+    let moved = rig.staging.reserved_bytes() as isize - with_aliases as isize;
+    assert_eq!(moved, "text/html".len() as isize - "text/plain".len() as isize);
+}
+
+/// Contract: planning a commit's offer reserves its own workspace first: a budget that covers the
+/// staged types but not planning answers `EBUSY` before any plan allocation and leaves nothing
+/// reserved.
+#[test]
+fn plan_workspace_reserved_or_ebusy() {
+    let staged = 2 * (2 + "text/plain".len());
+    let mut rig = rig_with(staged + 4, 1 << 16, Osc52Policy::Allow);
+    rig.tx.set_holds(text_and_html);
+    rig.send("type=write:id=w");
+    rig.data("text/plain", &b64("hi"));
+    rig.data("text/html", &b64("hi"));
+    assert_eq!(rig.reply("type=wdata"), status("EBUSY", "w"));
+    assert_eq!(rig.staging.reserved_bytes(), 0, "nothing stays reserved");
+}
+
+/// A full program-slot gate rejects an already reserved offer; holding the slots must not let
+/// the payload outlive its charge. The slot holders themselves have zero-byte text leases.
+#[test]
+fn refusal_order_full_program_slots() {
+    let mut rig = rig();
+    rig.send("type=write");
+    let reply = rig.tx.open.take().unwrap().reply;
+    let slots: Vec<_> = (0..crate::app::osc52_stream::MAX_PROGRAM_CLIPBOARD_JOBS)
+        .map(|_| ClipboardJob::for_test(&rig.staging, ""))
+        .collect();
+    let bytes = vec![0xff; 512];
+    let address = bytes.as_ptr() as usize;
+    let offer = NativeOffer::raw_text(bytes);
+    let mut lease = rig.staging.lease();
+    assert!(lease.grow_to(offer.reserved_bytes()));
+    let before = rig.staging.reserved_bytes();
+    let reading = crate::app::osc52_stream::reserved_at_free(&rig.staging, address, || {
+        let result = ClipboardJob::kitty_offer(
+            &rig.staging,
+            lease,
+            offer,
+            ClipTargets { clipboard: true, primary: false },
+            reply,
+        );
+        assert!(matches!(result, Err(Osc52Refusal::Busy)));
+    });
+    assert_eq!(reading, before);
+    drop(slots);
+}
+
+/// A parser-produced write that cannot grow the planning workspace must free its actual staged
+/// entry while the reservation is still counted, not merely reach a zero total afterwards.
+#[test]
+fn refusal_order_open_write_planning_budget() {
+    let mut rig = rig_with(32, 64, Osc52Policy::Allow);
+    rig.send("type=write:id=b");
+    rig.data("text/plain", &b64("abc"));
+    let address = rig.tx.open.as_ref().unwrap().entries[0].data.as_ptr() as usize;
+    let staging = rig.staging.clone();
+    let before = staging.reserved_bytes();
+    let reading = crate::app::osc52_stream::reserved_at_free(&staging, address, || {
+        assert_eq!(rig.reply("type=wdata"), status("EBUSY", "b"))
+    });
+    assert_eq!(reading, before);
+}
+
+/// Contract: a `walias` packet's decoded names free before their decode reservation returns,
+/// on a refusal as on success: when a new alias target cannot be reserved (`EBUSY`), the bytes
+/// covering the names are still reserved at the moment the names are deallocated.
+#[test]
+fn refusal_order_alias_names_freed_before_their_reservation() {
+    let mut rig = rig_with(64, 1 << 16, Osc52Policy::Allow);
+    rig.send("type=write:id=a");
+    rig.data("text/plain", &b64("x"));
+    let open = rig.tx.open.as_mut().expect("an open write");
+    // Names whose decode fits the budget but whose alias pair, with a long target, does not.
+    let names = "text/x-a".to_owned();
+    let address = names.as_ptr() as usize;
+    let decode_bytes = names.len();
+    assert!(open.lease.grow_to(open.lease.bytes() + decode_bytes), "the decode is reserved");
+    let target = "t".repeat(64);
+    let staging = rig.staging.clone();
+    let reserved_with_names = staging.reserved_bytes();
+    let reading = crate::app::osc52_stream::reserved_at_free(&staging, address, || {
+        let refused = open.record_then_release(&target, Some(names), decode_bytes);
+        assert_eq!(refused, Err(KittyClipboardStatus::Ebusy));
+    });
+    assert_eq!(reading, reserved_with_names, "the names freed while still reserved");
+}
+
+/// Watch an alias allocation at the handoff from planning. The input aliases must be freed
+/// before the combined workspace lease is resized to the (smaller) outgoing native offer.
+#[test]
+fn plan_handoff_keeps_charge_until_aliases_drop() {
+    let mut rig = rig();
+    rig.tx.set_holds(text_and_html);
+    rig.send("type=write");
+    rig.data("text/html", &b64("t"));
+    let alias = "x/".to_owned() + &"a".repeat(100);
+    rig.send(&format!("type=walias:mime={};{}", b64("text/html"), b64(&alias)));
+    let open = rig.tx.open.as_ref().unwrap();
+    let before = open.lease.bytes();
+    let workspace = plan_workspace_bytes(["text/html".len(), alias.len()].into_iter());
+    let address = open.aliases[0].0.as_ptr() as usize;
+    let staging = rig.staging.clone();
+    let reading = crate::app::osc52_stream::reserved_at_free(&staging, address, || {
+        let job = posted_job(&mut rig, "type=wdata");
+        assert!(job.offer.is_some());
+    });
+    assert!(
+        reading >= before + workspace,
+        "handoff held {reading}, expected at least {}",
+        before + workspace
+    );
+}

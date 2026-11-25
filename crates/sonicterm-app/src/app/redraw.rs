@@ -233,8 +233,6 @@ pub(super) enum DueCause {
     Memory,
     PointerMotion,
     GpuRecovery,
-    #[cfg(windows)]
-    Osc52,
     Smoke,
     #[cfg(target_os = "macos")]
     SurfaceProbe,
@@ -677,12 +675,6 @@ impl App {
                     for id in self.refresh_foreground_privileges_if_due(now) {
                         repaint.entry(id).or_default().push(RedrawCause::Chrome);
                     }
-                }
-                #[cfg(windows)]
-                DueCause::Osc52 => {
-                    // When: `Osc52` is due, clipboard maintenance requests no frame by itself.
-                    #[cfg(windows)]
-                    self.reassert_osc52_clipboard_if_due(now);
                 }
                 DueCause::QuitHold => {
                     // When: `QuitHold` expires, only its confirmation state changes, not window pixels.

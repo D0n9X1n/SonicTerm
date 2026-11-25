@@ -398,7 +398,10 @@ fn a_busy_list_stops_probing_after_its_budget() {
     let guards: Vec<_> = entries.iter().map(|entry| entry.parser.lock()).collect();
     let started = Instant::now();
     let budget_ends = started + LIST_BUDGET;
-    let panes: Vec<Value> = entries.iter().map(|entry| pane_summary(entry, budget_ends)).collect();
+    let panes: Vec<Value> = entries
+        .iter()
+        .map(|entry| pane_summary(entry, budget_ends, &mut ReplyBudget::new(), false))
+        .collect();
     let elapsed = started.elapsed();
     drop(guards);
     // 40 panes at a 5 ms wait each would take 200 ms; the budget bounds the whole list. The bound
@@ -425,7 +428,139 @@ fn reads_report_the_shell_integration_state() {
         active: true,
         readonly: false,
     });
-    let summary = pane_summary(&listed, Instant::now() + LIST_BUDGET);
+    let summary =
+        pane_summary(&listed, Instant::now() + LIST_BUDGET, &mut ReplyBudget::new(), false);
     assert_eq!(summary["shell_integration_state"], "unverified");
     assert_eq!(summary["shell_integration"], true, "the boolean keeps its meaning");
+}
+
+/// `list_panes` reports both panes of a split under the tab's one displayed label (`tab_title`,
+/// after the active pane's OSC 1) and each pane's own OSC 1 request (`icon_title`, `null` when it
+/// sent none), while `title` stays the OSC 0/2 title.
+#[test]
+fn list_panes_reports_the_tab_label_and_each_panes_icon_title() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    let mut app = crate::app::App::new(Theme::default(), Config::default(), Keymap::default());
+    let named = app.__test_seed_tab("main");
+    app.__test_set_main_pane_viewport(
+        sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+        10.0,
+        10.0,
+    );
+    app.__test_split_active_right();
+    let window = app.main_mut().expect("main window");
+    let other = window.tab_states[0].active_pane;
+    assert_ne!(other, named, "precondition: the split's new pane is active");
+    window.panes[&named].parser.lock().advance(b"\x1b]1;alpha\x07\x1b]2;window title\x07");
+    window.tab_states[0].active_pane = named;
+    let crate::app::WindowState { tabs, panes, .. } = window;
+    let parser = panes[&named].parser.lock();
+    crate::app::refresh_active_tab_title(tabs, named, &panes[&named], &parser, 0);
+    drop(parser);
+    let label = tabs.active().expect("one tab").title.clone();
+    let budget_ends = Instant::now() + LIST_BUDGET;
+    let listed: Vec<Value> = app
+        .mcp_pane_entries()
+        .iter()
+        .map(|entry| pane_summary(entry, budget_ends, &mut ReplyBudget::new(), false))
+        .collect();
+    let summary = |pane_id: u64| {
+        let wanted = pane_id.to_string();
+        listed
+            .iter()
+            .find(|pane| pane["pane_id"].as_str() == Some(&wanted))
+            .expect("listed")
+            .clone()
+    };
+    for pane_id in [named, other] {
+        assert_eq!(summary(pane_id)["tab_title"], label.as_str(), "pane {pane_id}");
+    }
+    assert!(label.ends_with(" alpha"), "{label}");
+    assert_eq!(summary(named)["icon_title"], "alpha");
+    assert_eq!(summary(named)["title"], "window title");
+    assert_eq!(summary(other)["icon_title"], Value::Null);
+}
+
+/// `list_panes` copies a pane's live fields and its user-variable snapshot under the parser guard
+/// and builds no JSON until the guard is released, so a long list cannot hold a parser for its
+/// serialization.
+#[test]
+fn a_pane_summary_serializes_after_the_parser_guard_is_released() {
+    let mut entry = test_entry(20, 4, 100);
+    entry.parser.lock().advance(b"\x1b]1337;SetUserVar=a=MQ==\x07\x1b]2;title\x07");
+    entry.metadata = Some(crate::app::mcp::PaneMetadata {
+        window_index: 0,
+        tab_index: 0,
+        active: true,
+        readonly: false,
+    });
+    let observed = Arc::new(std::sync::Mutex::new(None));
+    let record = Arc::clone(&observed);
+    SUMMARY_HOOK.with_borrow_mut(|hook| {
+        *hook = Some(Box::new(move |entry: &PaneEntry| {
+            *record.lock().unwrap() = Some(entry.parser.is_locked());
+        }));
+    });
+    let summary =
+        pane_summary(&entry, Instant::now() + LIST_BUDGET, &mut ReplyBudget::new(), false);
+    SUMMARY_HOOK.with_borrow_mut(|hook| *hook = None);
+    assert_eq!(*observed.lock().unwrap(), Some(false), "the parser was held while serializing");
+    assert_eq!(summary["title"], "title");
+    assert_eq!(summary["user_vars"], json!([{ "name": "a", "value": "1" }]));
+}
+
+/// Every field's text of each event logged while `body` runs on this thread.
+fn logged_fields(body: impl FnOnce()) -> Vec<String> {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// Collects every field of every event, rendered with `Debug`.
+    #[derive(Clone, Default)]
+    struct Fields(Arc<std::sync::Mutex<Vec<String>>>);
+
+    /// Renders one event's fields as `name=value`.
+    struct Render(Vec<String>);
+
+    impl tracing::field::Visit for Render {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push(format!("{}={value:?}", field.name()));
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Fields {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut render = Render(Vec::new());
+            event.record(&mut render);
+            self.0.lock().unwrap().extend(render.0);
+        }
+    }
+
+    let layer = Fields::default();
+    let subscriber = tracing_subscriber::Registry::default().with(layer.clone());
+    sonicterm_logging::test_capture::with_default(subscriber, body);
+    let fields = layer.0.lock().unwrap().clone();
+    fields
+}
+
+/// User variables are never logged: parsing a valid record and a dropped one, then listing the
+/// pane, logs the drop's reason code and counts but no name or value, while the listing still
+/// carries the variable.
+#[test]
+fn user_var_names_and_values_are_never_logged() {
+    let entry = test_entry(20, 4, 100);
+    let mut summary = Value::Null;
+    let fields = logged_fields(|| {
+        // `c2VjcmV0LXZhbHVl` is `secret-value`; the second record's base64 is invalid.
+        entry.parser.lock().advance(
+            b"\x1b]1337;SetUserVar=secret-name=c2VjcmV0LXZhbHVl;SetUserVar=secret-bad=!!\x07",
+        );
+        summary =
+            pane_summary(&entry, Instant::now() + LIST_BUDGET, &mut ReplyBudget::new(), false);
+    });
+    assert_eq!(summary["user_vars"], json!([{ "name": "secret-name", "value": "secret-value" }]));
+    assert!(fields.iter().any(|field| field == "reason=\"value_base64\""), "{fields:?}");
+    assert!(fields.iter().all(|field| !field.contains("secret")), "leaked: {fields:?}");
 }

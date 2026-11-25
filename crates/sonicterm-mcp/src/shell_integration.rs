@@ -45,7 +45,8 @@ impl Shell {
 /// PowerShell's two failure readings; a D with no code names none.
 ///
 /// zsh: D and A from `precmd` (D first, carrying the status the command left), B once the line
-/// editor starts, C from `preexec`. Hooks are added beside any existing ones, never replacing them.
+/// editor starts, C from `preexec`, carrying the line `preexec` was given as `cmdline_url=`,
+/// percent-encoded byte by byte, when it is at most 1 KiB. Hooks are added beside any existing ones, never replacing them.
 /// The token lives only in `__sonicterm_token`: unset first, so no export attribute set on that
 /// name earlier survives, then declared inside a function with `allexport` off (zsh exports a
 /// `typeset` assignment under `allexport` even with `+x`), so no command inherits it.
@@ -66,7 +67,22 @@ if [[ -o interactive && -n "${SONICTERM_SHELL_TOKEN-}" && -z "${__sonicterm_toke
     __sonicterm_mark A
     return $__sonicterm_status
   }
-  __sonicterm_preexec() { __sonicterm_ran=1; __sonicterm_mark C; }
+  __sonicterm_preexec() {
+    __sonicterm_ran=1
+    emulate -L zsh
+    setopt no_multibyte
+    local text=$1 url= char hex index
+    if (( ${#text} <= 1024 )); then
+      for (( index = 1; index <= ${#text}; index++ )); do
+        char=${text[index]}
+        case $char in
+          [A-Za-z0-9._~-]) url+=$char ;;
+          *) printf -v hex '%%%02X' "'$char"; url+=$hex ;;
+        esac
+      done
+    fi
+    if [[ -n $url ]]; then __sonicterm_mark "C;cmdline_url=$url"; else __sonicterm_mark C; fi
+  }
   __sonicterm_line_init() { __sonicterm_mark B; }
   autoload -Uz add-zsh-hook add-zle-hook-widget
   add-zsh-hook precmd __sonicterm_precmd
@@ -83,7 +99,10 @@ fi
 /// cannot tell: once `PS0` is set, bash 5.3 advances it lazily, so the first command after the
 /// snippet loads leaves it unchanged. The token and the B marker that carries it are unexported
 /// (`export -n`), so even `set -a` cannot hand them to a command, and `PS1` refers to the marker
-/// by name rather than holding it. Needs bash 4.4 for `PS0`.
+/// by name rather than holding it. C carries the command from history as `cmdline_url=` only when
+/// history recorded it (`HISTCMD` passed its value at the prompt), so a line history ignored never
+/// carries an older command's text. A says `redraw=last`: bash redraws only a prompt's last line.
+/// Needs bash 4.4 for `PS0`.
 const BASH: &str = r#"# SonicTerm shell integration (bash 4.4+). Load with: eval "$(sonicterm-mcp --shell-integration bash)"
 if [[ $- == *i* && -n "${SONICTERM_SHELL_TOKEN-}" && -z "${__sonicterm_token-}" ]] \
    && (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )); then
@@ -94,26 +113,46 @@ if [[ $- == *i* && -n "${SONICTERM_SHELL_TOKEN-}" && -z "${__sonicterm_token-}" 
   printf -v __sonicterm_b '\e]133;B;sonicterm_token=%s\a' "$__sonicterm_token"
   export -n __sonicterm_b
   __sonicterm_ran=0
+  __sonicterm_hist=0
   __sonicterm_mark() { printf '\e]133;%s;sonicterm_token=%s\a' "$1" "$__sonicterm_token"; }
+  __sonicterm_start() {
+    local LC_ALL=C text= url= char index
+    if (( ${HISTCMD:-0} > __sonicterm_hist )); then
+      text=$(HISTTIMEFORMAT= history 1)
+      text=${text#*[0-9][ *] }
+    fi
+    if (( ${#text} <= 1024 )); then
+      for (( index = 0; index < ${#text}; index++ )); do
+        char=${text:index:1}
+        case $char in
+          [A-Za-z0-9._~-]) url+=$char ;;
+          *) printf -v char '%%%02X' "'$char"; url+=$char ;;
+        esac
+      done
+    fi
+    if [[ -n $url ]]; then __sonicterm_mark "C;cmdline_url=$url"; else __sonicterm_mark C; fi
+  }
   __sonicterm_prompt() {
     local __sonicterm_status=$?
     if (( __sonicterm_ran )); then
       __sonicterm_mark "D;$__sonicterm_status;sonicterm_src=status"
     fi
     __sonicterm_ran=0
-    __sonicterm_mark A
+    __sonicterm_hist=${HISTCMD:-0}
+    __sonicterm_mark "A;redraw=last"
     if [[ "$PS1" != *'${__sonicterm_b}'* ]]; then
       PS1="$PS1"'\[${__sonicterm_b}\]'
     fi
     return $__sonicterm_status
   }
   PROMPT_COMMAND="__sonicterm_prompt${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
-  PS0='${__sonicterm_ran:$((__sonicterm_ran=1, 0)):0}$(__sonicterm_mark C)'"${PS0-}"
+  PS0='${__sonicterm_ran:$((__sonicterm_ran=1, 0)):0}$(__sonicterm_start)'"${PS0-}"
 fi
 "#;
 
 /// PowerShell 7+: D and A from a wrapped `prompt`, B at the end of the prompt text, C from a
-/// wrapped `PSConsoleHostReadLine` once PSReadLine returns a non-blank line. PSReadLine keeps
+/// wrapped `PSConsoleHostReadLine` once PSReadLine returns a non-blank line, carrying that line
+/// percent-encoded as `cmdline_url=` when its UTF-8 form is at most 1 KiB. PSReadLine keeps
 /// editing incomplete input (an open `{`) inside its ReadLine, so a returned non-blank line is one
 /// the shell will run. A blank or cancelled line gets no C, but the next prompt still writes D, so
 /// a run that never started ends as `not_started`, as zsh's and bash's do. D's code: 0 when `$?`

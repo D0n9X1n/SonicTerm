@@ -1,8 +1,8 @@
 # sonicterm-app
 
 ## Purpose
-Cross-platform application glue around `sonicterm-app-core`. This crate
-owns the winit `ApplicationHandler`, window lifecycle, keymap dispatch,
+Cross-platform application glue and the single authority for live application
+state. This crate owns the winit `ApplicationHandler`, window lifecycle, keymap dispatch,
 PTY thread wiring, redraw scheduling, explicit config reload, overlays, tab
 drag/tear-out, and the platform shell abstractions.
 
@@ -18,14 +18,23 @@ drag/tear-out, and the platform shell abstractions.
   `DiagnosticsState` (`diagnostics`, `diagnostics.rs`), `FontState` (`fonts`, `font_state.rs`: font
   sizes, families, catalog) and `ReportWindows` (`reports`, `report_windows.rs`: Memory Usage,
   About). `user_event.rs` owns typed events and `application_handler.rs` forwards callbacks.
-  Window, pane, session, input, and effect orchestration live in
-  `window_state.rs`, `window_registry.rs`, `pane_state.rs`, `session.rs`,
-  `input_dispatch.rs`, and `effects.rs`.
+  Window, pane, session, and input orchestration live in
+  `window_state.rs`, `window_registry.rs`, `pane_state.rs`, `session.rs`, and
+  `input_dispatch.rs`.
 - `src/app/window_event.rs` - `WindowEvent` dispatch, main redraw, shared pointer/wheel helpers.
 - `src/app/window_keyboard.rs` - source-window keyboard, IME, focus, search, READONLY routing.
 - `src/app/field_input.rs`, `field_pointer.rs` - source-field clipboard/selection commands and press-owned query dragging; field IME uses presented renderer caret geometry.
 - `src/app/window_pointer.rs` - main-window cursor, wheel and left-button handlers.
 - `src/app/splitter_input.rs` - main and child pane-divider hit-tests, hover and drag.
+- `src/app/mouse_report.rs` - the five DECSET mouse encodings, the pane-local 1016 pixel, and the
+  rule that drops an identical 1016 motion; every pointer, wheel and secondary report encodes here.
+- `src/app/pointer_cursor.rs` - the one native cursor writer: each window's owners (palette,
+  splitter, scrollbar, tab, band edge, link, selection) else the hovered pane's OSC 22 shape,
+  decided once per `about_to_wait` for the window under the pointer only and written only on
+  change; only an enter or an in-client move claims the pointer (a captured out-of-client move
+  does not); a closed palette, a leave, an ended scrollbar drag, a resize, a scale or focus
+  change reclassifies the hidden splitter, scrollbar and band-edge owners from the current
+  pointer and geometry first.
 - `src/app/keymap_dispatch.rs` - action execution and READONLY whitelist.
 - `src/app/event_loop.rs` - window creation and window-ready hooks; `event_loop_wait.rs` owns
   due-work deadlines and wait servicing.
@@ -125,9 +134,104 @@ cargo build -p sonicterm-app
   generation. Hidden parser/image stores are neither locked nor cloned for a frame.
   Only genuine contention enters the retry floor; structural invalidity skips the
   whole assembly with a bounded window warning and a typed non-retry result.
-- Keep PTY redraw coalescing burst-aware; never redraw per byte. OSC 52 writes
-  must stay bounded and reach the native clipboard only on the event-loop thread;
-  clipboard reads/queries remain unsupported.
+- Keep PTY redraw coalescing burst-aware; never redraw per byte. OSC 52 and OSC 1337
+  `Copy=:` writes (`osc52_stream.rs`) reserve every buffer from `ClipboardStaging` before
+  allocating it and take a program slot before posting. On Linux and Windows they reach the
+  native clipboard only on the one clipboard worker (`clipboard_worker.rs`), which runs program
+  writes and user copies strictly in the event loop's posting order (at most 4 user copies wait).
+  Each job carries its `WriteBinding` (`osc52_read_ticket.rs`: the policy generation its OSC 52
+  stream or OSC 5522 transaction opened under, passed to `admit_write`; for an approved write also
+  the pane, PTY incarnation, owner and command epochs, and `WriteApproval`: the READONLY epoch at
+  Apply and the ticket's 120 s lifetime end), checked at the commit point: on Windows inside one `OpenClipboard` acquisition, after the
+  snapshot or comparison and before `EmptyClipboard` (`WindowsOffer::write_text`/`reassert_text`
+  over the `Win32Clipboard` seam), elsewhere immediately before the native call. A stale binding
+  drops the write with no status, and an OSC 5522 status goes out only while the PTY and command
+  that asked still own the pane (`write_status_owed`). The lease moves into the job and is
+  released or transferred when the native call returns; on Linux each arboard selection keeps its own retained share
+  (`osc52_stream_retained.rs`). The event loop writes a user copy itself only when nothing is in
+  flight and it is at most 512 KiB. macOS has no worker and refuses program writes over 512 KiB.
+  Clipboard reads and `osc52 = "ask"` writes need a consent ticket (`osc52_read_ticket.rs`), taken
+  in the VT worker before any event is posted: one read and one asked write per pane, 8 per
+  process, else empty ST replies at once (a write is refused busy); `deny` is silent. An asked
+  write's ticket holds its job and lease; Apply hands it to the worker's ordering domain, and the
+  event loop refuses any unapproved write under `ask`. A
+  ticket binds the pane, PTY incarnation, owner and command epochs and the policy generation, and
+  `osc52_read_pipeline.rs` revalidates it before the native read and before every delivery
+  attempt. OSC 5522 writes (`kitty_clipboard_tx.rs`) keep one open transaction per pane in the VT
+  worker, reserved from the same `ClipboardStaging` before every buffer grows; a commit resolves
+  aliases over every staged type and plans a native offer (`kitty_clipboard_offer.rs`): names the
+  platform cannot hold are omitted (all omitted is `ENOSYS`), text alone routes like an OSC 52
+  write, and text beside other types reserves its native copies (`native_copy_bytes`), then stages
+  every buffer before one publish: `clearContents`/`writeObjects` on the event loop on macOS
+  (`kitty_clipboard_offer_macos.rs`), one `OpenClipboard` session on the clipboard worker on
+  Windows (`kitty_clipboard_offer_windows.rs` over the `Win32Clipboard` seam,
+  `kitty_clipboard_offer_win32.rs`), which empties the clipboard again when any
+  `SetClipboardData` fails. X11 publishes program MIME and raw text through its selection-owner
+  thread (`kitty_clipboard_offer_x11_native.rs`): reserve tables first, check the binding once before
+  the first `SetSelectionOwner`, and confirm each selection with `GetSelectionOwner`. A later refusal
+  reports failure but keeps the window serving confirmed selections. Arboard shares stay charged until arboard replaces its buffers. Keep the lease through admitted INCRs
+  after `SelectionClear`. User copies remain on arboard. `DONE` only when all published, `EIO` otherwise; the job's
+  `KittyReply` is answered on the source PTY when it settles. The worker's `select!` also wakes on
+  the staging's policy wakeup and the write's 30 s idle / 10 min absolute deadline. A `wdata` or
+  `walias` packet (`KittyClipboardTx::step`) checks both deadlines before it refreshes
+  `last_packet`, `begin` and `step` check and stamp with one admission clock
+  (`now.max(Instant::now())`), and an overflow or invalid-value packet on an expired write answers
+  `EBUSY` (`error_status`), and a commit rechecks the absolute deadline after planning, adding the time it
+  took, and stamps an asked write's consent ticket with that admission clock. Each ready
+  chunk first settles the intake (`PaneVtHandles::take_ready_output`): an OSC 52 stream or OSC 5522
+  write past its deadline, or whose recorded policy generation moved, ends before the chunk is
+  parsed, so a queued terminator or commit never lands on it. The terminator or commit then reads
+  the clock itself (`now.max(Instant::now())`) and the OSC 5522 commit rechecks the generation, so
+  one section timestamp never carries a write past its deadline. `publish_clipboard_policies`
+  bumps the generation before `wake_policy_workers`, whose wake carries the generation it
+  announces. An `ask` ticket is approved only by Apply on its own palette confirm session
+  (`osc52_read_consent.rs`), opened in the source window while it is frontmost and the palette is
+  closed, never raising, focusing, reusing or replacing a palette; the title names the tab and
+  pane by position only. Apply also requires the palette still hosted by that window; Deny,
+  Escape, an outside click or expiry answer empty, and a lost page cancels silently, except that an
+  OSC 5522 write answers `EPERM` while its PTY and command are unchanged; a stopped clipboard
+  worker answers its unreported 5522 writes `EIO`. OSC 5522 reads (`kitty_clipboard_read.rs`)
+  take the same read ticket (`admit_kitty_read`), reserve 21 MiB from the reply budget and build
+  one OK/DATA/DONE reply on the reader thread, bounded before anything grows; each type is read
+  with the cap `type_allowance` leaves (twice the frame so far, the raw bytes and their packets
+  must fit the reservation, at most 8 MiB), and conversions build into buffers reserved first. Non-text types go through `ClipboardTextSource::read_type_bounded` (8 MiB each, one alive
+  at a time). Session grants
+  (`osc52_read_grants.rs`) are created only by the consent page's Always/Ban rows for a ticket
+  whose program sent a nonempty `name` and `pw`, keyed by pane, PTY incarnation, owner and RIS
+  epochs, operation, location and `pw`; the pump purges stale ones and a policy change clears all.
+  DECSET 5522 paste events (`misc_clipboard.rs`) choose recipients before any clipboard read: a
+  pane with the mode (`PaneState::paste_events_mode`, lock-free), not READONLY and not under
+  `osc52_read = "deny"` gets OK/listing/DONE with a one-time `pw` through `try_send_reply`; its
+  recipients and their `PasteBinding` are fixed at the gesture, and the offer's version and listing
+  are read on a disposable capture thread (`osc52_read_paste.rs`, one at a time within the reader's
+  deadline, at most 4 waiting, else unlisted with no grant), never the event loop; each event goes
+  only to a recipient whose identity is unchanged when the capture settles. The gesture binds the
+  pasted offer (`OfferBinding`): `ClipboardTextSource::gesture_offer` reads macOS `changeCount` or
+  Windows `GetClipboardSequenceNumber` on the event loop; X11 (`RoundTrip`) cannot observe the
+  offer at the gesture, so an X11 paste event is `Unbound` and carries no grant. Each gesture takes a
+  paste generation per recipient (`PasteCapture::newest`), so a newer paste supersedes a capture in
+  progress, and each capture stamps `completed_at`, so a late result is unlisted with no grant. Its
+  `PasteGrant` exists only after that admission, binds the recipient identity, the 5522 word and
+  the offer version (`ClipboardTextSource::offer_version`), and one named read consumes it into a
+  `PasteApproval` its `ReadBinding` carries to delivery: revalidation checks the recipient and the
+  grant's `expires_at` (its 60 s end); the reader thread reads through `GrantBoundSource`, which
+  checks `expires_at` against the clock before each source operation (`read_plain_bytes`
+  included; a Windows read retrying `OpenClipboard` finishes that operation), and again after
+  its offer-version read; `deliver_read_reply` revalidates at `now.max(Instant::now())`, retries
+  included, and gives a paste-approved reply the grant's end as `SensitiveReply::valid_until`,
+  which `try_admit_sensitive` checks under the admission lock immediately before queuing; an
+  `Expired` refusal is handled as `PasteRevoked` (`answer_revoked`). A reply refused as `PasteRevoked` returns its ticket from its typed `ReadCustody` to
+  `waiting`; a changed offer drops the data the same way. A reply with no ticket is a deadline
+  status with no data (`requeue_revoked` hands it back), sent without the grant: an abandoned
+  reader still gets its deadline answer once. Only replies carrying data hold a ticket.
+  A reply dropped after its delivery retries leaves an OSC 5522 read one `EBUSY` packet. Native reads run one at a time on a disposable reader thread that keeps the ticket and
+  its reply-budget lease until the native call returns; a result completed at or past its deadline
+  (`ReaderDone::completed_at`) is answered as an overdue read. The X11 protocol runs over the
+  `SelectionPort` seam (`osc52_read_x11.rs`), and the Windows text read over `Win32Clipboard`
+  (`GlobalSize` before `lock_text`). Every tab position change (a reorder, or a tab closed,
+  detached or inserted before it) bumps the owner epoch of every pane whose tab position changed
+  (`WindowState::revoke_tab_positions`). Replies go only to the source PTY through
+  `PtyHandle::try_send_reply`, never the reply spool, a broadcast receiver or a log.
 - Main and child keyboard, IME, focus and modifier events share source-WindowId
   ownership. Search input has priority over READONLY; quick-select retains its
   hint keys. In READONLY, only the explicit safe action whitelist may execute.
@@ -182,6 +286,9 @@ cargo build -p sonicterm-app
   layout lookup, so a removed pane or tab, any tab switch, a screen change, an evicted
   anchor, or any real resize of the press pane's grid (`Grid::size_generation`) cancels
   the drag instead of retargeting it.
+- Prompt click-to-move (`prompt_click.rs`) latches the press identity and the semantic anchor,
+  never intercepts a terminal-owned release, writes only to the source pane, and never runs under
+  READONLY, overlays or a contended parser.
 - Per-pane budgets do not impose a process quota; process and window owners
   are tracking-only. Inline media has a 256 MiB process target plus a possible
   4 MiB newest-image residual per live pane. Decode-time trimming and the
@@ -193,7 +300,7 @@ cargo build -p sonicterm-app
   investigating.
 - Tab widths are measured only in the two redraw paths, right before
   `render_with_outcome`; pointer, drag, tear-out and snapshot paths read the stored
-  widths. A title, badge or privilege change is held while any window has a pressed
+  widths. A title, badge, privilege or program-status marker change is held while any window has a pressed
   or dragged tab, or while that window's own pointer rests on the bar; the dispatcher
   records the pointer (`record_window_pointer`) on every move and leave before any
   overlay or handler. A redraw whose frame does not present restores the widths and
@@ -342,7 +449,7 @@ cargo build -p sonicterm-app
   the screen cannot show which pane holds the text.
 
 ## Cross-references
-- Consumes: `sonicterm-app-core`, `sonicterm-vt`, `sonicterm-grid`,
+- Consumes: `sonicterm-vt`, `sonicterm-grid`,
   `sonicterm-io`, `sonicterm-cfg`, `sonicterm-render-model`,
   `sonicterm-ui`, `sonicterm-gpu`.
 - Consumed by: `sonicterm-mac`, `sonicterm-windows`, `sonicterm-linux`.

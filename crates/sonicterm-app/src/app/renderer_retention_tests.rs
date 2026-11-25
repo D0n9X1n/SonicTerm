@@ -357,7 +357,6 @@ fn window_pane_removals_use_the_renderer_cache_chokepoint() {
         ("window_state.rs", include_str!("window_state.rs")),
         ("broadcast.rs", include_str!("broadcast.rs")),
         ("command_events.rs", include_str!("command_events.rs")),
-        ("effects.rs", include_str!("effects.rs")),
         ("frame_pacing.rs", include_str!("frame_pacing.rs")),
         ("input_dispatch.rs", include_str!("input_dispatch.rs")),
         ("locale.rs", include_str!("locale.rs")),

@@ -6,6 +6,8 @@
 #![warn(clippy::min_ident_chars)]
 
 pub mod command_resolve;
+#[cfg(feature = "test-support")]
+pub mod conpty_fixture;
 #[cfg(windows)]
 mod conpty_runtime;
 #[cfg(windows)]
@@ -22,6 +24,8 @@ pub use reply_spill_pool::{SpillPool, PROCESS_SPILL_BUDGET_BYTES};
 pub use reply_spool::{
     is_budget_refusal, PtyReplySender, ReplyBudgetExceeded, ReplySpoolStats, SPILL_BUDGET_BYTES,
 };
+#[cfg(feature = "test-support")]
+pub use reply_spool::{reply_spool_for_test, ReplyDrain};
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

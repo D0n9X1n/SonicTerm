@@ -82,7 +82,12 @@ pub(super) fn strip_over_top() -> sonicterm_gpu::status_strip::StripHit {
 /// Any-motion SGR mouse reporting, so a wheel that reached the pane would write bytes to its PTY.
 pub(super) fn publish_mouse_reporting(pane: &crate::app::PaneState) {
     use sonicterm_vt::vt::{MouseTracking, PointerModes};
-    let modes = PointerModes::new(MouseTracking::AnyMotion, true, false, false);
+    let modes = PointerModes::new(
+        MouseTracking::AnyMotion,
+        sonicterm_vt::vt::MouseFormat::Sgr,
+        false,
+        false,
+    );
     // Ordering: pointer_input is read only by this thread's handlers here.
     pane.pointer_input.store(modes.bits(), std::sync::atomic::Ordering::Relaxed);
 }

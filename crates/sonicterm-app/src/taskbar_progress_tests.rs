@@ -4,7 +4,20 @@ use std::time::Duration;
 use super::*;
 
 fn report(state: ProgressState, percent: u8) -> Option<ProgressReport> {
-    Some(ProgressReport { state, percent })
+    Some(ProgressReport { state, percent: Some(percent) })
+}
+
+/// A report with no readable percent shows 0 on every backend and keeps its state: no Dock badge
+/// for normal, its glyph for the others, and an empty launcher bar.
+#[test]
+fn a_report_without_a_percent_shows_zero() {
+    let none = |state| Some(ProgressReport { state, percent: None });
+    assert_eq!(badge_text(none(ProgressState::Normal)), None);
+    assert_eq!(badge_text(none(ProgressState::Error)).as_deref(), Some("!"));
+    let paused = LauncherValues { progress: 0.0, visible: true, urgent: false };
+    assert_eq!(launcher_values(none(ProgressState::Paused)), paused);
+    let error = LauncherValues { progress: 0.0, visible: true, urgent: true };
+    assert_eq!(launcher_values(none(ProgressState::Error)), error);
 }
 
 #[test]

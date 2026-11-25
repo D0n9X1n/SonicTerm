@@ -2,19 +2,22 @@
 
 use super::*;
 
-/// Append one frame's vertices to `out` and return how many belong to the reset quad.
+/// Append one frame's vertices to `out` and return how many the replacing draw takes: the reset
+/// quad, then the pane fills.
 ///
 /// Degenerate primitives push nothing, so the returned count and `out.len()` are the
 /// only sources for draw ranges.
 pub(crate) fn assemble_vertices(
     out: &mut Vec<Vertex>,
     reset: Option<&QuadInstance>,
+    pane_fills: &[QuadInstance],
     layers: &PipelineLayers<'_>,
     surface_w: f32,
     surface_h: f32,
     subpixel_aa: SubpixelAaMode,
 ) -> usize {
     push_quad_instances(out, reset.map(std::slice::from_ref).unwrap_or(&[]), surface_w, surface_h);
+    push_quad_instances(out, pane_fills, surface_w, surface_h);
     let reset_vertices = out.len();
     push_quad_instances(out, layers.quads, surface_w, surface_h);
     push_image_instances(out, layers.images, surface_w, surface_h);

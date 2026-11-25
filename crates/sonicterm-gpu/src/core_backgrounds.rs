@@ -18,10 +18,13 @@ use super::*;
 /// `Color::Indexed(1)` (ANSI red) ends up identical to the theme's `ansi.red`
 /// rendered through the LoadOp clear path.
 #[doc(hidden)]
-pub fn cell_bg_rgba(cell: &Cell, theme: &Theme) -> Option<[f32; 4]> {
+pub fn cell_bg_rgba<'frame>(
+    cell: &Cell,
+    colors: impl Into<PaneColors<'frame>>,
+) -> Option<[f32; 4]> {
+    let colors = colors.into();
     let color = if cell.flags.contains(CellFlags::INVERSE) {
-        let default_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
-        color_to_chrome(cell.fg, theme, default_fg)
+        color_to_chrome(cell.fg, colors, colors.foreground())
     } else {
         // When: INVERSE is clear, so the cell keeps its own bg and the glyph keeps fg; swapping them here too would cancel out reverse-video runs.
         match cell.bg {
@@ -29,7 +32,7 @@ pub fn cell_bg_rgba(cell: &Cell, theme: &Theme) -> Option<[f32; 4]> {
                 // When: `Color::Default` is used, the attachment clear or replacement reset supplies this cell's background.
                 return None;
             }
-            bg => color_to_chrome(bg, theme, ChromeColor::rgb(0, 0, 0)),
+            bg => color_to_chrome(bg, colors, ChromeColor::rgb(0, 0, 0)),
         }
     };
     let lut = super::super::color::srgb_u8_to_linear_lut();
@@ -55,10 +58,10 @@ pub fn cell_bg_rgba(cell: &Cell, theme: &Theme) -> Option<[f32; 4]> {
 /// cursor / overlay quads in the draw vector so those still paint on top.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)] // mirrors flush_shape_run / collect_hyperlink_runs siblings — all geometry must be threaded in explicitly to keep this a free function (testable without a full GpuRenderer)
-pub fn emit_cell_bg_quads(
+pub fn emit_cell_bg_quads<'frame>(
     grid: &Grid,
     view_top_abs: u64,
-    theme: &Theme,
+    colors: impl Into<PaneColors<'frame>>,
     pad: f32,
     top_inset: f32,
     cell_w: f32,
@@ -70,7 +73,7 @@ pub fn emit_cell_bg_quads(
     emit_cell_bg_quads_clipped(
         grid,
         view_top_abs,
-        theme,
+        colors,
         PaneRect {
             x: pad,
             y: top_inset,
@@ -90,10 +93,10 @@ pub fn emit_cell_bg_quads(
 /// current tile must never emit quads into its neighbour's rectangle.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
-pub fn emit_cell_bg_quads_clipped(
+pub fn emit_cell_bg_quads_clipped<'frame>(
     grid: &Grid,
     view_top_abs: u64,
-    theme: &Theme,
+    colors: impl Into<PaneColors<'frame>>,
     pane_rect: PaneRect,
     cell_w: f32,
     cell_h: f32,
@@ -111,11 +114,12 @@ pub fn emit_cell_bg_quads_clipped(
     }
     // Snap this pane's raster-pixel edges so its background aligns with its glyphs, not the active pane's grid.
     let snapped_cell_x = build_snapped_cell_x(pad, cell_w, grid.cols);
+    let colors = colors.into();
     for r in 0..max_rows {
         emit_cell_bg_quads_for_row(
             grid,
             view_top_abs,
-            theme,
+            colors,
             pad,
             top_inset,
             cell_w,
@@ -146,6 +150,40 @@ pub(crate) fn focus_flash_quad(
     }
 }
 
+/// The quad that replaces the theme clear over a pane's `clip` with its program background at the
+/// window `opacity`, so blank cells and padding take that color at the configured opacity on full
+/// and partial frames; `None` without a program background or for a pane off the surface.
+pub(crate) fn pane_fill_quad(
+    colors: PaneColors<'_>,
+    opacity: f32,
+    clip: Option<PixelRect>,
+    (sw, sh): (f32, f32),
+) -> Option<QuadInstance> {
+    let (fill, clip) = (colors.background_fill(opacity)?, clip?);
+    Some(QuadInstance::sharp(
+        px_to_ndc(clip.x as f32, clip.y as f32, clip.w as f32, clip.h as f32, sw, sh),
+        fill,
+    ))
+}
+
+/// Push the fill of every planned pane whose program set a background onto `pane_fills`, in plan
+/// order: each `(planned pane, program colors)` pair draws its planned clip at the window
+/// `opacity`, the walk production assembly and its tests share.
+pub(crate) fn push_planned_pane_fills<'frame>(
+    pane_fills: &mut Vec<QuadInstance>,
+    theme: &'frame Theme,
+    opacity: f32,
+    panes: impl IntoIterator<
+        Item = (&'frame PlannedPane, Option<&'frame sonicterm_types::ColorOverrides>),
+    >,
+    surface: (f32, f32),
+) {
+    for (planned, overrides) in panes {
+        let colors = PaneColors::new(theme, overrides);
+        pane_fills.extend(pane_fill_quad(colors, opacity, planned.full_clip, surface));
+    }
+}
+
 /// Where a selection is drawn: its pane's viewport, grid size, origin, cells, clip and surface.
 pub(crate) struct SelectionGeometry {
     pub(crate) view_top_abs: u64,
@@ -156,16 +194,25 @@ pub(crate) struct SelectionGeometry {
     pub(crate) surface: (f32, f32),
 }
 
-/// Push the selection highlight quads, clipped to the pane so a drag across a split cannot bleed.
-pub(crate) fn push_selection_quads(
-    out: &mut Vec<QuadInstance>,
+/// `rects` clipped to the selection's pane, so neither the highlight nor the selected-glyph
+/// recolor can reach a neighbouring pane.
+fn clip_to_selection_pane(
+    rects: impl IntoIterator<Item = (f32, f32, f32, f32)>,
+    geometry: &SelectionGeometry,
+) -> impl Iterator<Item = (f32, f32, f32, f32)> {
+    let (clip_x, clip_y, clip_w, clip_h) = geometry.clip;
+    rects
+        .into_iter()
+        .filter_map(move |rect| clip_rect_to_pane(rect, clip_x, clip_y, clip_w, clip_h))
+}
+
+/// The selection's rectangles in surface pixels, before the pane clip.
+fn selection_rects(
     sel: &sonicterm_render_model::boundary::ui::selection::Selection,
     geometry: &SelectionGeometry,
     snapped_cell_x: &[f32],
-    color: [f32; 4],
-) {
-    let (clip_x, clip_y, clip_w, clip_h) = geometry.clip;
-    for rect in selection_quad_rects(
+) -> Vec<(f32, f32, f32, f32)> {
+    selection_quad_rects(
         sel,
         geometry.view_top_abs,
         geometry.grid_size.0,
@@ -176,9 +223,89 @@ pub(crate) fn push_selection_quads(
         geometry.cell_size.1,
         snapped_cell_x,
     )
-    .into_iter()
-    .filter_map(|rect| clip_rect_to_pane(rect, clip_x, clip_y, clip_w, clip_h))
-    {
+}
+
+/// Draw the selected cells' glyph ink in `color`, the program's selection foreground, over the
+/// same clipped rectangles as the highlight. `rows[pane]` are the owning pane's glyph rows, so a
+/// neighbour's overhang is never read; a glyph crossing a selected cell's edge is cut there, and
+/// every span of `rows` follows the parts. Runs on the frame's emitted instances after the row
+/// glyph cache, so cache keys are unchanged.
+pub(crate) fn recolor_selected_glyphs(
+    glyphs: &mut Vec<GlyphInstance>,
+    rows: &mut [RowGlyphSpan],
+    pane: std::ops::Range<usize>,
+    sel: &sonicterm_render_model::boundary::ui::selection::Selection,
+    geometry: &SelectionGeometry,
+    snapped_cell_x: &[f32],
+    color: [f32; 4],
+) {
+    recolor_selected_rects(
+        glyphs,
+        rows,
+        pane,
+        selection_rects(sel, geometry, snapped_cell_x),
+        geometry,
+        color,
+    );
+}
+
+/// Draw the glyph ink of copy mode's selected range in `color`, the program's selection
+/// foreground, by the mouse selection's rule: the owning pane's rows only, clipped to the pane,
+/// and a glyph crossing a selected cell's edge cut there.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn recolor_copy_mode_glyphs(
+    glyphs: &mut Vec<GlyphInstance>,
+    rows: &mut [RowGlyphSpan],
+    pane: std::ops::Range<usize>,
+    copy_mode: &CopyModeState,
+    grid: &Grid,
+    geometry: &SelectionGeometry,
+    snapped_cell_x: &[f32],
+    color: [f32; 4],
+) {
+    let rects = GpuRenderer::copy_mode_selection_rects(
+        copy_mode,
+        grid,
+        geometry.view_top_abs,
+        geometry.origin,
+        geometry.cell_size,
+        snapped_cell_x,
+    );
+    recolor_selected_rects(glyphs, rows, pane, rects, geometry, color);
+}
+
+/// Draw the owning pane's glyph ink inside `rects`, clipped to the pane, in `color`: the mouse
+/// selection and copy mode's selection share this rule. The selection's own slot damage repaints
+/// these glyphs, so the cursor recolor record, which widens damage for the cursor cell, is not
+/// extended by them; the glyphs examined are counted.
+fn recolor_selected_rects(
+    glyphs: &mut Vec<GlyphInstance>,
+    rows: &mut [RowGlyphSpan],
+    pane: std::ops::Range<usize>,
+    rects: impl IntoIterator<Item = (f32, f32, f32, f32)>,
+    geometry: &SelectionGeometry,
+    color: [f32; 4],
+) {
+    let visited = crate::cursor::recolor_selected_cells(
+        glyphs,
+        rows,
+        pane,
+        clip_to_selection_pane(rects, geometry),
+        geometry.surface,
+        color,
+    );
+    crate::frame_stats::note_recolor_glyphs_visited(|| visited);
+}
+
+/// Push the selection highlight quads, clipped to the pane so a drag across a split cannot bleed.
+pub(crate) fn push_selection_quads(
+    out: &mut Vec<QuadInstance>,
+    sel: &sonicterm_render_model::boundary::ui::selection::Selection,
+    geometry: &SelectionGeometry,
+    snapped_cell_x: &[f32],
+    color: [f32; 4],
+) {
+    for rect in clip_to_selection_pane(selection_rects(sel, geometry, snapped_cell_x), geometry) {
         out.push(QuadInstance {
             rect: px_to_ndc(rect.0, rect.1, rect.2, rect.3, geometry.surface.0, geometry.surface.1),
             color,
@@ -212,7 +339,7 @@ pub(crate) fn emit_row_background<'cell, Cells>(
     cache: &mut crate::row_quad_cache::LineQuadCache,
     row: RowBackgroundRow<'_>,
     cells: Cells,
-    (style_rev, theme, selection): (u64, &Theme, Option<(u64, u16, u64, u16)>),
+    (style_rev, colors, selection): (u64, PaneColors<'_>, Option<(u64, u16, u64, u16)>),
     geometry: &RowBackgroundGeometry,
     snapped_cell_x: &[f32],
     out: &mut Vec<QuadInstance>,
@@ -244,7 +371,7 @@ where
     emit_cell_bg_quads_for_row(
         row.grid,
         row.view_top_abs,
-        theme,
+        colors,
         geometry.origin.0,
         geometry.origin.1,
         geometry.cell_size.0,
@@ -266,10 +393,10 @@ where
 /// at a time and capture the resulting quads into the cache.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
-pub fn emit_cell_bg_quads_for_row(
+pub fn emit_cell_bg_quads_for_row<'frame>(
     grid: &Grid,
     view_top_abs: u64,
-    theme: &Theme,
+    colors: impl Into<PaneColors<'frame>>,
     pad: f32,
     top_inset: f32,
     cell_w: f32,
@@ -281,6 +408,7 @@ pub fn emit_cell_bg_quads_for_row(
     out: &mut Vec<QuadInstance>,
     snapped_cell_x: &[f32],
 ) {
+    let colors = colors.into();
     {
         let row_abs = view_top_abs + r as u64;
         let Some(row) = grid.row_at_abs(row_abs) else {
@@ -315,7 +443,7 @@ pub fn emit_cell_bg_quads_for_row(
                 out.push(QuadInstance::sharp(px_to_ndc(x, y, w, cell_h, sw, sh), color));
             };
         for cell in row.iter().take(max_cols as usize) {
-            let bg = cell_bg_rgba(cell, theme);
+            let bg = cell_bg_rgba(cell, colors);
             match (run_color, bg) {
                 (Some(prev), Some(cur)) if prev == cur => {
                     // When: cur repeats prev, so the cell joins the open run and an 80-column fill stays one quad instead of eighty.

@@ -73,12 +73,12 @@ impl PaneMap {
 
     /// Take pane `id` out of this window, for retirement or a move.
     pub(in crate::app) fn detach(&mut self, id: u64) -> Option<DetachedPane> {
-        self.0.remove(&id).map(|state| DetachedPane::new(id, state))
+        self.0.remove(&id).map(|state| DetachedPane::leaving(id, state))
     }
 
     /// Take every pane out, for a window that is going away; in no particular order.
     pub(in crate::app) fn detach_all(&mut self) -> Vec<DetachedPane> {
-        self.0.drain().map(|(id, state)| DetachedPane::new(id, state)).collect()
+        self.0.drain().map(|(id, state)| DetachedPane::leaving(id, state)).collect()
     }
 
     /// Add `pane` as `id` directly, for a test fixture building a window's panes.
@@ -134,6 +134,12 @@ impl DetachedPane {
     /// Wrap `state` as pane `id`.
     fn new(id: u64, state: PaneState) -> Self {
         Self { id, state: Some(Box::new(state)) }
+    }
+
+    /// A pane leaving its window: every OSC 52 read bound to that owner is revoked.
+    fn leaving(id: u64, state: PaneState) -> Self {
+        state.read_identity.bump_owner();
+        Self::new(id, state)
     }
 
     /// A pane that never joined a window, such as a new pane whose installation failed.

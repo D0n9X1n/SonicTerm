@@ -1,0 +1,183 @@
+use super::*;
+
+/// The reply pane returns exactly the bytes the production VT publisher hands a pane's reply
+/// path, and plain output returns none, so the F-ConPTY app smoke's expected replies come from
+/// the code a live pane runs. The OSC 7501 answer is fixed, which also pins the canned reply the
+/// transport row injects.
+#[test]
+fn reply_pane_returns_the_production_reply_bytes() {
+    let mut pane = App::__test_reply_pane(80, 24);
+    assert!(pane.replies(b"plain text\r\n").is_empty());
+    assert_eq!(pane.replies(b"\x1b[6n"), b"\x1b[2;1R".to_vec());
+    let palette = pane.replies(b"\x1b]4;1;?\x1b\\");
+    assert!(palette.starts_with(b"\x1b]4;1;rgb:") && palette.ends_with(b"\x1b\\"), "{palette:?}");
+    assert_eq!(
+        pane.replies(b"\x1b]7501;?\x07"),
+        b"\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x07"
+            .to_vec()
+    );
+}
+
+/// Two fresh reply panes answer the same query identically, so a reference pane can stand for
+/// the live pane's answer to a query that changes no state.
+#[test]
+fn fresh_reply_panes_answer_identically() {
+    let query = b"\x1b]10;?;?\x07\x1b]21;foreground=?\x1b\\";
+    let first = App::__test_reply_pane(80, 24).replies(query);
+    assert!(!first.is_empty());
+    assert_eq!(App::__test_reply_pane(80, 24).replies(query), first);
+}
+
+/// Contract: the F-ConPTY app smoke's clipboard pane answers a read under `allow` from its fake
+/// clipboard with exact ST-terminated bytes, `c` carrying the text and `p` empty except on Linux,
+/// so the smoke's expected reply is the bytes this pins.
+#[test]
+fn clipboard_reply_pane_answers_reads_from_its_fake_clipboard() {
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    assert_eq!(pane.replies(b"\x1b]52;c;?\x07"), b"\x1b]52;c;Zml4dHVyZQ==\x1b\\".to_vec());
+    let primary = if cfg!(target_os = "linux") { "Zml4dHVyZQ==" } else { "" };
+    let expected = format!("\x1b]52;c;Zml4dHVyZQ==\x1b\\\x1b]52;p;{primary}\x1b\\");
+    assert_eq!(pane.replies(b"\x1b]52;cp;?\x1b\\"), expected.into_bytes());
+    // OSC 52 prints nothing, so the cursor is still home.
+    assert_eq!(pane.replies(b"\x1b[6n"), b"\x1b[1;1R".to_vec(), "other replies are unchanged");
+}
+
+/// Contract: the F-ConPTY app smoke's clipboard pane settles an OSC 5522 write under `allow`
+/// against its fake clipboard and answers exactly `type=write:status=DONE` with the opening id and
+/// the commit's terminator, whether the packets arrive in one batch or one per batch, so the
+/// smoke's expected reply is the bytes this pins.
+#[test]
+fn clipboard_reply_pane_answers_a_kitty_write_done() {
+    let write = b"\x1b]5522;type=write:id=fixture\x07";
+    let data = b"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\";
+    let commit = b"\x1b]5522;type=wdata\x07";
+    let done = b"\x1b]5522;type=write:status=DONE:id=fixture\x07".to_vec();
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    assert!(pane.replies(write).is_empty());
+    assert!(pane.replies(data).is_empty());
+    assert_eq!(pane.replies(commit), done);
+    let whole = [&write[..], &data[..], &commit[..]].concat();
+    assert_eq!(App::__test_clipboard_reply_pane(80, 24, "fixture").replies(&whole), done);
+}
+
+/// Contract: the F-ConPTY app smoke's clipboard pane answers an OSC 5522 `text/plain` read under
+/// `allow` from its fake clipboard with exactly OK, one DATA packet repeating the id and MIME, and
+/// DONE, each ST-terminated as the request was, so the smoke's expected reply is the bytes this pins.
+#[test]
+fn clipboard_reply_pane_answers_a_kitty_read_exactly() {
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    let expected = "\x1b]5522;type=read:status=OK:id=r\x1b\\\
+                    \x1b]5522;type=read:status=DATA:id=r:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\\
+                    \x1b]5522;type=read:status=DONE:id=r\x1b\\";
+    let reply = pane.replies(b"\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\");
+    assert_eq!(String::from_utf8(reply).unwrap(), expected);
+}
+
+/// Contract: the F-ConPTY app smoke's multi-type OSC 5522 write (`text/html`, `image/png`, a custom
+/// MIME type and `text/plain`) settles `DONE` with the opening id, whether the platform holds every
+/// type or omits some, so the smoke's expected reply is the bytes this pins.
+#[test]
+fn clipboard_reply_pane_answers_a_multi_type_kitty_write_done() {
+    let write = b"\x1b]5522;type=write:id=multi\x07\
+\x1b]5522;type=wdata:mime=dGV4dC9odG1s;PGI+Zml4dHVyZTwvYj4=\x1b\\\
+\x1b]5522;type=wdata:mime=aW1hZ2UvcG5n;UE5H\x1b\\\
+\x1b]5522;type=wdata:mime=YXBwbGljYXRpb24veC1zb25pY3Rlcm0tdGVzdA==;Y3VzdG9t\x1b\\\
+\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\\
+\x1b]5522;type=wdata\x07";
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    assert_eq!(pane.replies(write), b"\x1b]5522;type=write:status=DONE:id=multi\x07".to_vec());
+}
+
+/// Contract: the F-ConPTY app smoke's multi-type OSC 5522 read answers OK, one DATA packet per
+/// requested type its fake clipboard holds (`text/html`, `image/png`, the custom type and
+/// `text/plain`, in request order) and DONE, so the smoke's expected reply is the bytes this pins.
+#[test]
+fn clipboard_reply_pane_answers_a_multi_type_kitty_read_with_every_type() {
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    let request = b"\x1b]5522;type=read:id=m;\
+dGV4dC9odG1sIGltYWdlL3BuZyBhcHBsaWNhdGlvbi94LXNvbmljdGVybS10ZXN0IHRleHQvcGxhaW4=\x1b\\";
+    let expected = "\x1b]5522;type=read:status=OK:id=m\x1b\\\
+\x1b]5522;type=read:status=DATA:id=m:mime=dGV4dC9odG1s;PGI+Zml4dHVyZTwvYj4=\x1b\\\
+\x1b]5522;type=read:status=DATA:id=m:mime=aW1hZ2UvcG5n;UE5H\x1b\\\
+\x1b]5522;type=read:status=DATA:id=m:mime=YXBwbGljYXRpb24veC1zb25pY3Rlcm0tdGVzdA==;Y3VzdG9t\x1b\\\
+\x1b]5522;type=read:status=DATA:id=m:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\\
+\x1b]5522;type=read:status=DONE:id=m\x1b\\";
+    assert_eq!(String::from_utf8(pane.replies(request)).unwrap(), expected);
+}
+
+/// Contract: the clipboard reply pane counts a write as committed only when it reaches the
+/// commit behind its binding, as the worker does: an admitted write commits once and answers
+/// `DONE`, while a write under `osc52 = "deny"` commits nothing and never answers `DONE`, so the
+/// F-ConPTY smoke's `DONE` row stands for a write that committed.
+#[test]
+fn clipboard_reply_pane_counts_only_committed_writes() {
+    let write = b"\x1b]5522;type=write:id=fixture\x07\
+\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\\
+\x1b]5522;type=wdata\x07";
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    assert!(String::from_utf8_lossy(&pane.replies(write)).contains("status=DONE"));
+    assert_eq!(pane.writes_committed(), 1, "an admitted write commits");
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    pane.set_write_policy(sonicterm_cfg::config::Osc52Policy::Deny);
+    let reply = pane.replies(write);
+    assert_eq!(pane.writes_committed(), 0, "a denied write commits nothing");
+    assert!(!String::from_utf8_lossy(&reply).contains("DONE"), "{reply:?}");
+}
+
+/// The `text/plain` OSC 5522 write of `text` with id `w`, as one batch.
+fn kitty_text_write(text: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    let data = base64::engine::general_purpose::STANDARD.encode(text);
+    format!(
+        "\x1b]5522;type=write:id=w\x07\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;{data}\x1b\\\
+         \x1b]5522;type=wdata\x07"
+    )
+    .into_bytes()
+}
+
+/// What an OSC 5522 `text/plain` read of `pane`'s fake clipboard returns, as the DATA packet's
+/// Base64 payload.
+fn read_back(pane: &mut super::TestReplyPane) -> String {
+    let reply = pane.replies(b"\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\");
+    let text = String::from_utf8(reply).expect("an ASCII reply");
+    let marker = "mime=dGV4dC9wbGFpbg==;";
+    let start = text.find(marker).map(|at| at + marker.len()).expect("a DATA packet");
+    text[start..].chars().take_while(|character| *character != '\x1b').collect()
+}
+
+/// Contract: a write the reply pane commits reaches its fake clipboard: it answers `DONE`, and a
+/// later read returns the written text, not the text the pane started with.
+#[test]
+fn clipboard_reply_pane_write_is_visible_to_a_later_read() {
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    let reply = pane.replies(&kitty_text_write("other"));
+    assert!(String::from_utf8_lossy(&reply).contains("status=DONE"), "{reply:?}");
+    assert_eq!(read_back(&mut pane), "b3RoZXI=", "the written text reads back");
+}
+
+/// Contract: a clipboard setter that fails answers `EIO` and changes nothing: the write is not
+/// counted, and a later read still returns the text the pane started with.
+#[test]
+fn clipboard_reply_pane_failed_setter_answers_eio_without_mutation() {
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    pane.fail_clipboard_writes();
+    let reply = String::from_utf8(pane.replies(&kitty_text_write("other"))).unwrap();
+    assert_eq!(reply, "\x1b]5522;type=write:status=EIO:id=w\x07");
+    assert_eq!(pane.writes_committed(), 0, "a failed setter commits nothing");
+    assert_eq!(read_back(&mut pane), "Zml4dHVyZQ==", "the clipboard is unchanged");
+}
+
+/// Contract: a write revoked after it was posted, by a policy reload that lands before the commit
+/// point, is dropped there: no status, no count and no change to the fake clipboard. The deny test
+/// above refuses before anything is posted, so only this case exercises the commit check.
+#[test]
+fn clipboard_reply_pane_write_revoked_after_posting_never_commits() {
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    let reply = pane.replies_with(&kitty_text_write("other"), |pane| {
+        // A reload back to the same policy still moves the generation the write opened under.
+        pane.set_write_policy(sonicterm_cfg::config::Osc52Policy::Allow);
+    });
+    assert_eq!(reply, Vec::<u8>::new(), "a stale write answers nothing");
+    assert_eq!(pane.writes_committed(), 0);
+    assert_eq!(read_back(&mut pane), "Zml4dHVyZQ==", "the clipboard is unchanged");
+}

@@ -52,7 +52,7 @@ pub(super) fn child_no_button_motion_report(
     child: &WindowState,
     cell: PointerCell,
     tracking: sonicterm_vt::vt::MouseTracking,
-    sgr: bool,
+    format: sonicterm_vt::vt::MouseFormat,
     scrollbar_owned: bool,
 ) -> Option<super::window_event::PointerMotionRoute> {
     let ui_consumed = child.splitter_hover.is_some()
@@ -63,7 +63,13 @@ pub(super) fn child_no_button_motion_report(
             .copy_mode
             .as_ref()
             .is_some_and(sonicterm_ui::copy_mode::CopyModeState::is_read_only);
-    super::window_event::no_button_motion_report(cell, tracking, sgr, child.modifiers, ui_consumed)
+    super::window_event::no_button_motion_report(
+        cell,
+        tracking,
+        format,
+        child.modifiers,
+        ui_consumed,
+    )
 }
 
 /// Resize `renderer` to `width × height` and size every pane in `panes` to the
@@ -96,7 +102,7 @@ pub fn resize_renderer_and_panes_if_present(
     let (cell_width, cell_height) = renderer.cell_size();
     for (pane_id, pane) in panes {
         let mut parser = crate::app::frame_counters::lock_parser(&pane.parser);
-        parser.resize(cols, rows);
+        super::pane_refresh::resize_terminal_grid(&mut parser, cols, rows);
         parser.set_cell_pixel_size(cell_width, cell_height);
         drop(parser);
         pane.resize_pty(*pane_id, cols, rows);

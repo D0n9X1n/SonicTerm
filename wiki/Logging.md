@@ -76,7 +76,7 @@ artifact cleanup runs on a background thread.
 | `error` | errors only |
 | `warn` | warnings, errors, `sonic_exit`, `sonic::gpu` device records, and user-visible reclamation/exhaustion warnings |
 | `info` | normal SonicTerm information plus the aggregate `memory snapshot` |
-| `debug` | detailed SonicTerm diagnostics, pane/renderer memory lines, state-machine events, `render_timing`, `tear_out_timing`, and `frame_counters` |
+| `debug` | detailed SonicTerm diagnostics, pane/renderer memory lines, `render_timing`, `tear_out_timing`, and `frame_counters` |
 
 The `mcp` target belongs to the agent control server. Its warnings reach every
 session, including the default `warn`: a listener that could not start, a refused
@@ -166,7 +166,7 @@ retain the matching click identity and do not infer its CWD from another shell.
 The default `warn` level reports input that was refused, including terminal
 parser replies. The producer assigns `source`: `Keyboard`, `Paste`, `FileDrop`,
 `Ime`, `PointerButton`, `PointerMotion`, `Wheel`, `FocusReport`, `TerminalReply`,
-`ScriptDraft`, or `StateMachine`. Sources are never guessed from payload bytes.
+`ScriptDraft`, `Agent`, or `AgentRun`. Sources are never guessed from payload bytes.
 
 | Field | Meaning |
 | --- | --- |
@@ -930,6 +930,7 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
                 graphics_requested_created="surface=<bytes>/<count> frame_texture=<bytes>/<count> ..."
                 graphics_requested_released="surface=<bytes>/<count> frame_texture=<bytes>/<count> ..."
                 graphics_os_unavailable_reason="<reason>|none"
+                program_metadata_bytes=<bytes>
 ```
 
 Process figures come from the OS, so they include allocator fragmentation,
@@ -968,9 +969,10 @@ SonicTerm's own seams do not count.
 | `graphics_renderers` | per-renderer requested bytes and resource counts by class (`surface`, `frame_texture`, `glyph_atlas`, `image_atlas`, `present_buffers`), sorted like `renderers`, each ending with `surface_count=exact` (Metal, DX12) or `estimated` (Vulkan, GL); `none` before a renderer exists |
 | `graphics_requested_created` / `graphics_requested_released` | requested bytes and resources created and released per class since each live renderer was built, summed across live renderers; a dropped renderer's totals are in its `renderer graphics teardown` record |
 | `graphics_os_unavailable_reason` | why the OS query gave no figure when it declined (for example, two DXGI adapters share the renderer's vendor and device ids); `none` otherwise |
+| `program_metadata_bytes` | the session's OSC 7501 program-status records and OSC 1337 user variables, a pane seam `session_total_bytes` includes |
 
-The graphics fields come after every other field, so the fields before them keep
-their names and order. When a renderer drops, it writes one `renderer graphics
+The graphics fields come after every earlier field, and `program_metadata_bytes`
+after them, so the fields before each keep their names and order. When a renderer drops, it writes one `renderer graphics
 teardown` record at `info` on `memory` with `renderer_role`, `window_id`,
 `graphics_live`, `graphics_created`, `graphics_released` (each
 `class=bytes/resources` per class) and `surface_count`. See [Graphics memory](Memory#graphics-memory) for what
@@ -1019,11 +1021,13 @@ pane retention pane="<window-id>/<pane-id>" total_bytes=<bytes>
                grid_visible_bytes=<bytes> grid_history_bytes=<bytes>
                grid_alternate_bytes=<bytes> parser_bytes=<bytes> hyperlink_bytes=<bytes>
                inline_media_bytes=<bytes> pty_output_bytes=<bytes> pty_input_bytes=<bytes>
+               program_metadata_bytes=<bytes>
                largest_seam="<seam-name>" largest_seam_bytes=<bytes>
 session retention panes=<count> total_bytes=<bytes> grid_visible_bytes=<bytes>
                   grid_history_bytes=<bytes> grid_alternate_bytes=<bytes> parser_bytes=<bytes>
                   hyperlink_bytes=<bytes> inline_media_bytes=<bytes>
                   pty_output_bytes=<bytes> pty_input_bytes=<bytes>
+                  program_metadata_bytes=<bytes>
 pty queues panes=<count> resident_bytes=<bytes> input_queued_bytes=<bytes>
            writer_in_flight_bytes=<bytes> reply_resident_bytes=<bytes>
            reply_spill_disk_bytes=<bytes> reply_spill_file_bytes=<bytes>
@@ -1053,7 +1057,7 @@ how many ran, how many blocked longer than 50 ms, the longest and the total. A
 fallback past 50 ms also logs `synchronous PTY teardown fallback blocked the event
 loop` at `warn` with `owner` and `blocked_ms`.
 
-The eight seam fields are disjoint and sum to `total_bytes`:
+The nine seam fields are disjoint and sum to `total_bytes`:
 
 | Field | What it owns | First response |
 | --- | --- | --- |
@@ -1065,6 +1069,7 @@ The eight seam fields are disjoint and sum to `total_bytes`:
 | `inline_media_bytes` | decoded inline images retained by panes | display fewer images or close image-heavy panes |
 | `pty_output_bytes` | local PTY output queued or in flight | let output drain |
 | `pty_input_bytes` | input queued toward the shell or being written (usually a large paste), plus resident parser replies; spilled replies are not included | let the shell drain it |
+| `program_metadata_bytes` | OSC 7501 program-status records and OSC 1337 user variables: vector capacity, record blocks and strings; persistent, never reclaimed by a capture cancel | no action; bounded per pane and replaced or cleared by the program |
 
 Read `largest_seam` first, then compare at least five consecutive samples. A
 large flat working set is different from a value that rises every sample. Pane
@@ -1111,7 +1116,7 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `vertex_scratch_items` | 1 while the vertex buffer holds an allocation, else 0 | — |
 | `row_ink_bytes` | the `RowInk` part: the allocated buckets of the per-row ink table (where each presented row drew, per pane and slot) plus one frame's staging buffer | bounded by the visible rows; a pane that shrinks or closes releases its records at the next presented frame |
 | `row_ink_items` | committed per-row ink records, one per visible row | — |
-| `frame_scratch_bytes` | the `FrameScratch` part: the per-frame draw vectors (glyphs, quads, overlays, images, image sort orders, the kitty placeholder index, the media revision list, row spans, underlines, staging indices, tofu, pane rects, column edges and row keys) the renderer keeps between assembled frames | every restoration clears each vector and holds it within its cap (17,826,816 bytes in total); only a completed assembly also shrinks a vector to twice its use once over four times that use and over 1 MiB and drops column-edge slots above its peak, so a failed or retried frame keeps its warm capacity; zero while a frame holds it |
+| `frame_scratch_bytes` | the `FrameScratch` part: the per-frame draw vectors (glyphs, quads, overlays, pane fills, images, image sort orders, the kitty placeholder index, the media revision list, row spans, underlines, staging indices, tofu, pane rects, column edges and row keys) the renderer keeps between assembled frames | every restoration clears each vector and holds it within its cap (17,892,352 bytes in total); only a completed assembly also shrinks a vector to twice its use once over four times that use and over 1 MiB and drops column-edge slots above its peak, so a failed or retried frame keeps its warm capacity; zero while a frame holds it |
 | `frame_scratch_items` | scratch vectors that hold an allocation | — |
 | `chrome_cache_bytes` | the `ChromeCache` part: the 64-slot tab-title table and the 32-slot chrome-run table, each kept run's text and glyphs, and the kept UI palette's color strings | bounded by the fixed tables and their admission limits (256 text bytes, 512 glyphs) and by a 4 KiB palette allowance (a larger palette is derived again on every request, never kept); a font change, scale change or `clear_shape_cache` empties both run tables |
 | `chrome_cache_items` | kept tab titles plus kept chrome runs | — |

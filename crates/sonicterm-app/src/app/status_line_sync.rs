@@ -226,6 +226,8 @@ impl App {
             self.note_input(window_id, input, now);
         }
         self.service_held_input(now);
+        // A read or asked write waiting for its consent page outlasts any record's hold.
+        let waiting_clip = self.waiting_clip_record(now);
         let Self {
             registry: crate::app::WindowRegistry { windows, .. },
             status_line: state,
@@ -292,7 +294,9 @@ impl App {
             // The hold ended, so the record is dropped and nothing wakes for it again.
             state.clip = None;
         }
-        let clip = state.clip.filter(|_| state.resolved.segment(StatusSegmentId::Clip).is_some());
+        let clip = waiting_clip
+            .or(state.clip)
+            .filter(|_| state.resolved.segment(StatusSegmentId::Clip).is_some());
         if let Some(record) = clip {
             let wake = record.last_at + clip_hold;
             next_wake = Some(next_wake.map_or(wake, |next| next.min(wake)));

@@ -14,7 +14,6 @@ flowchart TD
     config["读取 sonicterm.toml<br/>收集回退 warning"]
     logging["按 [logging] 初始化<br/>重新输出 warning"]
     assets["读取主题、键位和包内字体"]
-    machine["创建 AppStateMachine"]
     shell["创建平台 Shell"]
     loop["ShellRunner 创建 EventLoop&lt;UserEvent&gt;"]
     app["创建 App 并安装桥接"]
@@ -22,7 +21,7 @@ flowchart TD
     window["创建原生窗口和 GpuRenderer"]
     pane["建立启动标签页和 PTY 窗格"]
 
-    platform --> diagnostics --> config --> logging --> assets --> machine --> shell
+    platform --> diagnostics --> config --> logging --> assets --> shell
     shell --> loop --> app --> resumed --> window --> pane
 ```
 
@@ -48,8 +47,7 @@ macOS 和 Linux 会在读取配置前安装 panic 与退出诊断。Windows 先�
   `--runtime-smoke` 都使用分开的临时 config/log 根目录、30 秒应用内证明期限和 45 秒完整
   进程树看门狗。
 
-三个二进制随后读取主题和键位，创建
-`AppStateMachine::new(AppState::default())`，构建 `MacShell`、`WindowsShell` 或
+三个二进制随后读取主题和键位，构建 `MacShell`、`WindowsShell` 或
 `LinuxShell`，再调用 `run`。
 
 每个原生二进制都在构建 shell 前，为 SonicTerm 进程记录一次带类型的
@@ -70,7 +68,7 @@ shell 提示符或标题文本推断。
 
 ### Shell 与事件循环构建
 
-每个平台 shell 都包装同一个 `ShellRunner`。runner 持有状态机、主题、配置、键位、进程权限
+每个平台 shell 都包装同一个 `ShellRunner`。runner 持有主题、配置、键位、进程权限
 快照、可选资源加载器、原生拖动钩子、启动 payload、面包屑 recorder 和一次性原生窗口钩子。
 它会在排队任何启动 payload 前把快照安装到 `App`。随后 `App` 把同一个值传给主窗口和每个
 子窗口的渲染调用，所以新标签页、新窗口和拆出窗口不会对进程权限得出不同结论。Windows 中每个标签页还会把自己的
@@ -82,7 +80,7 @@ shell 提示符或标题文本推断。
 1. 执行可重复调用的 tracing 初始化；
 2. 创建 `EventLoop<UserEvent>`，初始 `ControlFlow::Wait`；
 3. 安装菜单、OS 拖动和脚本打开代理桥；
-4. 用状态机和事件循环代理构建 `App`；
+4. 用事件循环代理构建 `App`；
 5. 安装可选钩子与平台后端；
 6. 排队启动标签页 payload；
 7. 调用 `run_app`；
@@ -134,7 +132,6 @@ shell 提示符或标题文本推断。
 flowchart TD
     app["App"] --> windows["HashMap&lt;WindowId, WindowState&gt;"]
     app --> process["ResourceGovernor Process 所有者"]
-    app --> machine["AppStateMachine"]
     windows --> window["WindowState"]
     window --> native["Arc&lt;Window&gt; + GpuRenderer"]
     window --> tabs["TabBar + Vec&lt;TabState&gt;"]
@@ -149,7 +146,7 @@ flowchart TD
     pane --> paneowner["AppPane 所有者 + 分类计费"]
 ```
 
-主窗口是 `App::windows` 中的普通条目，由 `main_window_id` 标识。拆出窗口使用同一种
+主窗口是窗口注册表中的普通条目，由 `main_window_id` 标识。拆出窗口使用同一种
 `WindowState`，并进入同一事件表。
 
 `TabBar` 保存标签页身份、标题、顺序和活动下标。与之平行的 `Vec<TabState>` 为每个标签页
@@ -159,7 +156,7 @@ flowchart TD
 `PaneState` 持有解析器和可选 PTY 句柄。网格由解析器持有。窗格还持有终端模式原子值、命令
 事件、内联图像、共享重绘目标、资源预留和所有者保护对象。
 
-进程级状态保存在 `App`。其中包括命令面板及其所在窗口、广播状态、资源总账、状态机、预热
+进程级状态保存在 `App`。其中包括命令面板及其所在窗口、广播状态、资源总账、预热
 窗口池、原生拖动后端和事件循环调度标志。
 
 ### 创建标签页与分屏
@@ -260,62 +257,30 @@ Process
 所有者仍有计费或子节点时，总账会拒绝关闭。`OwnerGuard::drop` 会记录 warning 并保留被拒绝
 的记录，不会重试。
 
-### 输入与效果状态变化
+### 输入状态变化
 
 键盘所有权和终端字节编码见[从按键到像素](From-Keypress-to-Pixel-zh-CN)。原生输入在本地路由与
-编码后直接进入 `write_to_pane`，不构建临时归约器。窗格的有界队列和拒绝诊断是唯一准入路径。
+编码后进入 `write_to_pane`。窗格的有界队列和拒绝诊断是唯一准入路径。
 
 ```mermaid
 flowchart TD
     source["原生输入或生命周期代码"]
-    live["App / WindowState 权威状态修改"]
-    observe["observe_intent"]
-    machine["AppStateMachine::handle<br/>观察性 AppState；丢弃效果"]
-    explicit["受支持的显式目标意图 / 效果"]
-    resolve["解析稳定的存活窗口 / 窗格"]
+    live["App / WindowState 状态修改"]
     boundary["有界 PTY、重绘或旁路操作"]
 
     source --> live --> boundary
-    source --> observe --> machine
-    explicit --> resolve --> boundary
 ```
 
-GUI 的 `AppState` 字段只是兼容观察值，不决定实时拓扑。可独立使用的归约器按
-`PtyWrite`、`Render`、`OsDrag`、`Clipboard`、`WindowOp`、`MenubarUpdate`、`Log`
-排序。私有后续队列受 `MAX_CASCADE_DEPTH = 16` 限制；生产没有入队路径，因此
-`drain_pending` 通常返回空批次。
-
-| 观察性的 `AppState` 字段 | 权威实时状态 |
-| --- | --- |
-| `cols`、`rows`、`last_window_pos` | 各原生窗口/渲染器及窗格网格几何 |
-| `focused_window`、`live_window_count` | `App::windows`、`main_window_id`、原生焦点和空窗口策略 |
-| `tab_count`、`active_tab_idx` | 各窗口的 `TabBar` 与并行 `TabState` 向量 |
-| `pane_count`、`focused_pane_idx`、`pane_zoomed` | 活动 `TabState` 及其 `PaneTree` |
-| `last_mouse_pos`、`mouse_left_down`、`selection_active` | 窗口指针手势、光标与选区状态 |
-| `search_open`、`palette_open` | 标签页搜索与应用命令面板的附着窗口 |
-| `fg_proc_name`、`broadcast_scope` | 存活窗格进程观察与 `App::broadcast` |
-
-可执行边界与这些观察记录分开：
-
-| 意图或显式效果 | GUI 行为 |
-| --- | --- |
-| `PtyWrite` 意图/效果 | 指定窗格的有界输入队列 |
-| `PtyExit`；`PtyClose`、`ChildExitPropagate` 效果 | 通过实时拓扑关闭指定窗格，并报告退出元数据 |
-| `PtyBurst`、`ForegroundProcChanged` 意图 | 请求指定存活窗格当前窗口的重绘 |
-| `RedrawRequested`、按下的 `Key`、IME 开始/预编辑/结束、hover、滚动和滚轮意图 | 只重绘指定存活窗口；编码与内容变化由原生处理器负责 |
-| `ImeCommit`、`Paste` 意图 | 解析指定存活窗口的活动窗格并排队所给文本；原生路径负责浮层策略与粘贴包装 |
-| `ClickUrl`；`OpenURL`、非空 `ClipboardSet`、`Notification` 效果 | 原生旁路操作，URL 经过校验，只接受 `http`、`https` 和 `mailto`；空剪贴板哨兵不执行操作 |
-| `Exit` 意图；`Quit` 效果 | 显式应用退出请求 |
-| `Render`、`RenderDirtyRect`、`WindowResize` 效果 | 只请求指定窗口重绘，不声称已完成原生尺寸调整 |
-| `WindowOpen` 效果 | 将创建请求排给事件循环，不表示窗口已经创建 |
-| `ChildSpawn`、`OsDragStart/End`、`ClipboardRequest`、`WindowClose/Move/SetTitle`、`TimerSchedule/Cancel`、`MenubarUpdate` 效果 | 只记录，实际工作由原生应用/平台路径执行 |
-| `LogEvent` 效果 | 转发结构化诊断 |
-| 其它所有意图 | `observe_intent` 只更新兼容状态，并丢弃归约器效果批次 |
+`App` 的类型化所有者保存全部实时状态：窗口、几何和焦点在窗口注册表（其 `WindowMap`、
+`main_window_id` 与 `frontmost_window`）和原生焦点中；标签页在各窗口的 `TabBar` 与并行
+`TabState` 向量中；窗格在各 `TabState` 的 `PaneTree` 与窗口的 `PaneMap` 中；指针手势、光标和
+选区在各窗口中；标签页搜索、命令面板的附着窗口和广播范围在交互状态中；还有存活窗格的进程观察。
+没有第二套模型镜像它们。
 
 窗口 key 从一开始单调分配，关闭时删除且不复用。缺失、已移除和零 key 都不表示主窗口或
-最前窗口。原生窗口关闭及标签页/窗格 action 执行已有实时路径，归约器只作观察；过期的
-`live_window_count` 不能关闭窗口或触发退出。无来源的菜单 action 可以选择当前窗口，但显式
-指定且已缺失的来源绝不回退到另一终端。
+最前窗口。原生窗口关闭、标签页/窗格 action，以及最后一个窗口关闭后的退出只依据实时拓扑；
+显式退出（菜单、命令面板或按住的快捷键）直接退出，不论还开着什么。无来源的菜单 action
+可以选择当前窗口，但显式指定且已缺失的来源绝不回退到另一终端。
 
 ### 重绘与等待生命周期
 
@@ -456,7 +421,7 @@ tracing subscriber，只能在下次进程启动时生效。
 - 真实软件适配器或最终降级状态启用时，任何非零目标都限制为 1。
 
 `about_to_wait` 会删除多余条目，并且每次最多新建一个缺失窗口。采用后进先出。已消耗或采用
-失败的条目会在之后的空闲轮次补充。预热窗口在提升前不进入 `App::windows`，也没有资源所有者。
+失败的条目会在之后的空闲轮次补充。预热窗口在提升前不进入窗口注册表，也没有资源所有者。
 
 新窗口拆出会把已移除的标签页、标签页状态、窗格、源下标和原活动标签页身份保存在同一事务中。
 原生窗口创建、渲染器初始化和渲染器配置是三个可能失败的准备阶段。新建和预热目标在整个准备
@@ -467,9 +432,8 @@ tracing subscriber，只能在下次进程启动时生效。
 
 原生准备成功后，必须先成功注册原生放置目标，再进行计费准入。注册失败时，在任何所有权转移前
 释放隐藏目标并恢复源事务。随后应用准备目标所有者并转移全部窗格计费，然后才修改重绘目标、
-将存活窗口插入 `App::windows` 或调整窗格尺寸。计费拒绝时撤销原生注册，释放隐藏产物并恢复
-源事务。成功后只显示目标一次并请求首帧，之后才允许源窗口邻居激活、隐藏或回收。归约器的
-离开观察只作记录，不能再次执行原生操作。
+将存活窗口插入窗口注册表 或调整窗格尺寸。计费拒绝时撤销原生注册，释放隐藏产物并恢复
+源事务。成功后只显示目标一次并请求首帧，之后才允许源窗口邻居激活、隐藏或回收。
 
 各平台原生拖动能力不同：
 

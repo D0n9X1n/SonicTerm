@@ -131,3 +131,21 @@ fn inverse_swaps_foreground_and_background_for_rendering() {
         Some(chrome_color_to_linear_rgba(indexed(1, &theme).unwrap()))
     );
 }
+
+/// A strikethrough is one bar across the run's width, centred on the cell's middle, in the
+/// decoration color it is given.
+#[test]
+fn a_strikethrough_is_one_bar_through_the_middle_of_the_cell() {
+    let mut quads = Vec::new();
+    let color = [0.5, 0.25, 0.0, 1.0];
+    push_strikethrough_quad(&mut quads, 10.0, 20.0, 30.0, 20.0, 2.0, 100.0, 100.0, color);
+    assert_eq!(quads.len(), 1);
+    assert_eq!(quads[0].color, color);
+    // The rect round-trips through NDC, so each edge is compared within a thousandth of a pixel.
+    let (left, top, width, height) = crate::cursor::ndc_rect_px(quads[0].rect, 100.0, 100.0);
+    for (seen, wanted) in [(left, 10.0), (top, 29.0), (width, 30.0), (height, 2.0)] {
+        assert!((seen - wanted).abs() < 1e-3, "{:?}", (left, top, width, height));
+    }
+    push_strikethrough_quad(&mut quads, 10.0, 20.0, 0.0, 20.0, 2.0, 100.0, 100.0, color);
+    assert_eq!(quads.len(), 1, "an empty span draws nothing");
+}

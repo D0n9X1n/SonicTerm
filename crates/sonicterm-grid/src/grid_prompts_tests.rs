@@ -243,3 +243,38 @@ fn an_a_on_the_same_row_after_c_is_a_new_prompt() {
     assert_eq!(run.exit, None, "the later D did not complete it");
     assert_eq!(grid.newest_prompt().map(|region| region.seq), Some(seq + 1));
 }
+
+/// With history off a full-screen scroll discards its top rows: regions move up with their rows
+/// as the semantic anchor does, a coordinate on a discarded row becomes `None`, the pinned run's
+/// region is kept, and the run's lifetime tokens are untouched and still name the same rows.
+#[test]
+fn a_no_history_scroll_rebases_regions_and_keeps_the_pinned_tokens() {
+    let mut grid = Grid::new(10, 5);
+    grid.set_scrollback_limit(0);
+    grid.goto(1, 0);
+    grid.record_prompt_start();
+    grid.goto(1, 2);
+    grid.record_input_start();
+    let seq = grid.newest_prompt().expect("region").seq;
+    assert!(grid.pin_run(seq));
+    grid.goto(2, 0);
+    grid.record_output_start();
+    grid.goto(3, 0);
+    grid.record_prompt_end(Some(0));
+    let run = grid.pinned_run().expect("pinned");
+    let (output_token, end_token) = (run.output_start.expect("C"), run.end.expect("D"));
+    grid.scroll_up(1);
+    let region = *grid.newest_prompt().expect("region");
+    assert_eq!((region.start_row, region.input_start), (Some(0), Some((0, 2))));
+    assert_eq!((region.output_start_row, region.end_row), (Some(1), Some(2)));
+    assert_eq!((grid.resolve_row(output_token), grid.resolve_row(end_token)), (Some(1), Some(2)));
+    grid.scroll_up(1);
+    let region = *grid.newest_prompt().expect("the pinned run's region is kept");
+    assert_eq!((region.seq, region.start_row, region.input_start), (seq, None, None));
+    assert_eq!((region.output_start_row, region.end_row), (Some(0), Some(1)));
+    assert_eq!(
+        grid.pinned_run().map(|run| (run.output_start, run.end)),
+        Some((Some(output_token), Some(end_token)))
+    );
+    assert_eq!((grid.resolve_row(output_token), grid.resolve_row(end_token)), (Some(0), Some(1)));
+}

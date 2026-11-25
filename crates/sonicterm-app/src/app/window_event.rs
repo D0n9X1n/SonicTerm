@@ -10,7 +10,7 @@ use sonicterm_cfg::{config::ScrollbarMode, keymap::Action};
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_ui::copy_mode::CopyModeState;
 use sonicterm_ui::selection::Selection;
-use sonicterm_vt::vt::MouseTracking;
+use sonicterm_vt::vt::{MouseFormat, MouseTracking};
 use winit::{
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::ActiveEventLoop,
@@ -38,7 +38,14 @@ pub(super) enum PointerReportKind {
 pub(super) enum PointerMotionRoute {
     Local,
     None,
-    Report { pane_id: u64, sgr: bool, row: u16, col: u16, modifiers: ModifiersState },
+    Report {
+        pane_id: u64,
+        format: MouseFormat,
+        row: u16,
+        col: u16,
+        pixel: (i32, i32),
+        modifiers: ModifiersState,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +93,7 @@ impl App {
         // Record the window's own pointer before an overlay, a modal or a handler can consume
         // the move or leave, so the tab-width hold never reads a stale position.
         self.record_window_pointer(win_id, &event);
+        self.track_pointer_owner(win_id, &event);
         if let WindowEvent::Occluded(occluded) = &event {
             // When: `Occluded` arrives for a live owner, apply visibility before either role can collect a frame.
             self.handle_window_occlusion(win_id, *occluded);
@@ -193,11 +201,6 @@ impl App {
         }
         match event {
             WindowEvent::CloseRequested => {
-                if let Some(window) = self.window_key(win_id) {
-                    self.observe_intent(sonicterm_app_core::AppIntent::WindowCloseRequested {
-                        window,
-                    });
-                }
                 // If child windows still own tabs, hide the main
                 // window instead of exiting the app — the children
                 // are independent live terminals and must keep
@@ -234,31 +237,6 @@ impl App {
                     // A changed surface size owes a frame that a synchronized hold cannot keep back.
                     window.redraw.note_resize(outcome);
                 }
-                // Notify the reducer of the new logical grid dimensions.
-                // Derive cols/rows from
-                // the renderer's cell size; fall back to zero when
-                // unavailable (smoke-test environments). The
-                // reducer's `WindowResize` Effect is observability-
-                // only — the boundary above already drove the wgpu
-                // resize, and the existing `request_redraw` below is
-                // the production paint path.
-                let (cols_u16, rows_u16) = {
-                    let cell = self.main_renderer().map(GpuRenderer::cell_size);
-                    match cell {
-                        Some((cell_w, cell_h)) if cell_w > 0.0 && cell_h > 0.0 => (
-                            ((size.width as f32 / cell_w).floor() as u32).min(u16::MAX as u32)
-                                as u16,
-                            ((size.height as f32 / cell_h).floor() as u32).min(u16::MAX as u32)
-                                as u16,
-                        ),
-                        _ => (0u16, 0u16),
-                    }
-                };
-                self.observe_intent(sonicterm_app_core::AppIntent::WindowResized {
-                    window: sonicterm_types::WindowKey::new(0),
-                    cols: cols_u16,
-                    rows: rows_u16,
-                });
                 // Per-pane sizing: each pane's grid + PTY is resized to
                 // its own PaneRect within the new window content area,
                 // never to the whole window's dimensions.
@@ -385,6 +363,8 @@ impl App {
         let fg_probes = super::redraw::sets_fg_demand(pty_burst, status_only)
             .then(|| std::sync::Arc::clone(&self.services.fg_probes));
         if let Some(id) = main_id_opt {
+            // Focus acknowledges before the markers are read, so a seen record is not drawn.
+            self.acknowledge_focused_status_in(id);
             if let Some(window) = self.registry.windows.get_mut(&id) {
                 crate::app::refresh_window_tab_privileges(
                     &mut window.tabs,
@@ -751,6 +731,7 @@ impl App {
                 }
                 let _ = crate::app::refresh_active_tab_title(
                     tabs_mref,
+                    active_id,
                     pane,
                     &frame.guards[active_pos].1,
                     tab_idx,

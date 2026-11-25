@@ -74,7 +74,8 @@ fn a_pane_total_is_exactly_the_sum_of_its_seams() {
         + retention.hyperlinks.bytes
         + retention.inline_media.bytes
         + retention.pty_output.bytes
-        + retention.pty_input.bytes;
+        + retention.pty_input.bytes
+        + retention.program_metadata.bytes;
     let expected_items = retention.grid_visible.items
         + retention.grid_history.items
         + retention.grid_alternate.items
@@ -82,7 +83,8 @@ fn a_pane_total_is_exactly_the_sum_of_its_seams() {
         + retention.hyperlinks.items
         + retention.inline_media.items
         + retention.pty_output.items
-        + retention.pty_input.items;
+        + retention.pty_input.items
+        + retention.program_metadata.items;
 
     assert_eq!(retention.total().bytes, expected_bytes);
     assert_eq!(retention.total().items, expected_items);
@@ -113,15 +115,16 @@ fn every_seam_contributes_to_the_total() {
         inline_media: ResourceAmount { bytes: 32, items: 32 },
         pty_output: ResourceAmount { bytes: 64, items: 64 },
         pty_input: ResourceAmount { bytes: 128, items: 128 },
+        program_metadata: ResourceAmount { bytes: 256, items: 256 },
     };
 
     let total = retention.total();
     assert_eq!(
-        total.bytes, 255,
-        "the total must fold all eight seams; a missing term leaves a gap the \
-         other seven cannot produce"
+        total.bytes, 511,
+        "the total must fold all nine seams; a missing term leaves a gap the \
+         other eight cannot produce"
     );
-    assert_eq!(total.items, 255, "items must fold the same eight seams as bytes");
+    assert_eq!(total.items, 511, "items must fold the same nine seams as bytes");
 }
 
 /// Content written to a pane moves its reported total.
@@ -220,6 +223,7 @@ fn the_largest_seam_is_identified_by_name() {
         inline_media: ResourceAmount { bytes: 64 * 1024 * 1024, items: 3 },
         pty_output: ResourceAmount { bytes: 8 * 1024, items: 1 },
         pty_input: ResourceAmount { bytes: 128, items: 1 },
+        program_metadata: ResourceAmount { bytes: 64, items: 1 },
     };
 
     let (seam, amount) = retention.largest_seam();
@@ -508,6 +512,7 @@ fn the_coverage_table_agrees_with_the_charge_sites() {
                         ResourceClass::ReaperWork
                             | ResourceClass::AccessibilityTree
                             | ResourceClass::ControlConnection
+                            | ResourceClass::ClipboardStaging
                     ),
                     "{class:?} is charged to a non-pane owner without being recorded here"
                 );
@@ -815,5 +820,33 @@ fn a_slow_capture_survives_the_wakes_inside_one_interval() {
          two intervals only if the pass is rate-limited; on the wake path they are milliseconds \
          apart, so a slow transfer is destroyed and the reported stall duration is wrong by the \
          ratio between a wake and an interval"
+    );
+}
+
+/// A pane's OSC 7501 records and OSC 1337 user variables are persistent pane state: they are
+/// measured as their own `program_metadata` seam, one item each, and charged to
+/// `ProtocolMetadata` beside the hyperlinks, never to the parser's capture seam, whose bytes a
+/// stalled-capture cancel reports as reclaimed.
+#[test]
+fn program_status_and_user_vars_are_persistent_program_metadata() {
+    let pane = pane_with(80, 24);
+    let expected = {
+        let mut parser = pane.parser.lock();
+        parser.advance(b"\x1b]7501;state=error:msg=ZmFpbGVk\x07");
+        parser.advance(b"\x1b]1337;SetUserVar=name=dmFsdWU=\x07");
+        parser.program_metadata_amount()
+    };
+    let retention = measure_pane(&pane).expect("a fresh pane's locks are uncontended");
+    assert_eq!(retention.parser.bytes, 0, "no capture is in flight");
+    assert_eq!(retention.program_metadata, expected);
+    assert_eq!(retention.program_metadata.items, 2, "one record and one variable");
+    let charged = seam_classes(&retention)
+        .into_iter()
+        .find(|(class, _)| *class == ResourceClass::ProtocolMetadata)
+        .map(|(_, amount)| amount);
+    assert_eq!(
+        charged.map(|amount| amount.bytes),
+        Some(retention.hyperlinks.bytes + retention.program_metadata.bytes),
+        "persistent metadata is charged with the hyperlinks"
     );
 }

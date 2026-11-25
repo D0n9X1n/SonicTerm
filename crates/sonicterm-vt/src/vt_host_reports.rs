@@ -12,6 +12,9 @@ pub(super) struct ThemeFingerprint {
     background: Option<(u8, u8, u8)>,
     cursor: Option<(u8, u8, u8)>,
     palette: [Option<(u8, u8, u8)>; 16],
+    selection_background: Option<(u8, u8, u8)>,
+    selection_foreground: Option<(u8, u8, u8)>,
+    cursor_text: Option<(u8, u8, u8)>,
     scheme: Option<ColorScheme>,
 }
 
@@ -41,6 +44,9 @@ impl Parser {
             background: performer.theme_bg,
             cursor: performer.theme_cursor,
             palette: performer.theme_palette,
+            selection_background: performer.theme_selection_bg,
+            selection_foreground: performer.theme_selection_fg,
+            cursor_text: performer.theme_cursor_text,
             scheme: performer.theme_color_scheme,
         };
         let previous = performer.reported_theme.replace(current);
@@ -67,10 +73,14 @@ impl Performer {
             1002 => Some(self.mouse_tracking == MouseTracking::ButtonMotion),
             1003 => Some(self.mouse_tracking == MouseTracking::AnyMotion),
             1004 => Some(self.focus_reporting),
-            1006 => Some(self.mouse_sgr),
+            1005 => Some(self.mouse_format == MouseFormat::Utf8),
+            1006 => Some(self.mouse_format == MouseFormat::Sgr),
+            1015 => Some(self.mouse_format == MouseFormat::Urxvt),
+            1016 => Some(self.mouse_format == MouseFormat::SgrPixels),
             2004 => Some(self.bracketed_paste),
             2026 => Some(self.synchronized_output),
             2031 => Some(self.color_scheme_updates),
+            5522 => Some(self.paste_events),
             9001 => Some(self.win32_input),
             _ => None,
         };

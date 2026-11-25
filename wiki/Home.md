@@ -26,11 +26,12 @@ Use the references below for a particular subsystem.
 - [From Keypress to Pixel](From-Keypress-to-Pixel) — input, child output, grid, glyph, and pixel
 - [Runtime Lifecycle](Runtime-Lifecycle) — startup, ownership changes, tab transfers, and shutdown
 - [Terminal IO and VT](Terminal-IO-and-VT) — PTYs, parser protocols, shell integration, and grid rules
+- [OSC Support](OSC-Support) — every OSC WezTerm, Ghostty or kitty implements, and what SonicTerm does with it
 - [Rendering Modes](Rendering-Modes) — adapter selection and frame pacing
 - [Rendering and Fonts](Rendering-and-Fonts) — typography, atlases, GPU/CPU drawing, and damage
 - [Platform Integration](Platform-Integration) — AppKit, Win32, X11, and Wayland boundaries
 - [Architecture Internals](Architecture-Internals) — correctness, accounting, and lifetime invariants
-- [Crate Reference](Crate-Reference) — all 24 crates, their interfaces, and dependencies
+- [Crate Reference](Crate-Reference) — all 23 crates, their interfaces, and dependencies
 
 ### Build and contribute
 

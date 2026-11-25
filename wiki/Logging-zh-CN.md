@@ -64,7 +64,7 @@ max_breadcrumb_bytes = 1048576    # 1 MiB
 | `error` | 仅错误 |
 | `warn` | warning、error、`sonic_exit`、`sonic::gpu` 设备记录，以及用户可见的回收或耗尽提示 |
 | `info` | SonicTerm 常规信息和聚合 `memory snapshot` |
-| `debug` | 详细诊断、窗格/渲染器内存、状态机事件、`render_timing`、`tear_out_timing` 和 `frame_counters` |
+| `debug` | 详细诊断、窗格/渲染器内存、`render_timing`、`tear_out_timing` 和 `frame_counters` |
 
 `mcp` target 属于 agent 控制服务器。它的 warning 在包括默认 `warn` 在内的所有会话中都会记录：
 监听器无法启动、拒绝其他用户的连接、连接数超限，以及控制服务器 owner 无法注册。`info` 级别另外记录
@@ -133,7 +133,7 @@ pending 不是文件不存在的证据。事件包含可能敏感的路径，但
 
 默认 `warn` 级别会报告被拒绝的输入，包括终端解析器回复。生产者直接指定 `source`：
 `Keyboard`、`Paste`、`FileDrop`、`Ime`、`PointerButton`、`PointerMotion`、`Wheel`、
-`FocusReport`、`TerminalReply`、`ScriptDraft` 或 `StateMachine`；不会从负载字节猜测来源。
+`FocusReport`、`TerminalReply`、`ScriptDraft`、`Agent` 或 `AgentRun`；不会从负载字节猜测来源。
 
 | 字段 | 含义 |
 | --- | --- |
@@ -747,6 +747,7 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
                 graphics_requested_created="surface=<bytes>/<count> frame_texture=<bytes>/<count> ..."
                 graphics_requested_released="surface=<bytes>/<count> frame_texture=<bytes>/<count> ..."
                 graphics_os_unavailable_reason="<reason>|none"
+                program_metadata_bytes=<bytes>
 ```
 
 进程数据来自操作系统，因此包含 SonicTerm 自身接缝未统计的分配器碎片、尚未归还的页、
@@ -784,8 +785,9 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
 | `graphics_renderers` | 每个渲染器按类别（`surface`、`frame_texture`、`glyph_atlas`、`image_atlas`、`present_buffers`）请求的字节数与资源数，排序方式与 `renderers` 相同，每项以 `surface_count=exact`（Metal、DX12）或 `estimated`（Vulkan、GL）结尾；尚无渲染器时为 `none` |
 | `graphics_requested_created` / `graphics_requested_released` | 各存活渲染器自创建以来按类别已创建与已释放的请求字节数和资源数，在所有存活渲染器间求和；已丢弃渲染器的总量记录在它的 `renderer graphics teardown` 记录中 |
 | `graphics_os_unavailable_reason` | 操作系统查询拒绝给出数值时的原因（例如两个 DXGI 适配器共享渲染器的厂商 id 与设备 id）；否则为 `none` |
+| `program_metadata_bytes` | 会话中的 OSC 7501 程序状态记录与 OSC 1337 用户变量，是计入 `session_total_bytes` 的窗格接缝 |
 
-图形字段位于所有其他字段之后，因此它们之前的字段保持原有名称与顺序。渲染器被丢弃时，会在
+图形字段位于所有更早的字段之后，`program_metadata_bytes` 又位于图形字段之后，因此各自之前的字段保持原有名称与顺序。渲染器被丢弃时，会在
 `memory` 目标上以 `info` 级别写一条 `renderer graphics teardown` 记录，包含 `renderer_role`、
 `window_id`、`graphics_live`、`graphics_created`、`graphics_released`（每项均为按类别的
 `class=bytes/resources`）与 `surface_count`。各数值能看到什么、
@@ -822,11 +824,13 @@ pane retention pane="<window-id>/<pane-id>" total_bytes=<bytes>
                grid_visible_bytes=<bytes> grid_history_bytes=<bytes>
                grid_alternate_bytes=<bytes> parser_bytes=<bytes> hyperlink_bytes=<bytes>
                inline_media_bytes=<bytes> pty_output_bytes=<bytes> pty_input_bytes=<bytes>
+               program_metadata_bytes=<bytes>
                largest_seam="<seam-name>" largest_seam_bytes=<bytes>
 session retention panes=<count> total_bytes=<bytes> grid_visible_bytes=<bytes>
                   grid_history_bytes=<bytes> grid_alternate_bytes=<bytes> parser_bytes=<bytes>
                   hyperlink_bytes=<bytes> inline_media_bytes=<bytes>
                   pty_output_bytes=<bytes> pty_input_bytes=<bytes>
+                  program_metadata_bytes=<bytes>
 pty queues panes=<count> resident_bytes=<bytes> input_queued_bytes=<bytes>
            writer_in_flight_bytes=<bytes> reply_resident_bytes=<bytes>
            reply_spill_disk_bytes=<bytes> reply_spill_file_bytes=<bytes>
@@ -844,7 +848,7 @@ pty queues panes=<count> resident_bytes=<bytes> input_queued_bytes=<bytes>
 超过 50 ms 的回退还会在 `warn` 级别记录 `synchronous PTY teardown fallback blocked the event loop`，包含
 `owner` 与 `blocked_ms`。
 
-八个接缝互不重叠，相加等于 `total_bytes`：
+九个接缝互不重叠，相加等于 `total_bytes`：
 
 | 字段 | 归属内容 | 首先处理 |
 | --- | --- | --- |
@@ -856,6 +860,7 @@ pty queues panes=<count> resident_bytes=<bytes> input_queued_bytes=<bytes>
 | `inline_media_bytes` | 窗格保留的已解码内联图像 | 减少图像或关闭图像较多的窗格 |
 | `pty_output_bytes` | 已排队或传输中的本地 PTY 输出 | 等待输出排空 |
 | `pty_input_bytes` | 等待送往 shell 或正在写入的输入（通常是大段粘贴），以及常驻的解析器回复；溢出到磁盘的回复不计入 | 等待 shell 读取 |
+| `program_metadata_bytes` | OSC 7501 程序状态记录与 OSC 1337 用户变量：向量容量、记录块与字符串；持久状态，取消捕获时从不回收 | 无需处理；每个窗格有上限，由程序替换或清除 |
 
 先读 `largest_seam`，再比较至少五次连续采样。数值很大但保持平稳，与每次采样都增长
 不是同一问题。窗格标签包含窗口 id 和窗格 id；标签页移动后窗格 id 不变，窗口 id 会变。
@@ -900,7 +905,7 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `vertex_scratch_items` | 顶点缓冲持有分配时为 1，否则为 0 | — |
 | `row_ink_bytes` | `RowInk` 部分：逐行墨迹表（每个已呈现行按窗格与槽位记录的绘制范围）已分配的桶，加上一帧的暂存缓冲 | 受可见行数限制；窗格缩小或关闭后，下一帧呈现时释放其记录 |
 | `row_ink_items` | 已提交的逐行墨迹记录数，每个可见行一条 | — |
-| `frame_scratch_bytes` | `FrameScratch` 部分：渲染器在已组装帧之间保留的逐帧绘制向量（字形、quad、叠加层、图像、图像排序顺序、kitty 占位符索引、媒体修订列表、行范围、下划线、暂存索引、缺字方框、窗格矩形、列边界与行键） | 每次归还都清空每个向量并限制在其上限内（合计 17,826,816 字节）；只有完成的组装才在超过用量四倍且超过 1 MiB 时把向量收缩到用量的两倍，并丢弃超出峰值的列边界槽位，因此失败或重试的帧保留已预热的容量；帧持有期间为零 |
+| `frame_scratch_bytes` | `FrameScratch` 部分：渲染器在已组装帧之间保留的逐帧绘制向量（字形、quad、叠加层、窗格填充、图像、图像排序顺序、kitty 占位符索引、媒体修订列表、行范围、下划线、暂存索引、缺字方框、窗格矩形、列边界与行键） | 每次归还都清空每个向量并限制在其上限内（合计 17,892,352 字节）；只有完成的组装才在超过用量四倍且超过 1 MiB 时把向量收缩到用量的两倍，并丢弃超出峰值的列边界槽位，因此失败或重试的帧保留已预热的容量；帧持有期间为零 |
 | `frame_scratch_items` | 持有分配的暂存向量数 | — |
 | `chrome_cache_bytes` | `ChromeCache` 部分：64 槽标签标题表与 32 槽界面文本段表、每个保留段的文本与字形，以及保留的界面调色板颜色字符串 | 受固定表与准入上限（256 字节文本、512 个字形）以及 4 KiB 调色板余量约束（更大的调色板每次请求都重新派生，从不保留）；字体变更、缩放变更或 `clear_shape_cache` 会清空两张文本段表 |
 | `chrome_cache_items` | 保留的标签标题数加保留的界面文本段数 | — |

@@ -99,6 +99,7 @@ fn draw_ranges_follow_emitted_vertices() {
         let reset_vertices = assemble_vertices(
             &mut vertices,
             reset.as_ref(),
+            &[],
             &layers,
             surface.0,
             surface.1,

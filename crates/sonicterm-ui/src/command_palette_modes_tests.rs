@@ -145,6 +145,34 @@ fn confirmation_page_selects_only_apply_or_cancel() {
     assert!(!palette.confirm_applies());
 }
 
+/// Contract: a confirmation page with extra choices lists them after Cancel and before the items;
+/// it still opens on Cancel, arrows cycle Apply, Cancel and each choice, a click selects a choice
+/// but never an item, and only a highlighted choice reports its index.
+#[test]
+fn confirmation_page_choices_follow_cancel_and_report_their_index() {
+    let mut palette = CommandPalette::new();
+    let choices = vec!["Always".to_owned(), "Ban".to_owned()];
+    palette.start_confirm_with_choices("Title", "Allow", "Deny", choices, vec!["item".into()]);
+    assert_eq!(
+        palette.confirm_rows().iter().map(ConfirmRow::label).collect::<Vec<_>>(),
+        vec!["Allow", "Deny", "Always", "Ban", "item"]
+    );
+    assert_eq!((palette.confirm_applies(), palette.confirm_choice()), (false, None));
+    palette.move_selection_down();
+    assert_eq!(palette.confirm_choice(), Some(0));
+    palette.move_selection_down();
+    assert_eq!(palette.confirm_choice(), Some(1));
+    palette.move_selection_down();
+    assert!(palette.confirm_applies(), "past the last choice the highlight wraps to Apply");
+    palette.move_selection_up();
+    assert_eq!(palette.confirm_choice(), Some(1));
+    assert!(palette.select_confirm_row(2));
+    assert_eq!(palette.confirm_choice(), Some(0));
+    assert!(!palette.select_confirm_row(4), "item rows cannot be selected");
+    palette.close();
+    assert_eq!(palette.confirm_choice(), None);
+}
+
 /// A status-segment checklist: toggles, one heading with two segments, and Reset.
 fn status_rows() -> Vec<StatusSegmentRow> {
     use sonicterm_cfg::status_line::StatusSegmentId as Seg;

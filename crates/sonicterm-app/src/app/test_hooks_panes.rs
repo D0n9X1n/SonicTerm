@@ -681,6 +681,17 @@ impl App {
         Some(pane.parser.lock().grid().rows)
     }
 
+    /// Test-only: deliver a pane's child exit to the live exit handler, as the event loop does.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn __test_pane_process_exited(
+        &mut self,
+        pane_id: u64,
+        status: sonicterm_types::PaneExitStatus,
+    ) {
+        self.handle_pane_process_exited(pane_id, status);
+    }
+
     /// Test-only: current grid size for a pane.
     #[doc(hidden)]
     pub fn __test_pane_grid_size(&self, pane_id: u64) -> Option<(u16, u16)> {
@@ -813,3 +824,149 @@ impl TestPaneWorker {
         queued
     }
 }
+
+impl App {
+    /// Test-only: a standalone pane of `cols` x `rows`, seeded with the default theme as a new pane
+    /// is, whose replies come from the production VT publisher; see [`TestReplyPane`].
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn __test_reply_pane(cols: u16, rows: u16) -> TestReplyPane {
+        let parser =
+            Parser::new_with_staging_pool(Grid::new(cols, rows), None, CaptureStagingPool::new());
+        let parser = Arc::new(Mutex::new(parser));
+        super::seed_parser_theme_colors(
+            &mut super::frame_counters::lock_parser(&parser),
+            &Theme::default(),
+        );
+        let pane =
+            PaneState::new_with_media_pool(parser, None, &super::media::InlineMediaPool::new());
+        let handles = super::spawn_pane::PaneVtHandles::from_pane_state(&pane);
+        TestReplyPane {
+            handles,
+            sync_latch: super::spawn_pane::SyncLatch::default(),
+            clipboard: None,
+            writes_committed: 0,
+            staging: None,
+            _pane: pane,
+        }
+    }
+}
+
+impl App {
+    /// Test-only: a [`Self::__test_reply_pane`] whose clipboard reads follow `osc52_read = "allow"`
+    /// against a fake clipboard holding `text` beside fixed `text/html`, `image/png` and
+    /// `application/x-sonicterm-test` representations, answered through the production reply
+    /// builder. It
+    /// reserves from a private staging, so the process default's policy is never changed.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn __test_clipboard_reply_pane(cols: u16, rows: u16, text: &str) -> TestReplyPane {
+        let mut pane = Self::__test_reply_pane(cols, rows);
+        let staging = super::osc52_stream::ClipboardStaging::for_startup_limit(
+            sonicterm_cfg::config::DEFAULT_CLIPBOARD_WRITE_LIMIT_BYTES,
+        );
+        staging.set_read_policy(sonicterm_cfg::config::Osc52ReadPolicy::Allow);
+        pane.staging = Some(Arc::clone(&staging));
+        pane.handles = pane.handles.with_clipboard_staging(staging);
+        pane.clipboard = Some(Arc::new(FixedClipboard::new(text)));
+        pane
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[path = "test_hooks_panes_clipboard.rs"]
+mod fixed_clipboard;
+#[cfg(any(test, feature = "test-support"))]
+use fixed_clipboard::FixedClipboard;
+
+/// Test-only: a pane without a PTY or window whose batches run the production publisher,
+/// `publish_pane_vt_batch_with`, and return the bytes it hands the pane's reply path.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
+pub struct TestReplyPane {
+    handles: super::spawn_pane::PaneVtHandles,
+    sync_latch: super::spawn_pane::SyncLatch,
+    /// The fake clipboard readable tickets are answered from and committed writes replace;
+    /// `None` answers every read empty.
+    clipboard: Option<Arc<FixedClipboard>>,
+    /// Writes committed behind their binding so far.
+    writes_committed: usize,
+    /// The private staging a clipboard reply pane reserves from; `None` for a plain reply pane.
+    staging: Option<Arc<super::osc52_stream::ClipboardStaging>>,
+    /// Keeps the pane state the handles were cloned from alive for the pane's whole life.
+    _pane: PaneState,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl TestReplyPane {
+    /// Parse and publish `bytes` as one output batch; return every reply byte it produced.
+    #[doc(hidden)]
+    pub fn replies(&mut self, bytes: &[u8]) -> Vec<u8> {
+        self.replies_with(bytes, |_| {})
+    }
+
+    /// [`Self::replies`], running `between` after the batch posted its writes and before they
+    /// reach the commit point, as a reload landing while the clipboard worker is busy does.
+    #[doc(hidden)]
+    pub fn replies_with(&mut self, bytes: &[u8], between: impl FnOnce(&Self)) -> Vec<u8> {
+        let mut replies = Vec::new();
+        let mut reads = Vec::new();
+        let mut writes = Vec::new();
+        super::spawn_pane::publish_pane_vt_batch_with(
+            &self.handles,
+            bytes,
+            None,
+            &mut None,
+            &mut self.sync_latch,
+            super::media::decode_inline_image,
+            |event| match event {
+                UserEvent::ClipboardTicket { ticket, .. } => reads.push(ticket),
+                UserEvent::ClipboardWrite { job, .. } => writes.push(job),
+                _ => {
+                    // When: the event is neither a ticket nor a write, a reply pane has no
+                    // window or App to deliver it to, so it is dropped.
+                }
+            },
+            Instant::now,
+            |reply: Vec<u8>| replies.extend_from_slice(&reply),
+        );
+        // A standalone pane has no App to ask, so each read ticket is answered at once: from the
+        // fake clipboard when it is readable (`allow`), else as a declined prompt is, empty.
+        for ticket in reads.iter().filter_map(|read| read.take()) {
+            match &self.clipboard {
+                Some(source) if ticket.readable() => replies.extend(match ticket.kitty_read() {
+                    Some(request) => {
+                        super::kitty_clipboard_read::build_read_reply(source.as_ref(), request)
+                    }
+                    None => {
+                        super::osc52_read_source::read_replies(source.as_ref(), ticket.labels())
+                    }
+                }),
+                _ => replies
+                    .extend(ticket.failure_reply(sonicterm_vt::vt::KittyClipboardStatus::Eperm)),
+            }
+        }
+        between(self);
+        self.commit_writes(writes, &mut replies);
+        replies
+    }
+
+    /// The writes this pane committed to its fake clipboard so far.
+    #[doc(hidden)]
+    pub fn writes_committed(&self) -> usize {
+        self.writes_committed
+    }
+
+    /// Change `osc52` on this pane's private staging, as a reload does, moving its policy
+    /// generation.
+    #[doc(hidden)]
+    pub fn set_write_policy(&self, policy: sonicterm_cfg::config::Osc52Policy) {
+        let staging = self.staging.as_ref().expect("a clipboard reply pane");
+        staging.set_write_policy(policy);
+        staging.bump_policy_generation();
+    }
+}
+
+#[cfg(test)]
+#[path = "test_hooks_panes_tests.rs"]
+mod test_hooks_panes_tests;

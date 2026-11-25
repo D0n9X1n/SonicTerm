@@ -10,6 +10,10 @@ process information.
 - `foreground_proc.rs` - foreground command detection.
 - `proc_info.rs` - process metadata helpers.
 - `lib.rs` - public exports.
+- `conpty_fixture.rs`, `conpty_fixture_windows.rs`, `conpty_fixture_clock.rs` - the F-ConPTY
+  real-pseudoconsole protocol fixture (sentinel scanner, outcomes, packaged/system hosts, and the
+  platform-free case and run deadlines, teardown and bounded child input); compiled only with
+  `test-support`.
 
 ## Local gate
 ```bash
@@ -59,9 +63,14 @@ cargo build -p sonicterm-io
   `SpillCharge`, declared last so the file closes before the refund; never add a release path
   outside it. Unit tests get a private unlimited pool from `reply_spool()`; a budget test passes
   its own to `reply_spool_with_pool`.
+- Sensitive replies (OSC 52 clipboard reads) never enter the reply spool or its disk spill.
+  `PtyHandle::try_send_reply` admits one at a time into the writer's one-slot channel with
+  `try_lock` on the admission lock, refusing rather than waiting; the writer drops the reply's
+  custody (the read ticket and its lease) only after the native write returns, and dropping the
+  `ReplyReader` releases a queued one.
 - `ShellSpawnOpts::input_seen` is set before any input message is admitted to the queue,
   through `send_input_nonblocking` or a `PtyInputSender`; only `send_draft_nonblocking` (a
-  script draft typed without Enter) and the reply spool leave it clear. The parser stops
+  script draft typed without Enter), the reply spool and sensitive replies leave it clear. The parser stops
   latching a shell token once it is set, so a new input path must mark it too.
 - PTY/ConPTY resize can fail, and the callback returns `anyhow::Result<()>` so
   the caller sees it. A zero column or row count is refused as an `InvalidInput`

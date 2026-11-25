@@ -21,6 +21,8 @@ impl Grid {
         self.visible = saved.visible;
         self.scrollback = saved.scrollback;
         self.prompts = saved.prompts;
+        self.alt_semantic_floor = self.semantic.generation;
+        self.semantic = saved.semantic;
         // The primary screen's scroll count returns, so its images stay beside its text; the
         // alternate screen's last count is kept so the next one starts past it.
         self.alt_scroll_floor = self.lines_scrolled;

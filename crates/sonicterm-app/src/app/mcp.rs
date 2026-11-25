@@ -50,6 +50,8 @@ mod lifecycle;
 mod loop_call;
 #[path = "mcp/read.rs"]
 pub(crate) mod read;
+#[path = "mcp/reply_budget.rs"]
+pub(crate) mod reply_budget;
 #[path = "mcp/run.rs"]
 pub(crate) mod run;
 #[path = "mcp/scan.rs"]
@@ -111,6 +113,10 @@ pub(crate) struct PaneEntry {
     pub(crate) pane_id: u64,
     /// Where the pane sits; `Some` only for `list_panes` entries.
     pub(crate) metadata: Option<PaneMetadata>,
+    /// The label its tab shows, the same for every pane of the tab; `Some` only for `list_panes`
+    /// entries. Program-supplied text: never logged. Boxed so a reply carrying one entry stays
+    /// small.
+    pub(crate) tab_title: Option<Box<TabTitle>>,
     /// Who created the pane; `agent_owned` in tool results is `creator.is_agent()`.
     pub(crate) creator: agents::PaneOwner,
     /// The pane's parser, read with one bounded attempt.
@@ -125,6 +131,15 @@ pub(crate) struct PaneEntry {
     pub(crate) run_typed_at: Arc<AtomicU64>,
     /// Set while an agent run owns the pane.
     pub(crate) agent_run: Arc<AtomicBool>,
+}
+
+/// A tab's label as `list_panes` may report it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TabTitle {
+    /// The label, and the creator of the pane it was built from; `None` when that pane is gone.
+    Label { text: String, source: Option<agents::PaneOwner> },
+    /// Withheld: the caller may not read the pane the label was built from.
+    Unreadable,
 }
 
 /// A request waiting in the inbox.
@@ -155,6 +170,8 @@ pub(crate) struct McpShared {
     pub(crate) read_agent_only: AtomicBool,
     /// `[mcp] isolation` and `create_anchor`, packed by [`agent_scope_code`].
     agent_scope: AtomicU8,
+    /// `[mcp] program_status_text`: whether `list_panes` includes OSC 7501 free text.
+    program_status_text: AtomicBool,
     /// Agent sessions still connected; a pane whose creator left reads as orphaned.
     pub(crate) sessions: agents::LiveSessions,
     /// Set to stop the listener and every connection.
@@ -215,6 +232,7 @@ impl McpShared {
                 McpIsolation::Shared,
                 McpCreateAnchor::Any,
             )),
+            program_status_text: AtomicBool::new(false),
             sessions: agents::LiveSessions::default(),
             stopped: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
@@ -273,6 +291,21 @@ impl McpShared {
         self.read_agent_only.store(read == McpRead::Agent, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.sessions.tokens.reissue();
+        self.wake_waiters();
+    }
+
+    /// Whether `list_panes` includes OSC 7501 ids, apps, titles and messages.
+    // Ordering: program_status_text Acquire pairs with the Release store in its setter.
+    pub(crate) fn program_status_text(&self) -> bool {
+        self.program_status_text.load(Ordering::Acquire)
+    }
+
+    /// Change the `program_status_text` opt-in and revoke every queued request and running wait,
+    /// so a call admitted with the text never returns it after the user turned it off.
+    // Ordering: program_status_text Release publishes the opt-in before the generation AcqRel bump.
+    pub(crate) fn set_program_status_text(&self, enabled: bool) {
+        self.program_status_text.store(enabled, Ordering::Release);
+        self.generation.fetch_add(1, Ordering::AcqRel);
         self.wake_waiters();
     }
 

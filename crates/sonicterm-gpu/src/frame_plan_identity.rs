@@ -43,6 +43,7 @@ impl WindowIdentity {
             close_override,
             broadcast_participants_hash,
             inline_media_hash,
+            pane_colors,
             hovered_url_cells: _,
             process_privileged,
             subpixel_aa,
@@ -76,6 +77,7 @@ impl WindowIdentity {
             close_override: previous_close_override,
             broadcast_participants_hash: previous_broadcast_participants_hash,
             inline_media_hash: previous_inline_media_hash,
+            pane_colors: previous_pane_colors,
             hovered_url_cells: _,
             process_privileged: previous_process_privileged,
             subpixel_aa: previous_subpixel_aa,
@@ -100,6 +102,7 @@ impl WindowIdentity {
                 || pane_focus_flash_bucket != previous_pane_focus_flash_bucket
                 || broadcast_participants_hash != previous_broadcast_participants_hash
                 || inline_media_hash != previous_inline_media_hash
+                || pane_colors != previous_pane_colors
                 || subpixel_aa != previous_subpixel_aa
                 || background != previous_background
                 || style_rev != previous_style_rev

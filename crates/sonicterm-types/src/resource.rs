@@ -131,6 +131,9 @@ pub enum ResourceClass {
     /// The local control server's connection buffers: partial request lines and replies being
     /// written, bounded by its line cap and connection limit.
     ControlConnection,
+    /// OSC 52 and OSC 1337 `Copy=:` writes in flight: decoded text, its U+FFFD expansion and native
+    /// copy, reserved from the process-wide clipboard staging budget before allocation.
+    ClipboardStaging,
 }
 
 /// Why each [`ResourceClass`] is or is not charged in production.
@@ -266,7 +269,7 @@ impl ResourceClass {
             // 64 KiB each, three index lists 256 KiB each, the column edges 1 MiB, two kitty
             // placeholder index maps 64 KiB each and the 1 KiB media revision list, in total
             // `FRAME_SCRATCH_CAP` in `sonicterm-gpu`.
-            Self::FrameScratch => ClassCoverage::UnchargedRetention { per_owner_bytes: 17_826_816 },
+            Self::FrameScratch => ClassCoverage::UnchargedRetention { per_owner_bytes: 17_892_352 },
             // The chrome caches hold at most 64 titles and 32 runs at their admission limits
             // (256 text bytes, 512 glyphs) in fixed tables, plus palette strings totalling at most
             // 4 KiB (a larger palette is never kept): `CHROME_CACHE_ENVELOPE_BYTES` in `sonicterm-gpu`.
@@ -296,8 +299,8 @@ impl ResourceClass {
             // each reply's `Vec` header too: measured at 4,480 bytes for a
             // full queue, against the 2,048 the payloads alone predict.
             Self::ParserReply => ClassCoverage::MeasuredNegligible { per_pane_bytes: 8 * 1024 },
-            // 1024 bounded records of 40 bytes.
-            Self::CommandEvents => ClassCoverage::MeasuredNegligible { per_pane_bytes: 40 * 1024 },
+            // 1024 bounded records of 40 bytes, and one command text of at most 1 KiB.
+            Self::CommandEvents => ClassCoverage::MeasuredNegligible { per_pane_bytes: 41 * 1024 },
 
             // Decode buffers live inside `decode_inline_image`; the retained
             // result is charged as `InlineMediaRetained`.
@@ -346,6 +349,8 @@ impl ResourceClass {
             Self::AccessibilityTree => ClassCoverage::Charged,
             // App::charge_mcp_connections charges live connection buffers to the process-level Mcp owner.
             Self::ControlConnection => ClassCoverage::Charged,
+            // App::charge_clipboard_staging charges the clipboard staging leases to the process owner.
+            Self::ClipboardStaging => ClassCoverage::Charged,
             // Owner records are the ledger's own storage. Charging them to a
             // ledger class would make the ledger account for itself, and the
             // recursion has no fixed point.
@@ -467,6 +472,9 @@ impl ResourceClass {
 
             // Charged to the process-level Mcp owner; agents' connections belong to no pane.
             Self::ControlConnection => PaneSeamTerm::ChargedToAnotherOwnerKind,
+
+            // Charged to the tracking-only process owner, so a 512 MiB write never trips a pane backstop.
+            Self::ClipboardStaging => PaneSeamTerm::ChargedToAnotherOwnerKind,
 
             // No subsystem charges these: subscriber owners are absent, registry storage is ledger-owned,
             // font faces have no shared owner, and GPU surface memory has no driver-reported size.

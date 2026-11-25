@@ -19,7 +19,6 @@ flowchart TD
     platform["sonicterm-mac / sonicterm-windows / sonicterm-linux"]
     shell["MacShell / WindowsShell / LinuxShell"]
     app["sonicterm-app<br/>live windows, tabs, panes, event routing"]
-    core["sonicterm-app-core<br/>pure intents, state, effects"]
     io["sonicterm-io<br/>PTY and process I/O"]
     vt["sonicterm-vt<br/>ANSI/VT parser"]
     grid["sonicterm-grid<br/>cells, history, dirty rows"]
@@ -30,14 +29,13 @@ flowchart TD
     resource["sonicterm-resource<br/>owner tree and ledger"]
 
     platform --> shell --> app
-    app --> core
     app --> io --> vt --> grid --> model --> gpu --> screen
     font --> gpu
     app --> resource
 ```
 
 The arrows show runtime flow, not every Cargo edge. `sonicterm-app` owns the
-live topology. `sonicterm-app-core` owns a separate backend-free state machine.
+live topology and is its only state authority.
 `sonicterm-gpu` receives terminal and UI types through the render-model boundary.
 
 ### Crate boundaries
@@ -46,7 +44,6 @@ live topology. `sonicterm-app-core` owns a separate backend-free state machine.
 | --- | --- | --- |
 | `sonicterm-types` | small values and backend-free trait contracts | winit, wgpu, native PTYs |
 | `sonicterm-resource` | resource owners, ledger entries, reservations, close checks | retained payloads and seam-specific reclamation |
-| `sonicterm-app-core` | `AppState`, `AppIntent`, `AppEffect`, reducers, effect ordering | native handles, blocking I/O, winit, wgpu |
 | `sonicterm-io` | local PTY/process work | ANSI interpretation and UI state |
 | `sonicterm-vt` / `sonicterm-grid` | terminal parsing, cells, scrollback, cursor state, dirty rows | native windows and GPU resources |
 | `sonicterm-cfg` / `sonicterm-ui` | configuration, themes, keymaps, tabs, panes, search, selection, IME | native presentation calls |
@@ -129,37 +126,15 @@ Each `TabState` owns a `PaneTree`, its active pane id, search state, and command
 status. Each `PaneState` owns its parser, optional `PtyHandle`, redraw target,
 terminal-mode atomics, inline images, and resource charges.
 
-`AppStateMachine` holds backend-free compatibility observations, not live GUI
-topology: it is a compatibility and test model, and only tests read its state.
-`App::observe_intent` updates it with structural intents (tabs, panes, windows,
-focus) and discards their effects; high-frequency input such as cursor motion is
-not reported, because nothing reads it. Making the reducer authoritative would
-be a separate behavioral migration. Which intents the live App executes is
-stated in one place, `AppIntent::authority()` in app-core, an exhaustive match a
-new variant cannot skip:
-
-| Authority | Intents | Who acts |
-| --- | --- | --- |
-| `Drives` | PTY write, exit, burst and foreground change; redraw request; key press; IME start, preedit, commit and end; URL hover and click; scrolling and the wheel; paste; exit | `App::dispatch_intent` executes each against live state. |
-| `Observes` | window, tab and pane lifecycle and focus; key release; mouse buttons and motion; selection; search; command palette; OS drag and file drop; config, theme and font size; broadcast scope; tick | The App's own handlers already did the work; the intent only updates the reducer's model. |
-
-`dispatch_intent` sends an `Observes` intent straight to the reducer, and
-`observe_intent` debug-asserts that it never receives a `Drives` one, so a driven
-intent cannot be silently dropped; a test dispatches every `Drives` intent on a
-live App.
+`App`'s typed owners are the single state authority: the window registry with
+its `WindowMap` and each window's `PaneMap`, `retire_pane` with each pane's
+`ReapSlot`, and GPU recovery. No second model mirrors them, so each handler
+changes live state directly.
 Missing, removed, or zero window keys never select main or frontmost. Native
 input goes to its source window's active pane through the bounded PTY queue.
-See [Runtime Lifecycle](Runtime-Lifecycle) for the state/intent/effect inventory
-and the distinction between record-only effects and native completion.
+See [Runtime Lifecycle](Runtime-Lifecycle) for input routing and pane teardown.
 
 ### Boundary contracts
-
-#### Intent and effect
-
-The backend-free reducer keeps stable effect ordering. GUI observations do not
-execute its batch; explicit-target operations cross the live app separately.
-The exact order, cascade bound, and dormant queue are recorded in
-[Runtime Lifecycle](Runtime-Lifecycle).
 
 #### Terminal
 
@@ -280,7 +255,7 @@ The exact safety conditions are in
 | UI model | `sonicterm-cfg` and `sonicterm-grid` feed `sonicterm-ui`; all three feed `sonicterm-render-model` |
 | fonts | `sonicterm-font-config` and native wrappers feed `sonicterm-font`; `sonicterm-font` and `sonicterm-text` independently feed `sonicterm-engine` |
 | rendering | render model, engine, text, types, and block glyphs feed `sonicterm-gpu` |
-| app | app core, terminal, UI, rendering, logging, and resource crates feed `sonicterm-app` |
+| app | terminal, UI, rendering, logging, and resource crates feed `sonicterm-app` |
 | platform | `sonicterm-app` feeds `sonicterm-mac`, `sonicterm-windows`, and `sonicterm-linux` |
 
 ### Source map
@@ -288,7 +263,6 @@ The exact safety conditions are in
 | Topic | Primary paths |
 | --- | --- |
 | App state and topology | `crates/sonicterm-app/src/app/{mod,window_state,window_registry}.rs` |
-| Intents, effects, and reducer | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine,app_state}.rs` |
 | Shell boundary | `crates/sonicterm-app/src/shell.rs` |
 | PTY and process boundary | `crates/sonicterm-io/src/pty.rs` |
 | VT and grid | `crates/sonicterm-vt/src/vt.rs`, `crates/sonicterm-grid/src/grid.rs` |

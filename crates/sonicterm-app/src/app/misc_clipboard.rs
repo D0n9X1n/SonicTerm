@@ -1,6 +1,8 @@
 //! Window-local clipboard copy, paste and refusal handling.
 
 use super::*;
+use crate::app::clipboard_worker::{TargetOutcome, WriteResult};
+use crate::app::osc52_stream::ClipTargets;
 
 /// Whether paste trusts the native clipboard's copied-file list: Windows reads `CF_HDROP` and
 /// macOS reads file URLs. The Linux backend decodes `text/uri-list` lossily, dropping entries it
@@ -9,53 +11,54 @@ pub(in crate::app) const NATIVE_CLIPBOARD_FILE_LIST: bool =
     cfg!(any(target_os = "windows", target_os = "macos"));
 
 impl App {
-    #[cfg(target_os = "windows")]
-    pub(in crate::app) fn clipboard_text_for_reassert(&mut self) -> Option<String> {
-        if let Some(text) = self.testing.test_clipboard_text.as_ref() {
-            // When: test_clipboard_text contains text, expose the test clipboard snapshot.
-            return Some(text.clone());
-        }
-        self.clipboard.as_mut().and_then(|clipboard| clipboard.get_text().ok())
+    /// Copy the user's `text` with no follow-up; true when it was written or queued in order.
+    pub(in crate::app) fn set_clipboard_text(&mut self, text: String) -> bool {
+        self.copy_text_then(text, |_, _| {})
     }
 
-    pub(in crate::app) fn set_clipboard_text(&mut self, text: String) -> bool {
-        #[cfg(target_os = "windows")]
-        {
-            self.pending_osc52_reassert = None;
-        }
-        if text.is_empty() {
-            // When: text is empty; writing it would clear the user's clipboard,
-            // so leave the previous contents intact.
-            return false;
-        }
+    /// Write `text` to `targets` on the event-loop thread; an empty text clears them. A test
+    /// buffer keeps the write off the desktop and never touches PRIMARY.
+    pub(in crate::app) fn write_clipboard_inline(
+        &mut self,
+        text: &str,
+        targets: ClipTargets,
+    ) -> bool {
+        self.write_clipboard_inline_targets(text, targets).written()
+    }
+
+    /// [`Self::write_clipboard_inline`] with each selection's outcome: refused when nothing could
+    /// be written, unknown when a native call failed after it may have stored the text.
+    pub(in crate::app) fn write_clipboard_inline_targets(
+        &mut self,
+        text: &str,
+        targets: ClipTargets,
+    ) -> WriteResult {
         #[cfg(any(test, feature = "test-support"))]
         if self.testing.test_clipboard_write_failure {
             // When: `test_clipboard_write_failure` is true, reject at the set_text
             // boundary without changing the in-memory or system clipboard.
-            return false;
+            return WriteResult::each(targets, TargetOutcome::Refused);
         }
-        if self.testing.test_clipboard_text.is_some() || self.testing.test_clipboard_files.is_some()
-        {
-            // When: test_clipboard_text or test_clipboard_files is set, keep the copy off the system clipboard;
-            // like a native copy, the text replaces any copied file list.
-            self.testing.test_clipboard_text = Some(text.clone());
-            self.testing.test_clipboard_files = None;
-            return true;
+        if self.test_clipboard_installed() {
+            // When: test_clipboard_installed, keep the copy off the system clipboard; like a
+            // native copy, the text replaces any copied file list.
+            if targets.clipboard {
+                self.testing.test_clipboard_text = Some(text.to_owned());
+                self.testing.test_clipboard_files = None;
+            }
+            return WriteResult::each(targets, TargetOutcome::Taken);
         }
         let Some(clipboard) = self.clipboard.as_mut() else {
             // When: no clipboard handle was created, no write occurred and callers
             // must preserve any selection that depends on confirmed delivery.
-            return false;
+            return WriteResult::each(targets, TargetOutcome::Refused);
         };
-        if let Err(error) = clipboard.set_text(text.clone()) {
-            tracing::warn!("clipboard set failed: {error}");
-            false
-        } else {
-            // When: set_text succeeded; record the byte count so a silent
-            // clipboard failure stays distinguishable from a real copy.
-            tracing::info!("copied {} bytes", text.len());
-            true
-        }
+        crate::app::clipboard_worker::write_native_targets(clipboard, text, targets)
+    }
+
+    /// Whether a test buffer stands in for the native clipboard.
+    pub(in crate::app) fn test_clipboard_installed(&self) -> bool {
+        self.testing.test_clipboard_text.is_some() || self.testing.test_clipboard_files.is_some()
     }
 
     /// Resolve clipboard ownership from the target's open search, even when its active pane is unavailable.
@@ -113,7 +116,8 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Paste clipboard text into the source search field, or paste copied files or text into each terminal destination.
+    /// Paste clipboard text into the source search field, or send each terminal destination its
+    /// paste: a DECSET 5522 paste event to the panes that take one, copied files or text to the rest.
     pub(in crate::app) fn paste_clipboard_for_kind(&mut self, kind: FrontmostKind) {
         if let Some(id) = self.search_paste_window_for_kind(kind) {
             // When: id owns an open search, its query takes text only; a failed commit must not reach terminal or broadcast input.
@@ -123,6 +127,59 @@ impl App {
             }
             return;
         }
+        // Recipients are chosen before any clipboard read, so a pane that asked for paste events
+        // gets its event even when the offer holds no text, such as an image alone.
+        let split = self
+            .active_pane_id_for_kind(kind)
+            .filter(|pane| self.admits_new_user_input(*pane))
+            .map(|source_pane| {
+                let (destinations, blocked) = self.paste_destinations(source_pane);
+                let (event_panes, text_panes): (Vec<u64>, Vec<u64>) =
+                    destinations.into_iter().partition(|pane| self.takes_paste_event(*pane));
+                (source_pane, blocked, event_panes, text_panes)
+            });
+        let Some((source_pane, blocked, event_panes, text_panes)) =
+            split.filter(|(_, _, event_panes, _)| !event_panes.is_empty())
+        else {
+            // When: split is None or its event_panes is empty, the file and text paste runs unchanged.
+            self.paste_clipboard_contents_for_kind(kind);
+            return;
+        };
+        self.note_paste_gesture(source_pane, blocked);
+        // The offer is listed and versioned off the event loop; each event follows its capture.
+        self.capture_paste_events(&event_panes);
+        if text_panes.is_empty() {
+            // When: text_panes is empty, every pane took an event and the clipboard is never read.
+            return;
+        }
+        // Copied files reach text recipients as quoted paths, as a paste alone would send them.
+        let files = self.read_clipboard_files();
+        let payload = if files.is_empty() {
+            self.read_clipboard_text().map(UserPayload::Text)
+        } else {
+            // When: files is non-empty, the copied files win over the bare name a file copy offers as text.
+            Some(UserPayload::Paths(files))
+        };
+        let Some(payload) = payload else {
+            // When: payload is None, the clipboard has no text, so the text recipients get nothing.
+            return;
+        };
+        let paste = super::super::PtyInputSource::Paste;
+        let (destinations, refusals) = self.encode_paste_to(&text_panes, &payload, paste);
+        self.show_paste_refusals(kind, destinations, &refusals);
+    }
+
+    /// Whether `pane_id` gets a paste event instead of its paste: its program set DECSET 5522, read
+    /// without the parser lock, and `osc52_read` is not `deny`, under which the program could not
+    /// read what the event announces, so the paste stays text.
+    pub(in crate::app) fn takes_paste_event(&self, pane_id: u64) -> bool {
+        use sonicterm_cfg::config::Osc52ReadPolicy;
+        let readable = self.clip_state.staging.read_policy() != Osc52ReadPolicy::Deny;
+        readable && self.pane_by_id(pane_id).is_some_and(|pane| pane.paste_events_mode() & 1 == 1)
+    }
+
+    /// Paste the clipboard's copied files, else its text, into each terminal destination.
+    fn paste_clipboard_contents_for_kind(&mut self, kind: FrontmostKind) {
         let files = self.read_clipboard_files();
         if !files.is_empty() {
             // When: files is non-empty, paste the quoted paths like a drop; a file copy's text form is only a bare name.
@@ -234,6 +291,10 @@ impl App {
 #[cfg(test)]
 #[path = "misc_clipboard_tests.rs"]
 mod misc_clipboard_tests;
+
+#[cfg(test)]
+#[path = "misc_clipboard_paste_event_tests.rs"]
+mod misc_clipboard_paste_event_tests;
 
 #[cfg(all(test, target_os = "windows"))]
 #[path = "misc_clipboard_native_windows_tests.rs"]

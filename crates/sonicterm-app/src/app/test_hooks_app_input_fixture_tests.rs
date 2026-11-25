@@ -1,6 +1,7 @@
 //! Native input submission observations and source-window fixtures. regression contracts.
 
 use super::*;
+use sonicterm_vt::vt::MouseFormat;
 
 /// Moving a live pane keeps its task reservation and never schedules teardown before an actual close.
 #[cfg(any(windows, unix))]
@@ -84,6 +85,25 @@ fn real_pty_submission_observer_excludes_failed_input() {
     assert!(submitted.take().is_empty());
 }
 
+/// Switch `pane` to 1003 with SGR reports and publish the modes, as the VT worker does after a batch.
+#[cfg(any(windows, unix))]
+fn publish_any_motion_sgr(app: &App, pane: u64) {
+    let state = app.pane_by_id(pane).unwrap();
+    let mut parser = state.parser.lock();
+    parser.advance(b"\x1b[?1003h\x1b[?1006h");
+    state.__test_publish_input_modes(&parser);
+}
+
+/// The profile a no-button report has once `publish_any_motion_sgr` ran: 1003, SGR, primary screen.
+#[cfg(any(windows, unix))]
+const ANY_MOTION_SGR: crate::app::input_dispatch::MotionProfile =
+    crate::app::input_dispatch::MotionProfile {
+        tracking: sonicterm_vt::vt::MouseTracking::AnyMotion,
+        format: MouseFormat::Sgr,
+        is_alt: false,
+        held: false,
+    };
+
 /// Pending motion is not submission, even though staging returns accepted ownership to the caller.
 #[cfg(any(windows, unix))]
 #[test]
@@ -92,12 +112,12 @@ fn real_pty_submission_observer_excludes_staged_motion() {
         return;
     }
     let (mut app, _, pane) = input_test_app();
-    app.pane_by_id(pane).unwrap().parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    publish_any_motion_sgr(&app, pane);
     app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
     assert!(app.write_to_pane(pane, b"control".to_vec(), PtyInputSource::Keyboard));
     assert_eq!(submitted.take(), vec![(pane, b"control".to_vec())]);
-    assert!(app.write_to_pane(pane, b"\x1b[<35;2;3M".to_vec(), PtyInputSource::PointerMotion));
+    app.write_pointer_motion(pane, ANY_MOTION_SGR, b"\x1b[<35;2;3M".to_vec());
     assert_ne!(app.pane_by_id(pane).unwrap().pending_pointer_motion.len, 0);
     assert!(submitted.take().is_empty());
 }
@@ -110,11 +130,11 @@ fn real_pty_submission_observer_records_flushed_motion() {
         return;
     }
     let (mut app, _, pane) = input_test_app();
-    app.pane_by_id(pane).unwrap().parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    publish_any_motion_sgr(&app, pane);
     app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
     for report in [b"\x1b[<35;1;3M", b"\x1b[<35;2;3M"] {
-        assert!(app.write_to_pane(pane, report.to_vec(), PtyInputSource::PointerMotion));
+        app.write_pointer_motion(pane, ANY_MOTION_SGR, report.to_vec());
     }
     assert!(submitted.take().is_empty());
     assert_eq!(app.flush_pointer_motion(Instant::now()), None);
@@ -130,10 +150,10 @@ fn real_pty_submission_observer_records_motion_with_discrete_input() {
         return;
     }
     let (mut app, _, pane) = input_test_app();
-    app.pane_by_id(pane).unwrap().parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    publish_any_motion_sgr(&app, pane);
     app.wait_for_input_queues();
     let submitted = PtySubmissions::start();
-    assert!(app.write_to_pane(pane, b"\x1b[<35;2;3M".to_vec(), PtyInputSource::PointerMotion));
+    app.write_pointer_motion(pane, ANY_MOTION_SGR, b"\x1b[<35;2;3M".to_vec());
     assert!(submitted.take().is_empty());
     assert!(app.write_to_pane(pane, b"key".to_vec(), PtyInputSource::Keyboard));
     assert_eq!(submitted.take(), vec![(pane, b"\x1b[<35;2;3Mkey".to_vec())]);
@@ -178,7 +198,7 @@ fn real_pty_alltabs_keyboard_excludes_readonly_receivers() {
                 })
                 .collect();
             input_phase(source, "write-begin");
-            let delivered = app.dispatch_terminal_key_writes(writes);
+            let delivered = app.dispatch_terminal_key_writes(writes, true);
             input_phase(source, "write-end");
             let expected = if read_only {
                 BTreeSet::from([source, peer])
@@ -226,14 +246,15 @@ fn real_pty_alltabs_byte_fanout_excludes_readonly_receivers() {
     }
 }
 
-/// Explicit IME and paste intents admit only their live destination, and READONLY never redirects to an unprotected peer.
+/// Native IME commits and clipboard pastes reach only their source window's active pane, never the
+/// frontmost peer; READONLY consumes both, and ordinary copy mode drops only the IME commit.
 #[cfg(any(windows, unix))]
 #[test]
-fn real_pty_intent_ime_and_paste_respect_readonly_admission() {
+fn real_pty_source_ime_and_paste_respect_readonly_admission() {
     if isolated() {
         return;
     }
-    use sonicterm_app_core::AppIntent;
+    use winit::event::Ime;
     for target_index in 0..3 {
         for copy_kind in ["none", "copy", "readonly"] {
             for ime in [false, true] {
@@ -245,22 +266,24 @@ fn real_pty_intent_ime_and_paste_respect_readonly_admission() {
                     "readonly" => Some(CopyModeState::read_only_at((0, 0))),
                     _ => None,
                 };
-                let window = app.window_key(target).unwrap();
-                let intent = if ime {
-                    AppIntent::ImeCommit { window, text: "intent".into() }
-                } else {
-                    AppIntent::Paste { window, text: "intent".into(), bracketed: false }
-                };
+                app.__test_set_memory_clipboard("source");
                 app.wait_for_input_queues();
                 let submitted = PtySubmissions::start();
-                app.dispatch_intent(intent);
+                if ime {
+                    app.handle_window_ime(target, Ime::Commit("source".into()));
+                } else {
+                    assert!(app.run_action_for_window(&Action::PasteFromClipboard, target));
+                }
+                // Copy mode owns the keyboard, so an IME commit is dropped there; a paste is not
+                // keyboard input and still reaches a pane whose window is not READONLY.
+                let delivered = match copy_kind {
+                    "readonly" => false,
+                    "copy" => !ime,
+                    _ => true,
+                };
                 assert_eq!(
                     submitted.take(),
-                    if copy_kind == "readonly" {
-                        Vec::new()
-                    } else {
-                        vec![(pane, b"intent".to_vec())]
-                    },
+                    if delivered { vec![(pane, b"source".to_vec())] } else { Vec::new() },
                     "target={target_index} copy={copy_kind} ime={ime}"
                 );
             }

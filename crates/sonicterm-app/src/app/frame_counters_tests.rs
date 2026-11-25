@@ -325,6 +325,16 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("os_drag.rs", "inner", 2),
     ("taskbar_progress.rs", "slot", 2),
     ("taskbar_progress.rs", "thread_slot", 1),
+    // A posted clipboard job's one-shot slot: `take` and the length-only `Debug`.
+    ("app/osc52_stream.rs", "0", 2),
+    // The VT workers' policy wakeups: registration and the wake on a policy change.
+    ("app/osc52_stream.rs", "policy_wakers", 2),
+    // A posted read ticket's one-shot slot: `take` and the pane-only `Debug`.
+    ("app/osc52_read_ticket.rs", "0", 2),
+    // The admitted custom clipboard format names, checked at an OSC 5522 commit's preflight.
+    ("app/kitty_clipboard_offer_windows.rs", "0", 1),
+    // X11 preflight serializes permanent atom-name admissions across panes, not parser access.
+    ("app/kitty_clipboard_offer_x11.rs", "admitted_names", 1),
     ("app/fg_probe.rs", "map", 9),
     ("app/fg_probe.rs", "proxy", 1),
     ("app/fg_probe.rs", "worker", 3),
@@ -408,6 +418,8 @@ pub(super) const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/pane_refresh.rs", 4),
     ("app/pane_state.rs", 1),
     ("app/pane_target.rs", 1),
+    // OSC 7501: a focus or key acknowledgment, and a child exit, end records and read the summary.
+    ("app/program_state.rs", 2),
     ("app/mcp/control_loop.rs", 2),
     // run_command's start: the prompt check and pin, and the unpin after a refused write, both bounded.
     ("app/mcp/run.rs", 2),
@@ -425,6 +437,8 @@ pub(super) const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
 /// the event-loop thread, and the counting helper that lock_parser wraps.
 pub(super) const WORKER_LOCK_SECTIONS: &[(&str, &str)] = &[
     ("app/spawn_pane.rs", "process_pane_vt_batch_with"),
+    // The worker aborting an expired clipboard stream, between batches on the same thread.
+    ("app/spawn_pane_vt.rs", "expire_clipboard_stream"),
     ("app/frame_counters.rs", "lock_counted"),
 ];
 

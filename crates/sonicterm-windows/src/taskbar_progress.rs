@@ -72,10 +72,11 @@ impl TaskbarProgressBackend for TaskbarButtons {
         };
         let hwnd = HWND(native as *mut _);
         let state = taskbar_state(report);
-        // The value goes first so a paused or error state keeps the reported fraction.
+        // The value goes first so a paused or error state keeps the reported fraction; a report
+        // with no percent shows 0.
         let value = report
             .filter(|report| report.state != ProgressState::Indeterminate)
-            .map(|report| u64::from(report.percent));
+            .map(|report| u64::from(report.percent.unwrap_or(0)));
         let result =
             // SAFETY: `hwnd` is a top-level handle the App read from its winit window; a destroyed
             // handle makes the call fail, which is logged and ignored.

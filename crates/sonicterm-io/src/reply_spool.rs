@@ -178,6 +178,10 @@ struct Spill {
 pub(crate) struct ReplyReader {
     sender: PtyReplySender,
     pub(crate) wake: Receiver<()>,
+    /// Sensitive replies (clipboard reads), which never enter the spool; see `pty_sensitive_reply`.
+    pub(crate) sensitive: Receiver<crate::pty::SensitiveReply>,
+    /// Keeps `sensitive` connected while the reader lives; handed to the PTY handle by clone.
+    sensitive_tx: Sender<crate::pty::SensitiveReply>,
 }
 
 impl PtyReplySender {
@@ -534,10 +538,16 @@ pub(crate) fn reply_spool_with(
         stats: Arc::default(),
         clock,
     };
-    (sender.clone(), ReplyReader { sender, wake: rx })
+    let (sensitive_tx, sensitive) = crate::pty::sensitive_reply_channel();
+    (sender.clone(), ReplyReader { sender, wake: rx, sensitive, sensitive_tx })
 }
 
 impl ReplyReader {
+    /// The sender of this reader's sensitive-reply slot, for the PTY handle.
+    pub(crate) fn sensitive_sender(&self) -> Sender<crate::pty::SensitiveReply> {
+        self.sensitive_tx.clone()
+    }
+
     /// Remove whole submissions fitting a 32 KiB turn, unlocking before native PTY I/O.
     pub(crate) fn pop(&self) -> io::Result<Option<Vec<u8>>> {
         let mut state = self.sender.state.lock();
@@ -560,14 +570,41 @@ impl ReplyReader {
     }
 }
 
-// Lifecycle: ReplyReader closes sender admission and clears state on the native writer thread after in-flight operations.
+// Lifecycle: ReplyReader drops queued sensitive replies (their custody), closes admission and clears spool state.
 impl Drop for ReplyReader {
     fn drop(&mut self) {
+        while self.sensitive.try_recv().is_ok() {}
         self.sender.close();
         let mut state = self.sender.state.lock();
         state.clear();
         self.sender.stats.publish(&state);
     }
+}
+
+/// Test-only: the reader side of a spool from [`reply_spool_for_test`], draining submissions in
+/// the turns the PTY writer takes, so another crate's test sees what a program would read.
+#[cfg(feature = "test-support")]
+pub struct ReplyDrain(ReplyReader);
+
+#[cfg(feature = "test-support")]
+impl ReplyDrain {
+    /// Take writer turns until the spool is empty and return every byte they read, in order; a
+    /// turn reads only whole submissions, so a submission is never split across turns.
+    pub fn drain(&self) -> io::Result<Vec<u8>> {
+        let mut drained = Vec::new();
+        while let Some(turn) = self.0.pop()? {
+            drained.extend(turn);
+        }
+        Ok(drained)
+    }
+}
+
+/// Test-only: a pane's real reply spool drawing on a private pool of `spill_budget_bytes`, so a
+/// test applies spool pressure without the process pool, and the drain a writer would read.
+#[cfg(feature = "test-support")]
+pub fn reply_spool_for_test(spill_budget_bytes: u64) -> (PtyReplySender, ReplyDrain) {
+    let (sender, reader) = reply_spool_with_pool(SpillPool::new(spill_budget_bytes));
+    (sender, ReplyDrain(reader))
 }
 
 #[cfg(test)]

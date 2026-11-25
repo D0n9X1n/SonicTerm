@@ -530,6 +530,9 @@ fn emit_graphics_memory_snapshot(
         graphics_requested_released =
             %graphics.summed().render_per_class(|tally| (tally.released_bytes, tally.released_resources)),
         graphics_os_unavailable_reason = graphics.os.unavailable_reason.unwrap_or("none"),
+        // Appended after every earlier field: the session's persistent OSC 7501 records and OSC
+        // 1337 user variables, a seam `session_total_bytes` already includes.
+        program_metadata_bytes = session.program_metadata.bytes,
         "memory snapshot"
     );
 }
@@ -754,6 +757,7 @@ fn add_retention(session: PaneRetention, pane: &PaneRetention) -> PaneRetention 
         inline_media: add(session.inline_media, pane.inline_media),
         pty_output: add(session.pty_output, pane.pty_output),
         pty_input: add(session.pty_input, pane.pty_input),
+        program_metadata: add(session.program_metadata, pane.program_metadata),
     }
 }
 

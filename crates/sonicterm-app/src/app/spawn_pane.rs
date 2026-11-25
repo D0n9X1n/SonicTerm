@@ -46,41 +46,19 @@ use super::{
     WindowState,
 };
 
-/// How long the VT loop waits for an exited child to become observable.
-///
-/// EOF on the pty master and the child becoming reapable are two events with
-/// no ordering between them, so a single probe at EOF can read "still
-/// running" for a shell that has already gone. The wait is bounded because
-/// the answer is only worth having promptly: past this, the pane stays open,
-/// which is the same outcome as an unclean exit and costs the user nothing
-/// but a stale tab they can close.
-const CHILD_EXIT_OBSERVE_TIMEOUT: Duration = Duration::from_millis(250);
-/// Gap between exit observations while waiting.
-const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
-
-/// Maximum decoded UTF-8 text one OSC 52 write may place on the clipboard.
-pub(super) const MAX_OSC52_CLIPBOARD_BYTES: usize = 512 * 1024;
-
 /// Why an OSC 52 request did not write the clipboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Osc52Refusal {
-    /// A clipboard read (`?`); reads are never answered.
+    /// A clipboard read (`?`); no clipboard contents are read, and the reply, if any, is empty.
     Read,
-    /// A selection other than the clipboard `c`.
+    /// A kinds field with no destination this platform has.
     Selection(char),
-    /// The payload decodes past [`MAX_OSC52_CLIPBOARD_BYTES`].
+    /// The payload decodes past `[terminal] clipboard_write_limit_bytes`.
     TooLarge,
-    /// Empty, malformed Base64, or text that is not UTF-8.
+    /// Malformed Base64.
     Invalid,
-}
-
-/// SonicTerm's decision on one OSC 52 request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Osc52Outcome {
-    /// Write this decoded text to the clipboard.
-    Write(String),
-    /// Leave the clipboard alone.
-    Refused(Osc52Refusal),
+    /// The staging budget or the program-write slots are exhausted.
+    Busy,
 }
 
 /// The OSC 52 requests of one VT batch, counted without their payloads.
@@ -96,81 +74,7 @@ pub struct ClipAttempts {
     pub latest: Option<Osc52Refusal>,
 }
 
-/// Decide one OSC 52 request. Only target `c` writes are accepted. Queries (`?`), other
-/// selections, malformed Base64, non-UTF-8 payloads and decoded output above the hard cap are
-/// refused with their reason and can never expose or mutate the native clipboard.
-pub(super) fn osc52_decision(selection: char, data: &str) -> Osc52Outcome {
-    if data == "?" {
-        // When: `data` is a query, the request is a clipboard read.
-        return Osc52Outcome::Refused(Osc52Refusal::Read);
-    }
-    if selection != 'c' {
-        // When: `selection` is not clipboard `c`, the selection is unsupported.
-        return Osc52Outcome::Refused(Osc52Refusal::Selection(selection));
-    }
-    if data.is_empty() {
-        // When: `data` is empty, there is nothing to write.
-        return Osc52Outcome::Refused(Osc52Refusal::Invalid);
-    }
-    let max_encoded = MAX_OSC52_CLIPBOARD_BYTES.div_ceil(3) * 4;
-    if data.len() > max_encoded {
-        // When: `data` cannot encode a payload within the decoded cap, reject before allocating the output buffer.
-        return Osc52Outcome::Refused(Osc52Refusal::TooLarge);
-    }
-    let mut decoded = vec![0u8; MAX_OSC52_CLIPBOARD_BYTES];
-    let written = match base64::engine::general_purpose::STANDARD
-        .decode_slice(data.as_bytes(), &mut decoded)
-    {
-        Ok(written) => written,
-        Err(base64::DecodeSliceError::OutputSliceTooSmall) => {
-            // When: OutputSliceTooSmall, the payload decodes past the cap: too large, not malformed.
-            return Osc52Outcome::Refused(Osc52Refusal::TooLarge);
-        }
-        Err(_) => {
-            // When: decode_slice returns any other Err, the Base64 is malformed.
-            return Osc52Outcome::Refused(Osc52Refusal::Invalid);
-        }
-    };
-    decoded.truncate(written);
-    match String::from_utf8(decoded) {
-        Ok(text) if !text.is_empty() => Osc52Outcome::Write(text),
-        // Non-UTF-8 or empty decoded text is never written.
-        _ => Osc52Outcome::Refused(Osc52Refusal::Invalid),
-    }
-}
-
-/// How the pane's child exited, waiting briefly for it to become observable.
-///
-/// `Unknown` means the child outlived the wait, the probe failed, or no status
-/// was recorded. Callers must not read that as a crash: it decides only that
-/// the pane stays open, never that it closes.
-pub(super) fn observe_child_exit_status(
-    probe: &PtyChildExitProbe,
-) -> sonicterm_types::PaneExitStatus {
-    use sonicterm_types::PaneExitStatus;
-    let deadline = Instant::now() + CHILD_EXIT_OBSERVE_TIMEOUT;
-    loop {
-        match probe.has_exited() {
-            Ok(true) => {
-                // When: has_exited returns Ok(true), report the child's recorded exit status.
-                return probe.exit_status().unwrap_or(PaneExitStatus::Unknown);
-            }
-            Ok(false) => {
-                // When: has_exited returns Ok(false), keep polling until the observation deadline.
-            }
-            Err(error) => {
-                // When: has_exited returns Err(error), preserve an unknown exit classification.
-                tracing::debug!(%error, "failed to observe pane child exit");
-                return PaneExitStatus::Unknown;
-            }
-        }
-        if Instant::now() >= deadline {
-            // When: Instant::now reaches deadline, stop waiting and preserve an unknown result.
-            return PaneExitStatus::Unknown;
-        }
-        std::thread::sleep(CHILD_EXIT_POLL_INTERVAL);
-    }
-}
+pub(super) use super::pane_exit::observe_child_exit_status;
 
 /// How long a quiescent VT loop parks before looking around.
 ///
@@ -349,6 +253,8 @@ pub(in crate::app) struct PaneVtHandles {
     cursor_steady: Arc<AtomicBool>,
     keyboard_input: Arc<AtomicU64>,
     pointer_input: Arc<std::sync::atomic::AtomicU8>,
+    pointer_shape: Arc<std::sync::atomic::AtomicU32>,
+    paste_events: Arc<AtomicU64>,
     sync_word: Arc<AtomicU64>,
     sync_deadline_word: Arc<AtomicU64>,
     sync_resets: Arc<AtomicU64>,
@@ -368,6 +274,10 @@ pub(in crate::app) struct PaneVtHandles {
     /// Whether this worker last reported an active `OSC 9;4` progress, so a command end or RIS
     /// sends a clear only when something is shown.
     progress_shown: std::cell::Cell<bool>,
+    /// This worker's clipboard streams; a clone starts with none open, on the same staging.
+    clipboard: std::cell::RefCell<super::osc52_stream::Osc52Intake>,
+    /// This worker's OSC 5522 write transaction; a clone starts with none open.
+    kitty_clipboard: std::cell::RefCell<super::kitty_clipboard_tx::KittyClipboardTx>,
     /// The pane these handles belong to, named in the events the worker sends; 0 until set.
     pane_id: u64,
 }
@@ -391,6 +301,8 @@ impl PaneVtHandles {
             cursor_steady: pane.cursor_steady.clone(),
             keyboard_input: pane.keyboard_input.clone(),
             pointer_input: pane.pointer_input.clone(),
+            pointer_shape: pane.pointer_shape.clone(),
+            paste_events: pane.paste_events.clone(),
             sync_word: pane.sync_word.clone(),
             sync_deadline_word: pane.sync_deadline_word.clone(),
             sync_resets: pane.sync_resets.clone(),
@@ -405,13 +317,42 @@ impl PaneVtHandles {
             frame_counters: pane.frame_counters.clone(),
             echo_cache: std::cell::Cell::new(super::echo_watch::EchoCache::default()),
             progress_shown: std::cell::Cell::new(false),
+            clipboard: std::cell::RefCell::new(
+                super::osc52_stream::Osc52Intake::new(
+                    super::osc52_stream::ClipboardStaging::process_default(),
+                )
+                .with_identity(pane.read_identity.clone()),
+            ),
+            kitty_clipboard: std::cell::RefCell::new(
+                super::kitty_clipboard_tx::KittyClipboardTx::new(
+                    super::osc52_stream::ClipboardStaging::process_default(),
+                    pane.read_identity.clone(),
+                ),
+            ),
             pane_id: 0,
         }
     }
 
+    /// These handles, reserving clipboard writes from `staging` rather than the process default.
+    // Lock order: kitty_clipboard, then clipboard; each RefCell borrow ends before the next.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(in crate::app) fn with_clipboard_staging(
+        self,
+        staging: Arc<super::osc52_stream::ClipboardStaging>,
+    ) -> Self {
+        // The in-memory fixture accepts representations without a native display.
+        self.kitty_clipboard.borrow_mut().set_holds(|_, _| true);
+        self.kitty_clipboard.borrow_mut().replace_staging(staging.clone());
+        self.clipboard.borrow_mut().replace_staging(staging);
+        self
+    }
+
     /// These handles, naming `pane_id` in the events the worker sends.
+    // Lock order: clipboard, then kitty_clipboard; each RefCell borrow ends before the next.
     pub(in crate::app) fn with_pane_id(mut self, pane_id: u64) -> Self {
         self.pane_id = pane_id;
+        self.clipboard.borrow_mut().bind_pane(pane_id);
+        self.kitty_clipboard.borrow_mut().bind_pane(pane_id);
         self
     }
 }
@@ -428,7 +369,11 @@ pub(super) fn spawn_pane_workers(
     let exit_probe = pty.child_exit_probe();
     let input_state = pty.input_sender();
     let in_tx_reply = pty.reply_sender();
+    // Every clipboard read this worker admits binds the PTY it reads.
+    pane.read_identity.set_incarnation(pty.incarnation());
     let worker_handles = PaneVtHandles::from_pane_state(pane).with_pane_id(pane_id);
+    // The staging keeps this receiver's sender while the worker lives, so it never disconnects.
+    let policy_wakeups = worker_handles.kitty_clipboard.borrow().staging().register_policy_waker();
     let redraw_proxy = proxy.clone();
 
     std::thread::Builder::new()
@@ -443,32 +388,57 @@ pub(super) fn spawn_pane_workers(
                     send_pane_output(&worker_handles, proxy, pane_id);
                 }
             };
+            let mut send_reply = |reply: Vec<u8>| {
+                if !replies.accepting() {
+                    // When: `replies` is not accepting after a failure, keep consuming output and observing exit without repeated errors.
+                    return;
+                }
+                let rejected_bytes = reply.len();
+                let result = in_tx_reply.send(reply);
+                let closing = input_state.is_closing();
+                replies.report(pane_id, rejected_bytes, &result, closing, || in_tx_reply.stats());
+            };
             loop {
-                match out_rx.recv_timeout(flush.wait(Instant::now())) {
+                let now = Instant::now();
+                let wait = worker_handles.clipboard_wait(now, flush.wait(now));
+                // The wait also wakes for a policy change and an open OSC 5522 write's deadline,
+                // so both act while the child prints nothing.
+                let received = crossbeam_channel::select! {
+                    recv(out_rx) -> message => {
+                        Some(message.map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected))
+                    }
+                    recv(policy_wakeups) -> _ => None,
+                    default(wait) => Some(Err(crossbeam_channel::RecvTimeoutError::Timeout)),
+                };
+                let Some(received) = received else {
+                    // When: received is None, the policy wakeup fired and the open OSC 52 stream
+                    // and OSC 5522 write are rechecked now.
+                    worker_handles.settle_clipboard_intake(Instant::now(), &mut send_reply);
+                    continue;
+                };
+                match received {
                     Ok(bytes) => {
-                        // When: recv_timeout returns Ok(bytes), parse and coalesce the batch.
-                        // The chunk's read stamp is read before the chunk moves into the batch.
+                        // Output arrived: parse and coalesce the batch. The chunk's read stamp is
+                        // read before the chunk moves into the batch.
                         let read_at = bytes.read_at();
                         worker_handles.count_output(bytes.len());
                         flush.receive(bytes.len(), Instant::now());
-                        process_pane_vt_batch_and_publish(
-                            &worker_handles,
-                            bytes,
-                            read_at,
-                            &mut command_started,
-                            &mut flush.sync_latch,
-                            redraw_proxy.as_ref(),
-                            |reply| {
-                                if !replies.accepting() {
-                                    // When: `replies` is not accepting after a failure, keep consuming output and observing exit without repeated errors.
-                                    return;
-                                }
-                                let rejected_bytes = reply.len();
-                                let result = in_tx_reply.send(reply);
-                                let closing = input_state.is_closing();
-                                replies.report(pane_id, rejected_bytes, &result, closing, || {
-                                    in_tx_reply.stats()
-                                });
+                        let sync_latch = &mut flush.sync_latch;
+                        let started = &mut command_started;
+                        let proxy = redraw_proxy.as_ref();
+                        worker_handles.take_ready_output(
+                            Instant::now(),
+                            &mut send_reply,
+                            |send_reply| {
+                                process_pane_vt_batch_and_publish(
+                                    &worker_handles,
+                                    bytes,
+                                    read_at,
+                                    started,
+                                    sync_latch,
+                                    proxy,
+                                    send_reply,
+                                );
                             },
                         );
                         flush.after_batch(&worker_handles, Instant::now(), send_output);
@@ -476,6 +446,7 @@ pub(super) fn spawn_pane_workers(
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                         // When: recv_timeout returns Timeout, flush any trailing pending redraw.
                         flush.on_quiet(&worker_handles, Instant::now(), send_output);
+                        worker_handles.settle_clipboard_intake(Instant::now(), &mut send_reply);
                         #[cfg(windows)]
                         if exit_probe.has_exited().unwrap_or(false) {
                             // When: exit_probe reports the child exited on Windows, report it and stop polling.
@@ -764,10 +735,10 @@ mod commands;
 #[path = "spawn_pane_media.rs"]
 mod media_batch;
 
-// Lock order: parser -> echo slot (pre_read, post_read); inline_images -> inline_media_charge after parser releases,
-// command_events after both.
-// Ordering: cursor_visible, cursor_steady, keyboard_input, pointer_input, bells, output_generation load are Relaxed;
-// self-contained words, this worker the sole writer.
+// Lock order: parser -> echo slot; then, one at a time after the parser releases: clipboard,
+// inline_images -> inline_media_charge, command_events.
+// Ordering: cursor_visible, cursor_steady, keyboard_input, pointer_input, pointer_shape, paste_events, bells,
+// output_generation: Relaxed, one writer each.
 #[allow(clippy::too_many_arguments)]
 fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
     handles: &PaneVtHandles,
@@ -788,6 +759,8 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
 {
     let mut remaining = bytes.as_ref();
     let mut reply_batch = Vec::new();
+    // The batch's last OSC 7501 summary; a reply can split a batch, and it is sent once at its end.
+    let mut program_status = None;
     let counters = handles.frame_counters.as_ref();
     if let Some(counters) = counters {
         // the App's gate is on, a nonempty batch counts once however often it takes the lock.
@@ -804,12 +777,14 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         // Gate on: one clock read before lock(), three under the guard (four when a new sync epoch opens);
         // an armed echo watch reads the target cell around the parse and may lock its slot, all before the guard drops.
         let before_lock = counters.map(|_| now());
-        let (result, section) = {
+        let (result, section, section_commands, clipboard_open, clipboard_inbox, kitty_inbox) = {
             let mut parser = handles.parser.lock();
             let locked_at = before_lock.map(|_| now());
             let echo_before = counters
                 .and_then(|counters| counters.echo.pre_read(&handles.echo_cache, parser.grid()));
             let result = parser.advance_with_replies(remaining);
+            // Taken under the lock: each C's own text, before a later A clears it in the grid.
+            let section_commands = parser.take_section_commands();
             let parsed_at = before_lock.map(|_| now());
             if let (Some(counters), Some(before), Some(parsed_at)) =
                 (counters, echo_before, parsed_at)
@@ -829,14 +804,38 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             }
             handles.keyboard_input.store(parser.keyboard_input_snapshot(), Ordering::Relaxed);
             handles.pointer_input.store(parser.pointer_input_snapshot(), Ordering::Relaxed);
+            handles.pointer_shape.store(parser.pointer_shape_snapshot(), Ordering::Relaxed);
+            // Stored before this section's clipboard tickets are posted, so a read after DECRST
+            // 5522 or RIS never meets a grant bound to the mode it reset.
+            handles.paste_events.store(parser.paste_events_snapshot(), Ordering::Relaxed);
             let sync_state = parser.synchronized_output();
             publish_sync_output(handles, sync_state, &mut now);
             sync_latch.note_section(sync_state);
             let released_at = before_lock.map(|_| now());
+            // Read under the lock: the stream still open, and the inbox only when this section
+            // raised clipboard events, so a section without them takes no extra reference.
+            let clipboard_open = parser.open_clipboard_stream();
+            let clipboard_inbox = result
+                .1
+                .iter()
+                .any(|event| matches!(event, VtEvent::ClipboardStream { .. }))
+                .then(|| parser.clipboard_inbox().clone());
+            let kitty_inbox = result
+                .1
+                .iter()
+                .any(|event| matches!(event, VtEvent::KittyClipboard { .. }))
+                .then(|| parser.kitty_clipboard_inbox().clone());
             // A fair release hands the parser to a selected parked waiter, such as a frame collection,
             // before this worker can relock. On unwind the guard still drops through ordinary RAII release.
             MutexGuard::unlock_fair(parser);
-            (result, (locked_at, parsed_at, released_at))
+            (
+                result,
+                (locked_at, parsed_at, released_at),
+                section_commands,
+                clipboard_open,
+                clipboard_inbox,
+                kitty_inbox,
+            )
         };
         let (consumed, events, replies) = result;
         if let (
@@ -861,11 +860,16 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         remaining = &remaining[consumed..];
 
         let mut clipboard_requests = Vec::new();
+        let mut kitty_requests = Vec::new();
         let mut command_side_effects = Vec::new();
         let mut media_events = Vec::new();
         // The batch's last progress change, latest wins; `Some(None)` clears.
         let mut progress: Option<Option<sonicterm_vt::vt::ProgressReport>> = None;
         let mut notices = ProgramNotices::default();
+        // Command boundaries passed so far in this section; each clipboard request records it.
+        let mut boundaries = 0u64;
+        // Each clipboard request's place on the wire, across OSC 52 and OSC 5522.
+        let mut wire_position = 0usize;
         // A batch that rings any number of times is one bell, so a ringing loop marks its tab once.
         if events.iter().any(|event| matches!(event, VtEvent::Bell)) {
             handles.bells.fetch_add(1, Ordering::Relaxed);
@@ -876,10 +880,16 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                     handles.cursor_visible.store(visible, Ordering::Relaxed);
                 }
                 VtEvent::CursorStyle(style) => handles.publish_cursor_style(style),
-                VtEvent::Clipboard { selection, data } => {
-                    clipboard_requests.push((selection, data));
+                VtEvent::ClipboardStream { stream, phase } => {
+                    clipboard_requests.push((stream, phase, boundaries, wire_position));
+                    wire_position += 1;
+                }
+                VtEvent::KittyClipboard { stream, request, bel } => {
+                    kitty_requests.push(Some((stream, request, bel, boundaries, wire_position)));
+                    wire_position += 1;
                 }
                 VtEvent::Command(event) => {
+                    boundaries += u64::from(event != CommandEvent::PromptEnd);
                     let at = now();
                     let duration = match event {
                         CommandEvent::CmdStart => {
@@ -891,13 +901,25 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                             progress = Some(None);
                             command_started.take().map(|started| at.duration_since(started))
                         }
-                        CommandEvent::PromptStart | CommandEvent::PromptEnd => None,
+                        CommandEvent::PromptStart => {
+                            // A fresh prompt ends any command still timed, so a later D with no C
+                            // of its own never takes the previous command's duration.
+                            *command_started = None;
+                            None
+                        }
+                        CommandEvent::PromptEnd => None,
                     };
                     command_side_effects.push(super::PaneCommandEvent { event, at, duration });
                 }
                 VtEvent::Media(media) => media_events.push(media),
                 VtEvent::Progress(report) => progress = Some(report),
-                VtEvent::ProgramStateReset => progress = Some(None),
+                VtEvent::ProgramStateReset => {
+                    // RIS releases an open OSC 5522 write silently, at its place in the section.
+                    kitty_requests.push(None);
+                    boundaries += 1;
+                    progress = Some(None);
+                }
+                VtEvent::ProgramStatus(summary) => program_status = Some(summary),
                 VtEvent::Notify { title, body, id, occasion } => {
                     notices.push_notice(title, body, id, occasion)
                 }
@@ -919,25 +941,21 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             emit_event(notice.into_event(handles.pane_id));
         }
 
-        // Every accepted write is its own event, in order; refusals only count toward one summary.
-        let mut attempts = ClipAttempts::default();
-        for (selection, data) in clipboard_requests {
-            attempts.total = attempts.total.saturating_add(1);
-            match osc52_decision(selection, &data) {
-                Osc52Outcome::Write(text) => {
-                    attempts.accepted = attempts.accepted.saturating_add(1);
-                    attempts.latest = None;
-                    emit_event(UserEvent::ClipboardWrite { pane_id: handles.pane_id, text });
-                }
-                Osc52Outcome::Refused(reason) => {
-                    attempts.refused = attempts.refused.saturating_add(1);
-                    attempts.latest = Some(reason);
-                }
-            }
-        }
-        if attempts.total > 0 {
-            emit_event(UserEvent::ClipboardAttempts { pane_id: handles.pane_id, attempts });
-        }
+        // Writes of both protocols post in wire order, then the section's command epoch, then its
+        // read tickets; refusals only count toward one summary, and busy reads come back as empty
+        // replies. OSC 5522 packets run first, at their positions' epochs; their writes are merged
+        // into the OSC 52 ones by position, and their tickets post after the epoch.
+        let kitty = handles.run_kitty_section(kitty_inbox.as_deref(), kitty_requests);
+        let read_replies = handles.clipboard.borrow_mut().run_section(
+            clipboard_inbox.as_deref(),
+            clipboard_open,
+            clipboard_requests,
+            boundaries,
+            kitty.writes,
+            &mut emit_event,
+        );
+        handles.post_kitty_tickets(kitty.tickets, &mut emit_event);
+        let kitty_status = kitty.status;
 
         let (kitty_replies, cursor_moves) =
             media_batch::apply_batch_media(handles, media_events, &mut decode_media);
@@ -951,18 +969,21 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         }
 
         if !command_side_effects.is_empty() {
-            super::append_bounded_command_events(
-                &mut handles.command_events.lock(),
-                command_side_effects,
+            let mut queue = handles.command_events.lock();
+            super::command_events::track_cmdline(
+                &mut queue,
+                &command_side_effects,
+                section_commands,
             );
+            super::append_bounded_command_events(&mut queue, command_side_effects);
         }
         if reply_batch.len() + replies.len() + kitty_replies.len() > 32 * 1024 {
             // Flush before appending a complete dispatch that would exceed the batch bound; never split a reply.
             send_reply(std::mem::take(&mut reply_batch));
         }
         reply_batch.extend(replies);
-        // A kitty reply ends its advance prefix, so it follows every VT reply of that prefix.
-        reply_batch.extend(kitty_replies);
+        let clipboard = super::osc52_read::ClipboardReplies { kitty_status, read_replies };
+        clipboard.append_before(&mut reply_batch, kitty_replies, &mut send_reply);
         if remaining.is_empty() {
             // When: remaining is empty, publish trailing replies without waiting for more child output.
             if !reply_batch.is_empty() {
@@ -970,5 +991,8 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             }
             break;
         }
+    }
+    if let Some(summary) = program_status {
+        emit_event(UserEvent::ProgramStatus { pane_id: handles.pane_id, summary });
     }
 }

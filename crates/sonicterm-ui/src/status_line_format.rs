@@ -633,7 +633,7 @@ pub(super) fn format_input(
 }
 
 /// The clipboard segment: what SonicTerm did with the latest OSC 52 request and which tab sent it,
-/// `Clip: 2.1 KB by #2` or `Clip: ⚠ read refused ×1000 by #2`. It shows no clipboard text and does
+/// `Clip: 2.1 KB by #2`, `Clip: ⚠ read refused ×1000 by #2` or `Clip: ⚠ waiting for you by #2`. It shows no clipboard text and does
 /// not claim the clipboard still holds what was written.
 pub(super) fn format_clip(
     inputs: &StatusLineInputs,
@@ -673,6 +673,15 @@ pub(super) fn format_clip(
             StatusTone::Warn,
             env.i18n.translate("status-spoken-clip-read-refused"),
         ),
+        ClipOutcome::Waiting => (
+            format!(
+                "{} {}",
+                symbol(env.icons, "⚠", "!"),
+                env.i18n.translate("status-value-clip-waiting")
+            ),
+            StatusTone::Warn,
+            env.i18n.translate("status-spoken-clip-waiting"),
+        ),
         ClipOutcome::SelectionRefused(selection) => {
             let selection = selection.to_string();
             let args = [("selection", selection.as_str())];
@@ -691,6 +700,11 @@ pub(super) fn format_clip(
             env.i18n.translate("status-value-clip-invalid"),
             StatusTone::Name,
             env.i18n.translate("status-spoken-clip-invalid"),
+        ),
+        ClipOutcome::Busy => (
+            env.i18n.translate("status-value-clip-busy"),
+            StatusTone::Name,
+            env.i18n.translate("status-spoken-clip-busy"),
         ),
     };
     let mut parts = vec![name_part(env, "status-name-clip"), StatusPart::new(text, tone)];

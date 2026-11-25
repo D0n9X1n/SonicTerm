@@ -149,6 +149,12 @@ pub struct PaneState {
     /// Pointer-routing modes (`Parser::pointer_input_snapshot`) published after each parser batch,
     /// so pointer handlers route without taking the parser lock.
     pub pointer_input: Arc<std::sync::atomic::AtomicU8>,
+    /// DECSET 5522 (paste events): the set bit and reset count (`Parser::paste_events_snapshot`),
+    /// published after each parser batch so paste routing reads it without the parser lock.
+    pub(crate) paste_events: Arc<AtomicU64>,
+    /// The pane's OSC 22 pointer shape and its change count (`Parser::pointer_shape_snapshot`),
+    /// published after each parser batch so the cursor decision reads it without the parser lock.
+    pub pointer_shape: Arc<std::sync::atomic::AtomicU32>,
     /// Synchronized output (DEC 2026): resets, epoch and set bit in one word, published by the VT worker under the
     /// parser lock after each parser section; travels with this pane across window transfers.
     pub(crate) sync_word: Arc<AtomicU64>,
@@ -182,6 +188,15 @@ pub struct PaneState {
     /// lives on the pane, so it survives tab transfer and tear-out; agents may control their own
     /// panes by default.
     pub(crate) creator: crate::app::mcp::agents::PaneOwner,
+    /// The OSC 7501 summary the tab marker reads; replaced only by a newer generation.
+    pub(crate) program_status: sonicterm_vt::vt::StatusSummary,
+    /// The window in which the pane was the frontmost window's focused pane when focus was last
+    /// applied, so focus acknowledges its done and error records once, on the edge. It names the
+    /// window, so a pane torn out into another window is a new edge there.
+    pub(crate) status_focused: Option<WindowId>,
+    /// The parser's own flag for a held `done` or `error` record, set before its summary event
+    /// reaches the App, so an acknowledgment never waits on that event.
+    pub(crate) status_unseen: Arc<std::sync::atomic::AtomicBool>,
     /// The child process's exit status, set once when the exit is first handled, so a waiter on
     /// another thread reads it without the event loop.
     pub(crate) exit_status: Arc<std::sync::OnceLock<sonicterm_types::PaneExitStatus>>,
@@ -196,6 +211,8 @@ pub struct PaneState {
     pub(crate) last_input_at: Option<Instant>,
     /// Set while an agent's `run_command` owns the pane; every agent write checks it.
     pub(crate) agent_run: Arc<std::sync::atomic::AtomicBool>,
+    /// What every OSC 52 read ticket from this pane binds; shared with its VT worker.
+    pub(in crate::app) read_identity: Arc<super::osc52_read_ticket::ReadIdentity>,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +230,10 @@ pub struct CommandQueue {
     /// The bound dropped older events since the drain last ran, so the state they would have set
     /// is unknown and the drain resets before applying the retained tail.
     pub overflowed: bool,
+    /// The one command text this pane holds for its long-command notification: the newest C's
+    /// text, with the instant of the D that ended it after a run of a second or more. The drain
+    /// takes a stamped text and pairs it with that D; a new C replaces it.
+    pub cmdline: Option<(sonicterm_grid::grid::CmdlineText, Option<Instant>)>,
 }
 
 impl std::ops::Deref for CommandQueue {
@@ -321,12 +342,15 @@ impl PaneState {
         pty: Option<PtyHandle>,
         media_pool: &Arc<media::InlineMediaPool>,
     ) -> Self {
-        let (keyboard_input, pointer_input, sync_state) = {
+        let (keyboard_input, pointer_input, pointer_shape, paste_events, sync_state, status_unseen) = {
             let parser = crate::app::frame_counters::lock_parser(&parser);
             (
                 parser.keyboard_input_snapshot(),
                 parser.pointer_input_snapshot(),
+                parser.pointer_shape_snapshot(),
+                parser.paste_events_snapshot(),
                 parser.synchronized_output(),
+                parser.program_status_unseen_flag(),
             )
         };
         Self {
@@ -362,6 +386,8 @@ impl PaneState {
             cursor_steady: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             keyboard_input: Arc::new(AtomicU64::new(keyboard_input)),
             pointer_input: Arc::new(std::sync::atomic::AtomicU8::new(pointer_input)),
+            pointer_shape: Arc::new(std::sync::atomic::AtomicU32::new(pointer_shape)),
+            paste_events: Arc::new(AtomicU64::new(paste_events)),
             sync_word: Arc::new(AtomicU64::new(super::spawn_pane::sync_word_of(sync_state))),
             sync_deadline_word: Arc::new(AtomicU64::new(super::spawn_pane::initial_sync_deadline(
                 sync_state,
@@ -375,11 +401,15 @@ impl PaneState {
             hold_on_exit: false,
             exit_reported: false,
             creator: crate::app::mcp::agents::PaneOwner::User,
+            program_status: sonicterm_vt::vt::StatusSummary::default(),
+            status_focused: None,
+            status_unseen,
             exit_status: Arc::new(std::sync::OnceLock::new()),
             change_signal: Arc::default(),
             run_typed_at: Arc::new(AtomicU64::new(0)),
             last_input_at: None,
             agent_run: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            read_identity: Arc::default(),
         }
     }
 
@@ -391,15 +421,35 @@ impl PaneState {
         )
     }
 
-    /// Test-only: publish the keyboard and pointer snapshots of `parser`, which the caller
-    /// holds, as the VT worker does after a batch.
-    // Ordering: keyboard_input and pointer_input store Relaxed self-contained snapshots with no dependent reads.
+    /// The paste-events word the VT worker last published, without the parser lock: bit 0 is
+    /// DECSET 5522, the bits above count its resets.
+    // Ordering: paste_events loads Relaxed; one store carries the whole word, and a grant compares
+    // it again at use, so a stale read only sends text or asks for consent.
+    pub(crate) fn paste_events_mode(&self) -> u64 {
+        self.paste_events.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The pointer shape the VT worker last published, without the parser lock.
+    // Ordering: pointer_shape loads Relaxed; one store carries the shape and its change count.
+    pub(crate) fn pointer_shape(&self) -> sonicterm_vt::vt::PointerShape {
+        sonicterm_vt::vt::pointer_shape_of_snapshot(
+            self.pointer_shape.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Test-only: publish the keyboard, pointer, pointer-shape and paste-events snapshots of `parser`, which the
+    /// caller holds, as the VT worker does after a batch.
+    // Ordering: keyboard_input, pointer_input, pointer_shape and paste_events store Relaxed self-contained snapshots.
     #[doc(hidden)]
     pub fn __test_publish_input_modes(&self, parser: &Parser) {
         self.keyboard_input
             .store(parser.keyboard_input_snapshot(), std::sync::atomic::Ordering::Relaxed);
         self.pointer_input
             .store(parser.pointer_input_snapshot(), std::sync::atomic::Ordering::Relaxed);
+        self.pointer_shape
+            .store(parser.pointer_shape_snapshot(), std::sync::atomic::Ordering::Relaxed);
+        self.paste_events
+            .store(parser.paste_events_snapshot(), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Resize this pane's PTY, reporting the first failure of a failing run.

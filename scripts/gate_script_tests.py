@@ -134,7 +134,7 @@ exit 1
 VERIFIED = (
     "sonicterm-types", "sonicterm-grid", "sonicterm-vt", "sonicterm-cfg", "sonicterm-logging",
     "sonicterm-mcp",
-    "sonicterm-resource", "sonicterm-text", "sonicterm-ui", "sonicterm-app-core", "sonicterm-io",
+    "sonicterm-resource", "sonicterm-text", "sonicterm-ui", "sonicterm-io",
     "sonicterm-render-model", "sonicterm-block-glyph", "sonicterm-font-config",
 )
 EXCLUDED = (
@@ -188,7 +188,7 @@ class WindowsTargetClassificationTests(unittest.TestCase):
         self.assertEqual(excluded, list(EXCLUDED))
         self.assertEqual(set(verified) & set(excluded), set())
         self.assertEqual(sorted(verified + excluded), sorted(_workspace_package_names()))
-        self.assertEqual(len(verified), 14)
+        self.assertEqual(len(verified), 13)
 
 
 @gate_test_fixture.POSIX_ONLY

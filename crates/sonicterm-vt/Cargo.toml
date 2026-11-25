@@ -14,6 +14,7 @@ description = "SonicTerm Terminal — VT/ANSI parser (Performer that drives soni
 workspace = true
 
 [dependencies]
+base64 = "0.23"
 sonicterm-types.workspace = true
 sonicterm-grid.workspace = true
 vte.workspace = true

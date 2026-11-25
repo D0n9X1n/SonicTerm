@@ -457,10 +457,10 @@ fn inactive_pane_local_press_commits_focus_only_after_snapshot_admission() {
         let right_parser = state.panes[&right].parser.clone();
         let profile = {
             let modes = state.panes[&right].pointer_modes();
-            (modes.tracking(), modes.sgr())
+            (modes.tracking(), modes.format())
         };
-        let cell = PointerCell { pane_id: right, row: 0, col: 0 };
-        assert!(state.begin_pointer_press(cell, profile.0, profile.1).is_none());
+        let cell = PointerCell { pane_id: right, row: 0, col: 0, pixel: (0, 0) };
+        assert!(state.begin_pointer_press(cell, profile.0, profile.1, false).is_none());
         // Model the parser becoming busy between profile lookup and the local snapshot attempt.
         let held = right_parser.lock();
         let admitted = state.begin_local_selection(right, (0, 0), 3);
@@ -474,7 +474,7 @@ fn inactive_pane_local_press_commits_focus_only_after_snapshot_admission() {
         assert_eq!(state.selection, Some(previous), "later motion cannot invent the refused press");
 
         // The same transaction must focus the target on success without clearing its new selection.
-        assert!(state.begin_pointer_press(cell, profile.0, profile.1).is_none());
+        assert!(state.begin_pointer_press(cell, profile.0, profile.1, false).is_none());
         assert!(state.begin_local_selection(right, (0, 0), 3));
         assert_eq!(
             state.tab_states[0].active_pane, right,

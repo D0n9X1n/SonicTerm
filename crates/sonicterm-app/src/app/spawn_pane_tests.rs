@@ -345,7 +345,9 @@ pub(super) fn counting_worker_with_log(
 /// Run one VT batch of `bytes` through pane 7's worker handles and return what it emitted.
 pub(super) fn osc52_batch(bytes: &[u8]) -> Vec<UserEvent> {
     let (_pane, handles) = pane_and_worker_handles();
-    let handles = handles.with_pane_id(7);
+    // A private staging keeps sibling tests' held writes from exhausting this batch's slots.
+    let staging = crate::app::osc52_stream::ClipboardStaging::with_budget(1 << 20, 1 << 20);
+    let handles = handles.with_pane_id(7).with_clipboard_staging(staging);
     let mut emitted = Vec::new();
     process_pane_vt_batch_with(
         &handles,
@@ -359,6 +361,84 @@ pub(super) fn osc52_batch(bytes: &[u8]) -> Vec<UserEvent> {
         |_| {},
     );
     emitted
+}
+
+/// A read in a VT batch posts its ticket, naming the worker's pane, and puts nothing on the
+/// batch's reply path (the reply spool); a held read is not summarised as refused.
+#[test]
+fn read_becomes_a_ticket_before_any_reply() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let staging = crate::app::osc52_stream::ClipboardStaging::with_budget(1 << 20, 1 << 20);
+    let handles = handles.with_pane_id(7).with_clipboard_staging(staging);
+    let mut emitted = Vec::new();
+    let mut replies = Vec::new();
+    process_pane_vt_batch_with(
+        &handles,
+        b"\x1b]52;c;?\x07",
+        None,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |event| emitted.push(event),
+        Instant::now,
+        |batch| replies.extend(batch),
+    );
+    assert!(replies.is_empty(), "a ticket, not a spool reply");
+    let posted =
+        emitted.iter().any(|event| matches!(event, UserEvent::ClipboardTicket { pane_id: 7, .. }));
+    assert!(posted, "the ticket names the worker's pane");
+    assert!(clip_writes(&emitted).is_empty(), "a read writes nothing");
+    let refused = emitted.iter().any(|event| {
+        matches!(event, UserEvent::ClipboardAttempts { attempts, .. }
+            if attempts.refused > 0 || attempts.latest == Some(Osc52Refusal::Read))
+    });
+    assert!(!refused, "a held read is not summarised as refused");
+}
+
+/// A flood of reads in one batch never builds a reply submission past the reply spool's 32 KiB
+/// record cap, which would latch the spool failed. The first read holds the pane's one ticket
+/// (kept alive in the emitted events), so every other read's empty reply arrives, in order.
+#[test]
+fn read_reply_flood_stays_within_the_submission_cap() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let staging = crate::app::osc52_stream::ClipboardStaging::with_budget(1 << 20, 1 << 20);
+    let handles = handles.with_pane_id(7).with_clipboard_staging(staging);
+    // 4,000 `cp` reads: 40 KB in, 72 KB of replies, more than two submissions' worth.
+    let read_count = 4_000;
+    let mut submissions: Vec<Vec<u8>> = Vec::new();
+    let mut emitted = Vec::new();
+    process_pane_vt_batch_with(
+        &handles,
+        b"\x1b]52;cp;?\x07".repeat(read_count),
+        None,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |event| emitted.push(event),
+        Instant::now,
+        |batch| submissions.push(batch),
+    );
+    assert!(submissions.iter().all(|batch| batch.len() <= 32 * 1024), "a submission over the cap");
+    // Splits fall only between whole answers, so every submission starts a fresh reply.
+    assert!(submissions.iter().all(|batch| batch.starts_with(b"\x1b]52;")), "an answer was split");
+    let tickets =
+        emitted.iter().filter(|event| matches!(event, UserEvent::ClipboardTicket { .. })).count();
+    assert_eq!(tickets, 1, "one ticket per pane");
+    let answered = read_count - tickets;
+    assert_eq!(submissions.concat(), b"\x1b]52;c;\x1b\\\x1b]52;p;\x1b\\".repeat(answered));
+}
+
+/// Each event as `(pane, text)` for a write, so tests compare writes by their payload.
+pub(super) fn clip_writes(events: &[UserEvent]) -> Vec<(u64, Option<String>)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            UserEvent::ClipboardWrite { pane_id, job } => {
+                Some((*pane_id, job.take().map(|job| job.text)))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The events one batch of `bytes` emits through `handles`.

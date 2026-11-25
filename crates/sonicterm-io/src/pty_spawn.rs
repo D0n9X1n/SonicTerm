@@ -183,6 +183,7 @@ impl PtyHandle {
         let queued_input_bytes = Arc::new(AtomicUsize::new(0));
         let writer_progress = Arc::new(PtyWriterProgress::with_input_seen(opts.input_seen.clone()));
         let (replies, reply_reader) = reply_spool();
+        let sensitive_tx = reply_reader.sensitive_sender();
         let writer_thread = spawn_writer_thread(
             Box::new(writer),
             in_rx,
@@ -218,6 +219,8 @@ impl PtyHandle {
             queued_input_bytes,
             writer_progress: writer_progress.clone(),
             replies: replies.clone(),
+            sensitive_tx,
+            incarnation: next_pty_incarnation(),
             resize,
             teardown: Some(PtyTeardown {
                 reader_cancel,

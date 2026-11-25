@@ -202,3 +202,251 @@ fn the_finish_budget_is_what_the_close_drain_has_left() {
     // Just closed: the drain's remainder exceeds the finish wait, which still caps it.
     assert_eq!(close_budget(Some(Instant::now())), FINISH_WAIT);
 }
+
+/// OSC 133 annotations (P, I, N, L, the options on A) and 9;12 change only the semantic state:
+/// after a ready prompt they leave every region and `run_command`'s readiness exactly as they were.
+#[test]
+fn annotations_never_change_regions_or_mcp_readiness() {
+    let mut parser = parsed(b"\x1b]133;A;redraw=last;click_events=2\x07$ \x1b]133;B\x07");
+    let regions: Vec<_> = parser.grid().prompts().copied().collect();
+    let ready = check_prompt(parser.grid(), None);
+    assert!(ready.is_ok());
+    for annotation in [
+        &b"\x1b]133;P;k=i\x07"[..],
+        b"\x1b]133;P;k=c\x07",
+        b"\x1b]133;I\x07",
+        b"\x1b]133;N\x07",
+        b"\x1b]9;12\x07",
+        b"\x1b]133;L\x07",
+    ] {
+        parser.advance(annotation);
+        let after: Vec<_> = parser.grid().prompts().copied().collect();
+        assert_eq!(after, regions, "{annotation:?} changed a region");
+        assert_eq!(check_prompt(parser.grid(), None), ready, "{annotation:?} changed readiness");
+    }
+}
+
+/// A pinned run keeps waiting through N, P and 9;12 after its C: only an A closes or evicts it.
+#[test]
+fn n_does_not_evict_pinned_run() {
+    let mut parser = parsed(READY);
+    let seq = check_prompt(parser.grid(), None).expect("ready");
+    assert!(parser.grid_mut().pin_run(seq));
+    parser.advance(b"make\r\n\x1b]133;C\x07");
+    parser.advance(b"\x1b]133;N\x07\x1b]9;12\x07\x1b]133;P;k=i\x07");
+    let run = parser.grid().pinned_run().expect("pinned");
+    assert!(!run.evicted, "an annotation evicted the run");
+    parser.advance(b"\x1b]133;D;0\x07\x1b]133;N\x07");
+    let run = parser.grid().pinned_run().expect("pinned");
+    assert_eq!(run.exit, Some(Some(0)));
+    assert!(!run.prompt_after_end, "only an A says the shell took control back");
+}
+
+/// A parser of `cols` x `rows` with `scrollback` rows of history that received `bytes`.
+fn parsed_sized(cols: u16, rows: u16, scrollback: usize, bytes: &[u8]) -> Parser {
+    let mut parser =
+        Parser::new_with_staging_pool(Grid::new(cols, rows), None, CaptureStagingPool::new());
+    parser.grid_mut().set_scrollback_limit(scrollback);
+    parser.advance(bytes);
+    parser
+}
+
+/// With history off, a rows shrink under a live prompt discards the rows above the cursor's row.
+/// B moves up with its row, so a shell-prefilled draft on B's row (no typing stamp) still refuses
+/// `run_command`; reading B's old position would see the blank row that took it and run.
+#[test]
+fn a_no_history_prompt_shrink_keeps_the_draft_refused() {
+    let mut parser = parsed_sized(40, 4, 0, b"o0\r\no1\r\n\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n");
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+    assert_eq!(parser.resize_terminal(40, 3).scrolled_rows, 1);
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+}
+
+/// Readiness fails closed when the marks can no longer locate the input: a plain clip (Windows'
+/// resize) cut B's row or a narrower grid cut B's column, so no cell is left to read as blank.
+/// A newest prompt whose A row was discarded refuses rather than handing readiness to an older
+/// prompt below it (a cleared screen), whose rows would then be read in its place.
+#[test]
+fn readiness_fails_closed_when_the_marks_no_longer_locate_the_input() {
+    let mut cut_row = parsed(b"\r\n\r\n\r\n\r\n\r\n\x1b]133;A\x07$ \x1b]133;B\x07ls");
+    cut_row.resize(40, 3);
+    assert_eq!(check_prompt(cut_row.grid(), None), Err(Refusal::NoShellIntegration));
+    let mut cut_col = parsed(b"\x1b]133;A\x07prompt> \x1b]133;B\x07ls");
+    cut_col.resize(5, 8);
+    assert_eq!(check_prompt(cut_col.grid(), None), Err(Refusal::NoShellIntegration));
+    // An abandoned prompt on row 3, then Ctrl-L: the screen is erased and the next prompt opens on
+    // row 0, above the old prompt's region, which keeps its (now blank) rows.
+    let mut cleared = parsed_sized(
+        40,
+        4,
+        0,
+        b"\x1b[4;1H\x1b]133;A\x07$ \x1b]133;B\x07\x1b[H\x1b[2J\x1b]133;A\x07$ \x1b]133;B\x07",
+    );
+    assert!(check_prompt(cleared.grid(), None).is_ok());
+    cleared.grid_mut().scroll_up(1);
+    assert_eq!(check_prompt(cleared.grid(), None), Err(Refusal::NoShellIntegration));
+}
+
+/// Physical row eviction is the one way an annotation reaches the regions: a fresh line (`L`, `N`,
+/// `9;12`) at a full bottom margin scrolls like any line feed, and the scroll moves or evicts
+/// regions. Once the prompt's A row is discarded (history off) or leaves history, readiness
+/// refuses instead of reading the rows that replaced the prompt.
+#[test]
+fn a_fresh_line_at_a_full_bottom_margin_fails_readiness_closed() {
+    let annotations = [&b"\x1b]133;L\x07"[..], b"\x1b]133;N\x07", b"\x1b]9;12\x07"];
+    let prompts = [
+        (0, &b"\x1b]133;A\x07~/src\r\n$ \x1b]133;B\x07"[..]),
+        (1, b"\x1b]133;A\x07~/src\r\nmain\r\n$ \x1b]133;B\x07"),
+    ];
+    for annotation in annotations {
+        for (scrollback, prompt) in prompts {
+            let mut parser = parsed_sized(40, 2, scrollback, prompt);
+            assert!(check_prompt(parser.grid(), None).is_ok(), "{scrollback}");
+            parser.advance(annotation);
+            assert_eq!(
+                check_prompt(parser.grid(), None),
+                Err(Refusal::NoShellIntegration),
+                "{annotation:?} with {scrollback} history row(s)"
+            );
+        }
+    }
+}
+
+/// The shell can prefill later lines and put the caret back on B. Losing that tail makes the
+/// remaining blanks untrustworthy even when the resize did not move the caret or either mark.
+#[test]
+fn readiness_clip_loses_trailing_draft_below_retained_b() {
+    let mut parser =
+        parsed_sized(20, 5, 0, b"\x1b]133;A\x07$ \x1b]133;B\x07\x1b[5;1Hdraft\x1b[1;3H");
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+    assert_eq!(parser.resize_terminal(20, 3).scrolled_rows, 0);
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+    parser.advance(b"\x1b]133;B\x07");
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+    parser.advance(b"\x1b[H");
+    parser.advance(READY);
+    assert!(check_prompt(parser.grid(), None).is_ok());
+}
+
+/// Padding on growth is not fresh prompt evidence, even if B's former row or column exists again.
+#[test]
+fn readiness_clip_growth_cannot_resurrect_b() {
+    for (cols, rows) in [(20, 2), (1, 5)] {
+        let mut parser = parsed_sized(20, 5, 0, b"\x1b[4;1H\x1b]133;A\x07$ \x1b]133;B\x07");
+        assert!(check_prompt(parser.grid(), None).is_ok());
+        parser.resize(cols, rows);
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+        parser.resize(20, 5);
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+    }
+}
+
+/// Moving rows in a proper margin must not leave an apparently empty input area at B's old
+/// location. A margin entirely above the prompt, by contrast, does not affect its proof.
+#[test]
+fn readiness_margin_move_puts_draft_above_b() {
+    let mut parser = parsed_sized(20, 6, 0, b"\x1b[4;1H\x1b]133;A\x07$ \x1b]133;B\x07");
+    let ready = check_prompt(parser.grid(), None);
+    assert!(ready.is_ok());
+    parser.advance(b"\x1b[1;2r\x1b[S");
+    assert_eq!(check_prompt(parser.grid(), None), ready);
+    parser.advance(b"\x1b[2;5r\x1b[4;3Hdraft");
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+    parser.advance(b"\x1b[S");
+    assert!(parser.grid().row(2).iter().any(|cell| cell.ch == 'd'));
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+}
+
+/// Fresh-line annotations at a partial bottom margin physically scroll the draft out of its
+/// marked input area. None provides a fresh A/B pair, and none changes a pinned run record.
+#[test]
+fn readiness_margin_annotations_invalidate_without_touching_a_pin() {
+    for annotation in [&b"\x1b]133;L\x07"[..], b"\x1b]133;N\x07", b"\x1b]9;12\x07"] {
+        let mut parser =
+            parsed_sized(20, 6, 0, b"\x1b[2;5r\x1b[5;1H\x1b]133;A\x07$ \x1b]133;B\x07");
+        let seq = check_prompt(parser.grid(), None).unwrap();
+        assert!(parser.grid_mut().pin_run(seq));
+        let pin = parser.grid().pinned_run();
+        parser.advance(b"draft");
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+        parser.advance(annotation);
+        assert_eq!(parser.grid().pinned_run(), pin);
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+    }
+}
+
+/// A narrower grid can erase the only nonblank even when the input mark and the lead of a
+/// clipped wide glyph are in range. Blank padding on a later resize cannot repair the proof.
+#[test]
+fn readiness_clip_loses_right_edge_draft() {
+    for draft in ["\x1b[1;9Hx", "\x1b[1;8H界"] {
+        let mut parser = parsed_sized(20, 4, 0, READY);
+        parser.advance(draft.as_bytes());
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+        parser.resize(8, 4);
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+    }
+}
+
+/// A downward move can eject a draft through the bottom without changing the row number in B.
+/// Neither a partial region nor a full-screen reverse scroll may turn that into a blank proof.
+#[test]
+fn readiness_downward_move_cannot_discard_draft_evidence() {
+    for full_screen in [false, true] {
+        let mut parser = parsed_sized(20, 6, 0, READY);
+        parser.advance(b"\x1b[6;1Htail");
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+        if full_screen {
+            parser.grid_mut().scroll_down(1);
+        } else {
+            parser.advance(b"\x1b[3;6r\x1b[T");
+        }
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+    }
+}
+
+/// Drawing the prompt may scroll A's row at a partial bottom margin before B exists. B marks
+/// the input at its new position; only subsequent input cells participate in the draft check.
+#[test]
+fn two_line_prompt_at_partial_bottom_margin_is_ready_after_b() {
+    let mut parser = parsed_sized(20, 6, 0, b"\x1b[2;5r\x1b[5;1H\x1b]133;A\x07first\r\n$ ");
+    let first_line: String = parser.grid().row(3).iter().take(5).map(|cell| cell.ch).collect();
+    assert_eq!(first_line, "first", "the line feed moved the first prompt line up");
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+    let seq = parser.grid().newest_prompt().unwrap().seq;
+    parser.advance(b"\x1b]133;B\x07");
+    assert_eq!(parser.grid().newest_prompt().unwrap().input_start, Some((4, 2)));
+    assert_eq!(check_prompt(parser.grid(), None), Ok(seq));
+    parser.advance(b"draft");
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+}
+
+/// B can be above A after cursor motion. Once B and its draft leave history, a duplicate B on
+/// a blank row is not fresh evidence, whether or not a partial scroll has since moved A's row.
+#[test]
+fn evicted_input_start_needs_a_fresh_prompt_pair() {
+    for move_prompt in [true, false] {
+        let mut parser =
+            parsed_sized(20, 6, 1, b"\x1b[4;1H\x1b]133;A\x07p\x1b[H\x1b]133;B\x07draft");
+        let old = *parser.grid().newest_prompt().unwrap();
+        assert_eq!((old.start_row, old.input_start), (Some(3), Some((0, 0))));
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+        parser.advance(b"\x1b[2S");
+        let retained = parser.grid().newest_prompt().unwrap();
+        assert_eq!((retained.start_row, retained.input_start), (Some(2), None));
+        if move_prompt {
+            parser.advance(b"\x1b[1;3r\x1b[S");
+            assert_eq!(parser.grid().row(0).get(0).unwrap().ch, 'p');
+        }
+        parser.advance(b"\x1b[5;1H\x1b]133;B\x07");
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+        let prompt = parser.grid().newest_prompt().unwrap();
+        assert_eq!((prompt.input_start, prompt.input_start_at), (None, old.input_start_at));
+        // A on the retained A coordinate must open a new region, not coalesce with the stale one.
+        parser.advance(b"\x1b[2;1H\x1b]133;A\x07");
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+        parser.advance(b"$ \x1b]133;B\x07");
+        let fresh = check_prompt(parser.grid(), None).expect("fresh A and B");
+        assert_ne!(fresh, old.seq);
+    }
+}

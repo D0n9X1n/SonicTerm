@@ -139,7 +139,7 @@ A run containing only `PASS` and permitted `CLEANED_NOT_NATURAL` steps exits 0,
 but its overall verdict remains `CLEANED_NOT_NATURAL` if any step required cleanup.
 Mixed cold steps can still fail; no process-name exemption changes that boundary.
 
-On Windows, `pty-close-baseline`, `windows-warp-allocator`,
+On Windows, `pty-close-baseline`, `windows-warp-allocator`, `windows-conpty-forms`,
 `perf-scenarios-tests`, `perf-scenarios-counters-tests`,
 `perf-scenarios-frame-texture-tests`, and `perf-scenarios-echo-trace-tests` first
 compile the same selected tests with `--no-run` inserted before `--`, or appended
@@ -312,12 +312,21 @@ run that includes that shard. Windows CI is the
 only reliable compiler and runner for `#![cfg(target_os = "windows")]` tests; on
 macOS such files can compile to no tests.
 
+The `windows-conpty-forms` step runs the real-ConPTY protocol fixture described on
+[Terminal IO and VT](Terminal-IO-and-VT). Both of its test binaries are `#[ignore]`, so
+`workspace-crates` compiles them on every host and runs neither; this step runs them with
+`--ignored`. Each stages the pinned runtime with `python scripts/setup-windows-conpty.py`,
+which needs network access, unless `SONICTERM_CONPTY_FIXTURE_RUNTIME_DIR` names a directory
+that command already staged. To run it locally, stage once with
+`python scripts/setup-windows-conpty.py --destination <dir>`, set
+`SONICTERM_CONPTY_FIXTURE_RUNTIME_DIR=<dir>`, then run the step's command.
+
 The optional `windows-target` step is a pre-push aid on macOS, never a CI gate.
 `scripts/check-windows-target.sh` fails when a workspace member is in neither of
 its two lists, then runs
 `cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings`
-on the 14 members that need no Windows C toolchain: `sonicterm-types`, `-grid`,
-`-vt`, `-cfg`, `-logging`, `-mcp`, `-resource`, `-text`, `-ui`, `-app-core`, `-io`
+on the 13 members that need no Windows C toolchain: `sonicterm-types`, `-grid`,
+`-vt`, `-cfg`, `-logging`, `-mcp`, `-resource`, `-text`, `-ui`, `-io`
 (including its ConPTY code and Windows-gated tests), `-render-model`,
 `-block-glyph`, and `-font-config`. That scope is default features, all targets,
 and the target-specific dev and build closure, in a separate target directory. It

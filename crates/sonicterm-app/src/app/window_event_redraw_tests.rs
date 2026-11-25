@@ -30,7 +30,8 @@ fn real_pty_readonly_pointer_press_latches_local() {
             let bytes = app.registry.windows.get_mut(&window).unwrap().begin_pointer_press(
                 pointer_cell(pane, 2, 3),
                 MouseTracking::AnyMotion,
-                true,
+                sonicterm_vt::vt::MouseFormat::Sgr,
+                false,
             );
             if let Some(bytes) = bytes {
                 app.write_to_pane(pane, bytes, PtyInputSource::PointerButton);
@@ -153,7 +154,12 @@ fn real_pty_accepted_pointer_and_focus_routes_survive_readonly() {
                 .windows
                 .get_mut(&window)
                 .unwrap()
-                .begin_pointer_press(pointer_cell(pane, 2, 3), MouseTracking::ButtonMotion, true)
+                .begin_pointer_press(
+                    pointer_cell(pane, 2, 3),
+                    MouseTracking::ButtonMotion,
+                    sonicterm_vt::vt::MouseFormat::Sgr,
+                    false,
+                )
                 .unwrap();
             assert!(app.write_to_pane(pane, press, PtyInputSource::PointerButton));
             assert_eq!(submitted.take(), vec![(pane, b"\x1b[<0;4;3M".to_vec())]);
@@ -216,7 +222,7 @@ fn real_pty_posix_accepted_key_routes_survive_readonly() {
             .collect()
     };
     let writes = encode(app.terminal_key_targets(source), b"press");
-    let accepted = app.dispatch_terminal_key_writes(writes);
+    let accepted = app.dispatch_terminal_key_writes(writes, true);
     let key = PhysicalKey::Code(KeyCode::ArrowUp);
     app.registry
         .windows
@@ -233,7 +239,7 @@ fn real_pty_posix_accepted_key_routes_survive_readonly() {
         terminal_repeat_targets(&app.registry.windows[&source_window].pty_pressed_keys, key, true)
             .unwrap();
     app.wait_for_input_queues();
-    app.dispatch_terminal_key_writes(encode(repeat.keys().copied().collect(), b"repeat"));
+    app.dispatch_terminal_key_writes(encode(repeat.keys().copied().collect(), b"repeat"), true);
     assert_eq!(
         submitted.take().into_iter().map(|(pane, _)| pane).collect::<BTreeSet<_>>(),
         accepted.keys().copied().collect()
@@ -253,7 +259,6 @@ fn real_pty_readonly_unheld_motion_shared_window_matrix() {
     use crate::app::{
         mod_tests::{input_test_windows, PtySubmissions},
         pty_test_support::isolated,
-        PtyInputSource,
     };
     use sonicterm_ui::copy_mode::CopyModeState;
     if isolated() {
@@ -268,23 +273,35 @@ fn real_pty_readonly_unheld_motion_shared_window_matrix() {
             } else {
                 CopyModeState::new_at((0, 0))
             });
-            app.registry.windows[&window].panes[&pane]
-                .parser
-                .lock()
-                .advance(b"\x1b[?1003h\x1b[?1006h");
+            {
+                // The VT worker publishes the modes the motion is encoded under.
+                let state = &app.registry.windows[&window].panes[&pane];
+                let mut parser = state.parser.lock();
+                parser.advance(b"\x1b[?1003h\x1b[?1006h");
+                state.__test_publish_input_modes(&parser);
+            }
             app.wait_for_input_queues();
             let submitted = PtySubmissions::start();
             let route = child_no_button_motion_report(
                 &app.registry.windows[&window],
                 pointer_cell(pane, 2, 3),
                 MouseTracking::AnyMotion,
-                true,
+                sonicterm_vt::vt::MouseFormat::Sgr,
                 false,
             );
             if let Some((pane, bytes)) = route.and_then(|route| {
                 super::super::pointer_route_bytes(route, PointerReportKind::NoButtonMotion)
             }) {
-                app.write_to_pane(pane, bytes, PtyInputSource::PointerMotion);
+                app.write_pointer_motion(
+                    pane,
+                    crate::app::input_dispatch::MotionProfile {
+                        tracking: sonicterm_vt::vt::MouseTracking::AnyMotion,
+                        format: sonicterm_vt::vt::MouseFormat::Sgr,
+                        is_alt: false,
+                        held: false,
+                    },
+                    bytes,
+                );
             }
             assert!(submitted.take().is_empty(), "staging is not submission");
             app.flush_pointer_motion(std::time::Instant::now());
@@ -382,7 +399,8 @@ fn wheel_route_sgr_encoding_alone_does_not_enable_tracking() {
         }
         parser.advance(b"\x1b[?1006h");
         let modes = sonicterm_vt::vt::PointerModes::from_bits(parser.pointer_input_snapshot());
-        let (tracking, sgr) = (modes.tracking(), modes.sgr());
+        let (tracking, sgr) =
+            (modes.tracking(), (modes.format() == sonicterm_vt::vt::MouseFormat::Sgr));
         assert!(sgr);
         assert_eq!(tracking, MouseTracking::Off);
         assert_eq!(
@@ -414,14 +432,16 @@ fn wheel_route_parser_tracking_resets_restore_screen_fallback() {
                 parser.advance(format!("\x1b[?{mode}h").as_bytes());
                 let modes =
                     sonicterm_vt::vt::PointerModes::from_bits(parser.pointer_input_snapshot());
-                let (tracking, sgr) = (modes.tracking(), modes.sgr());
+                let (tracking, sgr) =
+                    (modes.tracking(), (modes.format() == sonicterm_vt::vt::MouseFormat::Sgr));
                 assert_eq!(tracking, expected);
                 assert_eq!(sgr, sgr_enabled);
                 assert_eq!(wheel_route(tracking, parser.grid().is_alt()), WheelRoute::MouseReport);
                 parser.advance(format!("\x1b[?{mode}l").as_bytes());
                 let modes =
                     sonicterm_vt::vt::PointerModes::from_bits(parser.pointer_input_snapshot());
-                let (tracking, sgr) = (modes.tracking(), modes.sgr());
+                let (tracking, sgr) =
+                    (modes.tracking(), (modes.format() == sonicterm_vt::vt::MouseFormat::Sgr));
                 assert_eq!(tracking, MouseTracking::Off);
                 assert_eq!(sgr, sgr_enabled);
                 assert_eq!(
@@ -436,5 +456,8 @@ fn wheel_route_parser_tracking_resets_restore_screen_fallback() {
 #[test]
 fn sgr_wheel_up_is_button_64() {
     // col=5, row=3, one tick up → ESC[<64;5;3M
-    assert_eq!(wheel_report_bytes(true, true, 5, 3, 1), b"\x1b[<64;5;3M".to_vec());
+    assert_eq!(
+        wheel_report_bytes(sonicterm_vt::vt::MouseFormat::Sgr, true, (2, 4), (0, 0), 1),
+        b"\x1b[<64;5;3M".to_vec()
+    );
 }

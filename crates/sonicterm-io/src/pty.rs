@@ -478,6 +478,10 @@ pub struct PtyHandle {
     queued_input_bytes: Arc<AtomicUsize>,
     writer_progress: Arc<PtyWriterProgress>,
     replies: PtyReplySender,
+    /// The writer's one sensitive-reply slot; see [`PtyHandle::try_send_reply`].
+    sensitive_tx: Sender<SensitiveReply>,
+    /// Distinct for every PTY the process spawns; see [`PtyHandle::incarnation`].
+    incarnation: u64,
     /// Closure that resizes the pty to `(cols, rows)`, reporting native failure.
     pub resize: Box<dyn Fn(u16, u16) -> Result<()> + Send + Sync>,
     teardown: Option<PtyTeardown>,
@@ -879,6 +883,9 @@ mod pty_reader;
 #[path = "pty_writer.rs"]
 mod pty_writer;
 
+#[path = "pty_sensitive_reply.rs"]
+mod pty_sensitive_reply;
+
 #[path = "pty_shell.rs"]
 mod pty_shell;
 
@@ -898,6 +905,9 @@ pub use pty_output::{
 use pty_reader::send_pty_output;
 use pty_reader::spawn_reader_thread;
 use pty_resize::resize_callback;
+use pty_sensitive_reply::next_pty_incarnation;
+pub(crate) use pty_sensitive_reply::sensitive_reply_channel;
+pub use pty_sensitive_reply::{SensitiveReply, SensitiveReplyError};
 #[cfg(unix)]
 use pty_session::terminate_unix_session;
 pub use pty_shell::{

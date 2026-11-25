@@ -4,6 +4,8 @@ use super::*;
 
 impl GpuRenderer {
     /// Emit this phase into the borrowed frame scratch; the caller owns settlement and retries.
+    /// Returns the active pane's row spans as a range of `scratch.row_spans`, empty when that pane
+    /// draws no row, so a selection reads only the glyphs of the pane it belongs to.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn assemble_glyph_rows(
         &mut self,
@@ -11,7 +13,7 @@ impl GpuRenderer {
         inputs: AssemblyUi<'_>,
         scratch: &mut frame_scratch::FrameScratch,
         missing_chars_this_frame: &mut Vec<char>,
-    ) {
+    ) -> std::ops::Range<usize> {
         let AssemblyGeometry {
             fg_default,
             pane_views,
@@ -38,6 +40,7 @@ impl GpuRenderer {
             row_keys,
             ..
         } = scratch;
+        let mut active_rows = 0..0;
         {
             // Post-glyphon the grid path is wezterm-only.
             // FontStack is the sole rasterizer; on test fixtures
@@ -76,6 +79,7 @@ impl GpuRenderer {
                 pane_views.iter().enumerate().filter(|(_, pane)| pane.planned.full_clip.is_some())
             {
                 let pane_staged_start = self.row_ink.staged_len();
+                let pane_rows_start = row_spans.len();
                 // The inspector's record of this pane's emitted slots; `None` in production.
                 let mut pane_emitted = self.emitted_rows_probe.as_ref().map(|_| Vec::new());
                 // Per-cell device-pixel snapping rounds each cell's left edge independently, which
@@ -96,15 +100,18 @@ impl GpuRenderer {
                 // same row and columns never inherits another pane's accent.
                 let pane_hovered_url =
                     hovered_url_cells.filter(|hovered| hovered.pane_id == pv.pane_id);
+                // Each pane draws with its own program colors; a pane without them keeps the theme
+                // rows and revision every such pane shares.
+                let colors = PaneColors::new(theme, pv.overrides);
                 assemble_pane_glyph_rows(
                     GlyphShaping {
                         atlas: &mut self.glyph_atlas,
                         row_cache: &mut self.row_glyph_cache,
                         font_stack: self.font_stack.as_ref(),
                         wt_raster: wt_raster.as_mut(),
-                        style_rev: self.style_rev,
-                        theme,
-                        fg_default,
+                        style_rev: colors.style_rev(self.style_rev),
+                        colors,
+                        fg_default: colors.default_foreground(fg_default),
                         raster_px,
                         cell_size: (cell_w, cell_h),
                         surface: (sw, sh),
@@ -139,6 +146,10 @@ impl GpuRenderer {
                     },
                 );
                 staged_ranges.push((pv.pane_id, pane_staged_start..self.row_ink.staged_len()));
+                if pane_index == plan.active_index {
+                    // The active pane's rows are contiguous: every pane emits all of its rows in turn.
+                    active_rows = pane_rows_start..row_spans.len();
+                }
                 if let (Some(probe), Some(slots)) = (self.emitted_rows_probe.as_mut(), pane_emitted)
                 {
                     // The inspector is on: keep the slots this pane's rows were emitted at.
@@ -146,5 +157,6 @@ impl GpuRenderer {
                 }
             } // end per-pane loop
         }
+        active_rows
     }
 }

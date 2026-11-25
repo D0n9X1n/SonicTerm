@@ -860,3 +860,20 @@ pub(super) fn software_frames_from_warm_and_cold_rows_are_identical() {
     assert!(inked.count() > 50, "the fixture draws text");
     assert!(warm_pixels == cold_pixels, "warm and cold software frames differ");
 }
+
+/// A pane fill replaces the translucent clear under it instead of blending over it, so the GDI
+/// frame shows a program background at the window opacity, and pixels outside the fill keep the
+/// clear.
+#[test]
+fn a_pane_fill_replaces_the_translucent_clear() {
+    let clear = [0.0625, 0.125, 0.25, 0.5];
+    let fill = [0.25, 0.125, 0.0625, 0.5];
+    let mut frame = SoftwareFrame::new(4, 2, clear).unwrap();
+    frame.replace_quads(&[QuadInstance::sharp(
+        crate::quad::px_to_ndc(0.0, 0.0, 2.0, 2.0, 4.0, 2.0),
+        fill,
+    )]);
+    assert_eq!(frame.pixel_bgra(0, 0), linear_rgba_to_bgra(fill));
+    assert_eq!(frame.pixel_bgra(1, 1), linear_rgba_to_bgra(fill));
+    assert_eq!(frame.pixel_bgra(3, 0), linear_rgba_to_bgra(clear));
+}

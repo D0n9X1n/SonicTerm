@@ -2,7 +2,7 @@
 //! becomes mouse reports, cursor keys, or local scrollback for the pane under the pointer. Each
 //! window's handler only finds the pane and cell, then carries the plan out.
 
-use sonicterm_vt::vt::MouseTracking;
+use sonicterm_vt::vt::{MouseFormat, MouseTracking};
 use winit::event::MouseScrollDelta;
 
 use super::window_event::{wheel_report_bytes, wheel_route, WheelRoute};
@@ -28,14 +28,16 @@ pub(super) struct WheelTarget {
     pub(super) tracking: MouseTracking,
     /// The pane shows its alternate screen.
     pub(super) alt_screen: bool,
-    /// Reports use SGR encoding rather than X10.
-    pub(super) sgr: bool,
+    /// The pane's mouse report format.
+    pub(super) format: MouseFormat,
     /// Cursor keys use application mode (`ESC O`) rather than `ESC [`.
     pub(super) application_cursor: bool,
     /// The pane's window is in READONLY, so the wheel may not send input.
     pub(super) readonly: bool,
     /// The cell under the pointer, 0-based (row, column); reports fall back to the first cell.
     pub(super) cell: Option<(u16, u16)>,
+    /// The pointer's pixel from the pane's cell-area origin, which 1016 reports.
+    pub(super) pixel: (i32, i32),
 }
 
 /// Lines `delta` moves at a cell height of `cell_height_px`, rounded away from zero so a small
@@ -72,9 +74,8 @@ pub(super) fn plan_wheel(lines: i32, target: WheelTarget) -> WheelPlan {
     let count = lines.unsigned_abs() as usize;
     match route {
         WheelRoute::MouseReport => {
-            let (row, col) = target.cell.unwrap_or((0, 0));
-            let (col1, row1) = (u32::from(col) + 1, u32::from(row) + 1);
-            WheelPlan::Input(wheel_report_bytes(target.sgr, up, col1, row1, count))
+            let cell = target.cell.unwrap_or((0, 0));
+            WheelPlan::Input(wheel_report_bytes(target.format, up, cell, target.pixel, count))
         }
         WheelRoute::CursorKeys => {
             let sequence: &[u8] = match (target.application_cursor, up) {

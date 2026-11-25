@@ -256,6 +256,7 @@ fn frame(renderer: &mut GpuRenderer, layout: &Layout, scene: &mut Scene) -> Pres
         scrollbar_alpha: scene.scrollbar_alpha,
         inline_images: Default::default(),
         inline_media_revision: 0,
+        colors: None,
     }];
     renderer.render_with_outcome(
         &fonts,

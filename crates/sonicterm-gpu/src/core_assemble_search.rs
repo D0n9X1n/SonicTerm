@@ -2,6 +2,16 @@
 
 use super::*;
 
+/// The selected-text pair of the palette and search fields: the theme's `selection_bg` and
+/// `selection_fg`, opaque premultiplied linear. Read from the theme alone, so a program's OSC
+/// selection colors, which belong to its pane, never recolor a field.
+pub(crate) fn field_selection_colors(theme: &Theme) -> ([f32; 4], [f32; 4]) {
+    (
+        hex_to_premultiplied_rgba(theme.colors.selection_bg.0.as_str(), 1.0),
+        hex_to_premultiplied_rgba(theme.colors.selection_fg.0.as_str(), 1.0),
+    )
+}
+
 impl GpuRenderer {
     /// Emit this phase into the borrowed frame scratch; the caller owns settlement and retries.
     #[allow(clippy::too_many_arguments)]
@@ -102,7 +112,9 @@ impl GpuRenderer {
                         ..Default::default()
                     });
                     // The tab titles were appended after the rows; they lie outside every
-                    // recorded row span, so this scan still examines each of them.
+                    // recorded row span, so this scan still examines each of them. A match
+                    // recolors whole glyphs: cutting at every match edge would move the glyph list
+                    // once per cut glyph.
                     let RecolorOutcome { visited, .. } = recolor_cursor_glyphs_in(
                         &mut *glyph_instances,
                         row_spans,
@@ -113,6 +125,7 @@ impl GpuRenderer {
                         sw,
                         sh,
                         fg_color,
+                        false,
                     );
                     crate::frame_stats::note_recolor_glyphs_visited(|| visited);
                 }
@@ -139,10 +152,7 @@ impl GpuRenderer {
         // after a `Presented` outcome, so retries and failures never bless it.
         let field_environment = self.field_environment();
         let mut field_candidates = PresentedFields::default();
-        let field_selection_bg =
-            hex_to_premultiplied_rgba(theme.colors.selection_bg.0.as_str(), 1.0);
-        let field_selection_fg =
-            hex_to_premultiplied_rgba(theme.colors.selection_fg.0.as_str(), 1.0);
+        let (field_selection_bg, field_selection_fg) = field_selection_colors(theme);
         let search_font_size = self.raster_px(self.font_size.max(1.0));
         // Search preedit is inserted at the query caret for display only; matches still use committed text.
         let search_preedit: &str =

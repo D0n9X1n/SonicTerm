@@ -240,6 +240,7 @@ fn every_scratch_vector_is_held_within_its_own_cap() {
         overlay_glyphs: oversized(MIB),
         quads: oversized(4 * MIB),
         overlay_quads: oversized(MIB),
+        pane_fills: oversized(64 * KIB),
         images: oversized(MIB),
         image_sort: ImageSortScratch {
             allocation_order: oversized(256 * KIB),
@@ -262,6 +263,7 @@ fn every_scratch_vector_is_held_within_its_own_cap() {
         ("overlay glyphs", reserved_bytes(&scratch.overlay_glyphs), MIB),
         ("quads", reserved_bytes(&scratch.quads), 4 * MIB),
         ("overlay quads", reserved_bytes(&scratch.overlay_quads), MIB),
+        ("pane fills", reserved_bytes(&scratch.pane_fills), 64 * KIB),
         ("images", reserved_bytes(&scratch.images), MIB),
         ("image allocation order", reserved_bytes(&scratch.image_sort.allocation_order), 256 * KIB),
         ("image emitted draws", reserved_bytes(&scratch.image_sort.emitted), MIB),
