@@ -158,6 +158,7 @@ impl Grid {
             // When: dimensions are unchanged, preserve storage and revision without reflowing rows.
             return;
         }
+        self.invalidate_input_on_clip(cols, rows);
         self.scrollback_limit = if self.is_alt() {
             0
         } else {

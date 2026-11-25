@@ -109,9 +109,12 @@ pub(crate) fn check_prompt(grid: &Grid, last_typing: Option<Instant>) -> Result<
         return Err(Refusal::Busy);
     }
     let bottom = grid.scrollback_len() as u64 + u64::from(grid.rows);
-    if newest.start_row.is_none() || input_row >= bottom || input_col >= grid.cols {
-        // When: `start_row` was evicted, or `input_row` is past `bottom` or `input_col` past
-        // `cols` after a clip, the marks cannot locate the input, so readiness fails closed.
+    if newest.input_proof_lost
+        || newest.start_row.is_none()
+        || input_row >= bottom
+        || input_col >= grid.cols
+    {
+        // When: input_proof_lost or missing/out-of-range marks make blanks ambiguous, require fresh A and B.
         return Err(Refusal::NoShellIntegration);
     }
     let previous_start = newest_first.next().and_then(|region| region.output_start_at);

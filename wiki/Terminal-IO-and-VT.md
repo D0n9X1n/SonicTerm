@@ -1040,10 +1040,11 @@ URI to 8 KiB and client id to 1 KiB.
     a per-screen semantic state: a mode (output, prompt of a kind, input), an anchor row, a
     generation, the prompt options and the newest command text. They never open or close a
     prompt region, end a pinned run or change exit trust; those depend on `A`, `B`, `C` and
-    `D` alone. The one exception is physical: a fresh line at a full bottom margin scrolls like
-    any line feed, and the scroll moves the regions with their rows and evicts the newest
-    prompt's `A` when its row is discarded or leaves history. `run_command` then refuses that
-    prompt (`no_shell_integration`) rather than reading the rows that replaced it. The primary
+    `D` alone. A fresh line can still physically scroll. A full upward scroll rebases the marks or
+    evicts them with their rows; a partial-margin move through the marked prompt or its input
+    invalidates the proof of a blank draft. Clipping a mark or nonblank draft cell on resize also
+    invalidates it, even if the new size never reaches the PTY. `run_command` then refuses
+    (`no_shell_integration`) until a fresh `A` and `B`, not just regrowth of the grid. The primary
     and alternate screens keep separate states.
   - `A`, `N` and `9;12` start a fresh line (CR then index when the cursor is off column 0; at
     the bottom margin the index scrolls and can evict the oldest history row), start a new

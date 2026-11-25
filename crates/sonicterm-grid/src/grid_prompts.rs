@@ -135,7 +135,7 @@ impl Grid {
     /// the marker more than once per prompt doesn't bloat the buffer.
     pub fn record_prompt_start(&mut self) {
         let row = self.cursor_absolute_row();
-        if matches!(self.prompts.back(), Some(prompt) if prompt.start_row == Some(row) && !prompt.output_seen && !prompt.completed)
+        if matches!(self.prompts.back(), Some(prompt) if prompt.start_row == Some(row) && !prompt.output_seen && !prompt.completed && !prompt.input_proof_lost)
         {
             // When: `matches!` finds a prompt at `row` whose command has not started, coalesce
             // the marker; once C was seen, an A on the same row is a new prompt.
@@ -167,6 +167,7 @@ impl Grid {
             start_row: Some(row),
             input_start: None,
             input_start_at: None,
+            input_proof_lost: false,
             output_start_row: None,
             output_start_col: 0,
             output_start_at: None,
@@ -188,6 +189,67 @@ impl Grid {
         if let Some(last) = self.prompts.back_mut().filter(|last| last.input_start.is_none()) {
             last.input_start = Some(at);
             last.input_start_at = Some(Instant::now());
+        }
+    }
+
+    /// In-place scrolling does not rebase absolute marks. Invalidate only the newest pre-C
+    /// proof when the moved rows include its A or any of the possible input span from B down.
+    pub(super) fn invalidate_input_on_row_move(&mut self, top: usize, bottom: usize) {
+        let history = self.scrollback.len() as u64;
+        let moved = history + top as u64..=history + bottom as u64;
+        if let Some(prompt) = self.prompts.back_mut().filter(|prompt| !prompt.output_seen) {
+            prompt.input_proof_lost |= prompt.start_row.is_some_and(|row| moved.contains(&row))
+                || prompt.input_start.is_some_and(|(row, _)| row <= *moved.end());
+        }
+    }
+
+    /// Check the old geometry before resizing. A surviving blank suffix is evidence only when
+    /// no input mark or nonblank draft cell was clipped; a severed wide lead is clipped too.
+    pub(super) fn invalidate_input_on_clip(&mut self, cols: u16, rows: u16) {
+        if cols >= self.cols && rows >= self.rows {
+            // When: cols and rows only grow, padding does not remove evidence or restore a lost proof.
+            return;
+        }
+        let Some(prompt) =
+            self.prompts.back().filter(|prompt| !prompt.output_seen && !prompt.input_proof_lost)
+        else {
+            // When: there is no pre-C prompt with intact evidence, the clip cannot revoke readiness.
+            return;
+        };
+        let history = self.scrollback.len() as u64;
+        let bottom = history + u64::from(rows);
+        let lost = prompt.start_row.is_some_and(|row| row >= bottom)
+            || prompt.input_start.is_some_and(|(input_row, input_col)| {
+                if input_row >= bottom || input_col >= cols {
+                    // When: input_row or input_col is clipped, padding must never resurrect B.
+                    return true;
+                }
+                // A width shrink may also truncate input in retained history. Height alone can only
+                // discard the visible rows past the new bottom; never rescan surviving history for it.
+                let first = if cols < self.cols { input_row } else { bottom };
+                (first..history + u64::from(self.rows)).any(|abs| {
+                    let Some(row) = self.row_at_abs(abs) else {
+                        // When: row_at_abs cannot locate a possible draft row, its contents are unproven.
+                        return true;
+                    };
+                    let from = draft_start(abs, input_row, input_col);
+                    let edge = usize::from(cols) - 1;
+                    let clipped = if abs >= bottom {
+                        0
+                    } else if row.get(edge).is_some_and(|cell| cell.flags.contains(CellFlags::WIDE))
+                    {
+                        // When: the edge retains a WIDE lead, resize blanks it with its clipped continuation.
+                        edge
+                    } else {
+                        // When: the edge holds no severed wide cell, only columns past it disappear.
+                        edge + 1
+                    };
+                    row.get_range(from.max(clipped), row.len())
+                        .any(|cell| cell.ch != ' ' && cell.ch != '\0')
+                })
+            });
+        if lost {
+            self.prompts.back_mut().expect("tested newest prompt").input_proof_lost = true;
         }
     }
 
@@ -454,6 +516,16 @@ impl Grid {
             prompt.end_row = rebase(prompt.end_row);
             true
         });
+    }
+}
+
+/// Only the input row excludes the prompt's prefix; every later row can contain a draft.
+fn draft_start(abs: u64, input_row: u64, input_col: u16) -> usize {
+    if abs == input_row {
+        usize::from(input_col)
+    } else {
+        // When: abs follows input_row, the full line belongs to the possible draft.
+        0
     }
 }
 

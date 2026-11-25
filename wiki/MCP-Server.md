@@ -313,7 +313,9 @@ OSC 133 `A`, `B`, `C` and `D`, as the shell-integration scripts of WezTerm,
 iTerm2 and kitty do. It refuses a pane whose prompt has text typed after it, whose
 input queue is not empty, or into which anyone typed while the previous command
 ran. It also refuses (`no_shell_integration`) when the marks no longer locate the input:
-the prompt's `A` row was discarded or left history, or a resize cut `B`'s row or column. That check is best effort, because a terminal cannot see what the shell has
+the prompt's `A` left the grid, a resize clipped `B` or nonblank input (including a later draft row),
+or in-place scrolling moved marked rows or their possible input. Growing the grid or repeating `B`
+is not recovery: the shell must open a fresh `A` followed by `B`. That check is best effort, because a terminal cannot see what the shell has
 consumed, so use `run_command` on panes the agent created, where only the agent
 types. It never waits on a busy pane: when the pane's output parser stays locked for
 5 ms, the start is refused as `parser_busy` (retry it), distinct from `busy` (a run or
@@ -375,10 +377,9 @@ in the pane can print them. A program that printed a fake `D;0` could otherwise 
   loading leaves that pane unverified. A script opened in a new tab is typed without its
   Enter and runs nothing, so it does not count as input.
 - OSC 133 annotations (`L`, `N`, `P`, `I`, the options on `A`) and ConEmu's `9;12` never
-  latch the pane and never change `run_command` readiness, a pinned run or `exit_verified`:
-  they update only the screen's semantic state. The exception is physical row eviction: a
-  fresh line at a full bottom margin scrolls, and once the prompt's `A` row is discarded or
-  leaves history, `run_command` refuses that prompt. A tokenless one after the latch is dropped
+  latch the pane or establish readiness, complete a pinned run or change `exit_verified`. A fresh
+  line can physically scroll: a full upward scroll can evict the prompt, and a partial-margin
+  move overlapping its input proof invalidates readiness without changing the pin. A tokenless one after the latch is dropped
   like any other marker. See [Terminal IO and VT](Terminal-IO-and-VT).
 - SonicTerm removes any `SONICTERM_SHELL_TOKEN` it inherited, for example when started
   from another SonicTerm pane, so a pane's process holds only its own secret.

@@ -311,3 +311,96 @@ fn a_fresh_line_at_a_full_bottom_margin_fails_readiness_closed() {
         }
     }
 }
+
+/// The shell can prefill later lines and put the caret back on B. Losing that tail makes the
+/// remaining blanks untrustworthy even when the resize did not move the caret or either mark.
+#[test]
+fn readiness_clip_loses_trailing_draft_below_retained_b() {
+    let mut parser =
+        parsed_sized(20, 5, 0, b"\x1b]133;A\x07$ \x1b]133;B\x07\x1b[5;1Hdraft\x1b[1;3H");
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+    assert_eq!(parser.resize_terminal(20, 3).scrolled_rows, 0);
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+    parser.advance(b"\x1b]133;B\x07");
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+    parser.advance(b"\x1b[H");
+    parser.advance(READY);
+    assert!(check_prompt(parser.grid(), None).is_ok());
+}
+
+/// Padding on growth is not fresh prompt evidence, even if B's former row or column exists again.
+#[test]
+fn readiness_clip_growth_cannot_resurrect_b() {
+    for (cols, rows) in [(20, 2), (1, 5)] {
+        let mut parser = parsed_sized(20, 5, 0, b"\x1b[4;1H\x1b]133;A\x07$ \x1b]133;B\x07");
+        assert!(check_prompt(parser.grid(), None).is_ok());
+        parser.resize(cols, rows);
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+        parser.resize(20, 5);
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+    }
+}
+
+/// Moving rows in a proper margin must not leave an apparently empty input area at B's old
+/// location. A margin entirely above the prompt, by contrast, does not affect its proof.
+#[test]
+fn readiness_margin_move_puts_draft_above_b() {
+    let mut parser = parsed_sized(20, 6, 0, b"\x1b[4;1H\x1b]133;A\x07$ \x1b]133;B\x07");
+    let ready = check_prompt(parser.grid(), None);
+    assert!(ready.is_ok());
+    parser.advance(b"\x1b[1;2r\x1b[S");
+    assert_eq!(check_prompt(parser.grid(), None), ready);
+    parser.advance(b"\x1b[2;5r\x1b[4;3Hdraft");
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+    parser.advance(b"\x1b[S");
+    assert!(parser.grid().row(2).iter().any(|cell| cell.ch == 'd'));
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+}
+
+/// Fresh-line annotations at a partial bottom margin physically scroll the draft out of its
+/// marked input area. None provides a fresh A/B pair, and none changes a pinned run record.
+#[test]
+fn readiness_margin_annotations_invalidate_without_touching_a_pin() {
+    for annotation in [&b"\x1b]133;L\x07"[..], b"\x1b]133;N\x07", b"\x1b]9;12\x07"] {
+        let mut parser =
+            parsed_sized(20, 6, 0, b"\x1b[2;5r\x1b[5;1H\x1b]133;A\x07$ \x1b]133;B\x07");
+        let seq = check_prompt(parser.grid(), None).unwrap();
+        assert!(parser.grid_mut().pin_run(seq));
+        let pin = parser.grid().pinned_run();
+        parser.advance(b"draft");
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+        parser.advance(annotation);
+        assert_eq!(parser.grid().pinned_run(), pin);
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+    }
+}
+
+/// A narrower grid can erase the only nonblank even when the input mark and the lead of a
+/// clipped wide glyph are in range. Blank padding on a later resize cannot repair the proof.
+#[test]
+fn readiness_clip_loses_right_edge_draft() {
+    for draft in ["\x1b[1;9Hx", "\x1b[1;8H界"] {
+        let mut parser = parsed_sized(20, 4, 0, READY);
+        parser.advance(draft.as_bytes());
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+        parser.resize(8, 4);
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+    }
+}
+
+/// A downward move can eject a draft through the bottom without changing the row number in B.
+/// Neither a partial region nor a full-screen reverse scroll may turn that into a blank proof.
+#[test]
+fn readiness_downward_move_cannot_discard_draft_evidence() {
+    for full_screen in [false, true] {
+        let mut parser = parsed_sized(20, 6, 0, READY);
+        parser.advance(b"\x1b[6;1Htail");
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+        if full_screen {
+            parser.grid_mut().scroll_down(1);
+        } else {
+            parser.advance(b"\x1b[3;6r\x1b[T");
+        }
+        assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+    }
+}

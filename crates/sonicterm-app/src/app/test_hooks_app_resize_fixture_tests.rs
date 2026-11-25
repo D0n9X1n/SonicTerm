@@ -154,3 +154,21 @@ fn pty_resize_failure_keeps_a_no_history_draft_refused() {
     assert_eq!(check_prompt(guard.grid(), None), Err(expected));
     assert_eq!(calls.load(Ordering::Relaxed), 1, "the native call was attempted and failed");
 }
+
+/// The shell retains a multiline draft when the native resize fails. A parser clip that loses
+/// its tail must refuse readiness before the failed PTY operation, on both host resize paths.
+#[test]
+fn failed_native_resize_cannot_authorize_a_clipped_draft() {
+    use crate::app::mcp::{control_loop::Refusal, run::check_prompt};
+    let (pane, calls, _fail) = pane_with_failing_resize();
+    let parser = pane.parser.clone();
+    {
+        let mut guard = parser.lock();
+        guard.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07\x1b[5;1Hdraft\x1b[1;3H");
+        assert_eq!(check_prompt(guard.grid(), None), Err(Refusal::DraftPresent));
+    }
+    let panes = HashMap::from([(7, pane)]);
+    capture_resize_warnings(|| resize_all_panes(&panes, 80, 3));
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(check_prompt(parser.lock().grid(), None), Err(Refusal::NoShellIntegration));
+}

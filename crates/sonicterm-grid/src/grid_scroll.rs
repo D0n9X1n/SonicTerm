@@ -168,6 +168,7 @@ impl Grid {
             // When: `line_count == 0`, preserve row identity and revision.
             return;
         }
+        self.invalidate_input_on_row_move(0, rows - 1);
         for _ in 0..line_count {
             // Drop bottom row, recycle it as the new blank top row.
             let Some(mut row) = self.visible.pop_back() else {
@@ -245,6 +246,7 @@ impl Grid {
             // When: `line_count == 0`, preserve every row in the scroll region.
             return;
         }
+        self.invalidate_input_on_row_move(top_i, bot_i);
         // Shift content up by `line_count` within the region.
         for row in top_i..=bot_i {
             let src = row + line_count;
@@ -300,6 +302,7 @@ impl Grid {
             // When: `line_count == 0`, preserve every row in the scroll region.
             return;
         }
+        self.invalidate_input_on_row_move(top_i, bot_i);
         // Shift content down by `line_count` within the region (work from the
         // bottom so we don't clobber sources).
         let mut row = bot_i + 1;

@@ -133,6 +133,8 @@ pub struct PromptRegion {
     pub start_row: Option<u64>,
     /// Absolute row and column where the user's input begins (OSC 133 ; B).
     pub input_start: Option<(u64, u16)>,
+    /// A physical clip or scroll made the open region's input cells untrustworthy for starting a run.
+    pub input_proof_lost: bool,
     /// When the B marker was parsed.
     pub input_start_at: Option<std::time::Instant>,
     /// Absolute row where the command's output begins (OSC 133 ; C).
