@@ -285,6 +285,8 @@ impl App {
                 return false;
             }
             let tab_state = child.tab_states.remove(idx);
+            // Every later tab moved up one position.
+            child.revoke_tab_positions(idx..);
             let retired: Vec<_> = tab_state
                 .tree
                 .leaves()

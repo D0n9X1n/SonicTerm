@@ -375,6 +375,8 @@ impl App {
         assert_eq!(refused.len(), 0, "a detached pane id must remain absent until rollback");
         window.tabs.insert(index, tab);
         window.tab_states.insert(index, state);
+        // The restored tab and every later one changed position.
+        window.revoke_tab_positions(index..);
         let active_index = prior_active_tab_id
             .and_then(|id| window.tabs.tabs().iter().position(|tab| tab.id == id))
             .unwrap_or(index);

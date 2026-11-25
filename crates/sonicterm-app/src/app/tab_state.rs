@@ -79,6 +79,8 @@ impl App {
         }
         let mut panes = super::DetachedPanes::default();
         let state = window.tab_states.remove(index);
+        // Every later tab moved up one position.
+        window.revoke_tab_positions(index..);
         window.tabs.close(tab.id);
         for id in leaves {
             panes.push(window.remove_pane(id).expect("validated live leaf"));
@@ -227,6 +229,8 @@ impl App {
         assert_eq!(refused.len(), 0, "the moved ids were checked absent above");
         window.tabs = tabs;
         window.tab_states.insert(index, state);
+        // The inserted tab and every later one changed position.
+        window.revoke_tab_positions(index..);
         if self.registry.main_window_id == Some(target) {
             self.resize_visible_panes();
         } else {

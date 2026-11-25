@@ -292,3 +292,54 @@ fn tab_reorder_cancels_a_waiting_page() {
     assert_eq!((source.calls(), harness.delivered_count()), (0, 0));
     assert_eq!(harness.staging.ticket_slots_in_use(), 0);
 }
+
+/// Contract: closing a tab before the source tab shifts the source tab's position, which its
+/// consent page names, so the production close cancels the waiting page: nothing is read or
+/// answered and its slot is freed.
+#[test]
+fn closing_an_earlier_tab_cancels_a_waiting_page() {
+    let source = FakeSource::new("secret");
+    let mut harness = harness(Osc52ReadPolicy::Ask, source.clone());
+    let second = harness.app.__test_seed_tab("second");
+    let main = main_window(&harness);
+    focus(&mut harness, Some(main));
+    request_on(&mut harness, second, b"\x1b]52;c;?\x07");
+    assert!(page_open(&harness), "the page names tab 2");
+    harness.app.close_tab_at(0);
+    harness.app.pump_clipboard_reads();
+    assert!(!page_open(&harness), "the page naming the old position closed");
+    assert_eq!(harness.app.clip_state.reads.last_cancel, Some(CancelReason::OwnerChanged));
+    assert_eq!((source.calls(), harness.delivered_count()), (0, 0));
+    assert_eq!(harness.staging.ticket_slots_in_use(), 0);
+}
+
+/// Contract: a tab inserted before the source tab, as a tab moved in from another window is, shifts
+/// the source tab's position, so the waiting page naming the old position is cancelled; a later tab
+/// leaving moves no earlier tab and leaves the page standing.
+#[test]
+fn inserting_a_tab_before_the_source_cancels_a_waiting_page() {
+    let source = FakeSource::new("secret");
+    let mut harness = harness(Osc52ReadPolicy::Ask, source.clone());
+    let second = harness.app.__test_seed_tab("second");
+    harness.app.__test_seed_tab("third");
+    // A renderer-less window takes a moved tab only with test geometry, as a real one has a size.
+    let outer = sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 480.0);
+    assert!(harness.app.__test_set_main_pane_viewport(outer, 10.0, 20.0));
+    let main = main_window(&harness);
+    focus(&mut harness, Some(main));
+    request_on(&mut harness, second, b"\x1b]52;c;?\x07");
+    assert!(page_open(&harness), "the page names tab 2");
+    let (tab, state, panes) = harness.app.detach_tab_state(2).expect("the third tab");
+    harness.app.pump_clipboard_reads();
+    assert!(page_open(&harness), "a later tab leaving keeps the source tab's position");
+    if let Err(refused) = harness.app.attach_tab_state(0, tab, state, panes) {
+        let error = refused.error;
+        refused.panes.discard_for_test();
+        panic!("the tab was refused: {error:?}");
+    }
+    harness.app.pump_clipboard_reads();
+    assert!(!page_open(&harness), "the page naming the old position closed");
+    assert_eq!(harness.app.clip_state.reads.last_cancel, Some(CancelReason::OwnerChanged));
+    assert_eq!((source.calls(), harness.delivered_count()), (0, 0));
+    assert_eq!(harness.staging.ticket_slots_in_use(), 0);
+}

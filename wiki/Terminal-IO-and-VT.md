@@ -341,8 +341,9 @@ Otherwise the pane's VT worker gives the read a ticket before posting anything: 
 and 8 per process. A read past either bound is answered empty at once on the ordinary
 parser-reply path; an empty reply carries no clipboard bytes. A ticket records the pane, its PTY,
 the window it is in, the last prompt or command boundary, and the policy generation. Closing the
-pane, moving it to another window (or away and back), moving its tab to another position in its
-window (the consent page names the tab by position), a prompt start, command start or end, a
+pane, moving it to another window (or away and back), any change to its tab's position in its
+window (a reorder, or a tab closed or inserted before it; the consent page names the tab by
+position), a prompt start, command start or end, a
 reset (RIS), a different PTY, READONLY, and any change to `osc52` or `osc52_read` each cancel the
 ticket silently. It is checked again before the native read starts and before every attempt to
 deliver the reply.

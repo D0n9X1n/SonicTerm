@@ -322,6 +322,23 @@ impl WindowState {
         self.copy_mode = copy_mode;
     }
 
+    /// Advance the owner epoch of every pane in the tabs at `positions`, whose position changed: a
+    /// clipboard consent page names its tab by position, so a page or approval that named the old
+    /// position is revoked. Positions past the last tab are ignored.
+    pub(in crate::app) fn revoke_tab_positions(
+        &self,
+        positions: impl std::ops::RangeBounds<usize>,
+    ) {
+        let bounds = (positions.start_bound().cloned(), positions.end_bound().cloned());
+        for tab in self.tab_states.get(bounds).unwrap_or_default() {
+            for leaf in tab.tree.leaves() {
+                if let Some(pane) = self.panes.get(&leaf) {
+                    pane.read_identity.bump_owner();
+                }
+            }
+        }
+    }
+
     /// Record a press on the tab at `tab_index` of this window's bar at `press_pos`: the
     /// pointer is down, the tab is pressed and a drag session starts, so a drag can reorder,
     /// transfer or tear the tab out. Both left-button handlers call it after activating the tab.
@@ -715,15 +732,8 @@ impl WindowState {
         self.tabs.reorder(from, to);
         let state = self.tab_states.remove(from);
         self.tab_states.insert(to, state);
-        // A clipboard consent page names its tab by position, so every pane whose tab moved gets a
-        // new owner epoch, revoking a page or approval that named the old position.
-        for tab in &self.tab_states[from.min(to)..=from.max(to)] {
-            for leaf in tab.tree.leaves() {
-                if let Some(pane) = self.panes.get(&leaf) {
-                    pane.read_identity.bump_owner();
-                }
-            }
-        }
+        // Every tab between the two slots changed position.
+        self.revoke_tab_positions(from.min(to)..=from.max(to));
         self.complete_topology_change(
             TopologyChange {
                 resize_visible: false,

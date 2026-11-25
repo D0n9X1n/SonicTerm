@@ -199,7 +199,9 @@ cargo build -p sonicterm-app
   its reply-budget lease until the native call returns; a result completed at or past its deadline
   (`ReaderDone::completed_at`) is answered as an overdue read. The X11 protocol runs over the
   `SelectionPort` seam (`osc52_read_x11.rs`), and the Windows text read over `Win32Clipboard`
-  (`GlobalSize` before `lock_text`). A reorder bumps the owner epoch of every pane whose tab moved. Replies go only to the source PTY through
+  (`GlobalSize` before `lock_text`). Every tab position change (a reorder, or a tab closed,
+  detached or inserted before it) bumps the owner epoch of every pane whose tab position changed
+  (`WindowState::revoke_tab_positions`). Replies go only to the source PTY through
   `PtyHandle::try_send_reply`, never the reply spool, a broadcast receiver or a log.
 - Main and child keyboard, IME, focus and modifier events share source-WindowId
   ownership. Search input has priority over READONLY; quick-select retains its

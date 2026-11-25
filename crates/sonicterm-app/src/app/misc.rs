@@ -322,6 +322,8 @@ impl App {
             return;
         }
         let tab_state = main.tab_states.remove(index);
+        // Every later tab moved up one position.
+        main.revoke_tab_positions(index..);
         let tab_id = main.tabs.tabs().get(index).map(|tab| tab.id);
         if let Some(id) = tab_id {
             main.tabs.close(id);
