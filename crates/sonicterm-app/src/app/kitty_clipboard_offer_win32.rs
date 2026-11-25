@@ -70,7 +70,7 @@ impl Drop for OwnerWindow {
     }
 }
 
-/// Open the clipboard with the worker's window for writes, or no window for reads.
+/// Open the clipboard with a fresh owner window for writes, or no window for reads.
 fn open_clipboard(owner: Option<HWND>) -> bool {
     for _ in 0..OPEN_ATTEMPTS {
         let opened =

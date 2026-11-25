@@ -273,9 +273,22 @@ impl OpenWrite {
         }
         let decoded = base64::engine::general_purpose::STANDARD.decode(chunk);
         let names = decoded.ok().and_then(|bytes| String::from_utf8(bytes).ok());
-        // The decoded names stay reserved while they are read below; the scope releases them.
+        self.record_then_release(target, names, chunk.len())
+    }
+
+    /// Record the aliases `names` lists for `target`, then free the decoded names before
+    /// returning the `decode_bytes` that covered them, on success and refusal alike.
+    fn record_then_release(
+        &mut self,
+        target: &str,
+        names: Option<String>,
+        decode_bytes: usize,
+    ) -> Result<(), KittyClipboardStatus> {
         let result = self.record_aliases(target, names.as_deref());
-        self.lease.shrink_to(self.lease.bytes() - chunk.len());
+        // The decoded names drop before their reservation returns, so no other job can take those
+        // bytes while the names are still allocated.
+        drop(names);
+        self.lease.shrink_to(self.lease.bytes() - decode_bytes);
         result
     }
 

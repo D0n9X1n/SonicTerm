@@ -781,3 +781,27 @@ fn refusal_order_open_write_planning_budget() {
     });
     assert_eq!(reading, before);
 }
+
+/// Contract: a `walias` packet's decoded names free before their decode reservation returns,
+/// on a refusal as on success: when a new alias target cannot be reserved (`EBUSY`), the bytes
+/// covering the names are still reserved at the moment the names are deallocated.
+#[test]
+fn refusal_order_alias_names_freed_before_their_reservation() {
+    let mut rig = rig_with(64, 1 << 16, Osc52Policy::Allow);
+    rig.send("type=write:id=a");
+    rig.data("text/plain", &b64("x"));
+    let open = rig.tx.open.as_mut().expect("an open write");
+    // Names whose decode fits the budget but whose alias pair, with a long target, does not.
+    let names = "text/x-a".to_owned();
+    let address = names.as_ptr() as usize;
+    let decode_bytes = names.len();
+    assert!(open.lease.grow_to(open.lease.bytes() + decode_bytes), "the decode is reserved");
+    let target = "t".repeat(64);
+    let staging = rig.staging.clone();
+    let reserved_with_names = staging.reserved_bytes();
+    let reading = crate::app::osc52_stream::reserved_at_free(&staging, address, || {
+        let refused = open.record_then_release(&target, Some(names), decode_bytes);
+        assert_eq!(refused, Err(KittyClipboardStatus::Ebusy));
+    });
+    assert_eq!(reading, reserved_with_names, "the names freed while still reserved");
+}
