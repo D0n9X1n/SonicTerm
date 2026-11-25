@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use sonicterm_cfg::config::Osc52Policy;
+use sonicterm_cfg::config::{Osc52Policy, Osc52ReadPolicy};
 use sonicterm_vt::vt::{
     kitty_clipboard_status_reply, ClipboardInbox, KittyClipboardLocation, KittyClipboardMetadata,
     KittyClipboardOperation, KittyClipboardRequest, KittyClipboardStatus,
@@ -474,16 +474,24 @@ impl KittyClipboardTx {
             let read = KittyClipboardOperation::Read;
             kitty_clipboard_status_reply(read, status, metadata.location, &metadata.id, bel)
         };
+        let denied = self.staging.read_policy() == Osc52ReadPolicy::Deny;
         let mut lease = self.staging.lease();
         if !lease.grow_to(chunk.len()) {
-            // When: lease.grow_to cannot cover decoding the payload, the read is busy.
-            return KittyStep::Reply(status(KittyClipboardStatus::Ebusy));
+            // When: lease.grow_to cannot cover decoding the payload, the read is busy, or `EPERM`
+            // under `deny`, which decides a read before the budget does.
+            let refusal =
+                if denied { KittyClipboardStatus::Eperm } else { KittyClipboardStatus::Ebusy };
+            return KittyStep::Reply(status(refusal));
         }
         let Some(request) = parse_read_request(metadata, chunk, bel) else {
             // When: parse_read_request refuses the payload, the read is dropped with no reply.
             return KittyStep::Silent;
         };
         drop(lease);
+        if denied {
+            // When: denied, a valid read answers `EPERM` before its location is checked.
+            return KittyStep::Reply(status(KittyClipboardStatus::Eperm));
+        }
         let primary = metadata.location == KittyClipboardLocation::Primary;
         if primary && !cfg!(target_os = "linux") {
             // When: primary is asked for off Linux, the location does not exist.

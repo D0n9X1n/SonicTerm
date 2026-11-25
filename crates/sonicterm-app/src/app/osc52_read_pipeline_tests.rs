@@ -426,13 +426,23 @@ fn kitty_read_as(
     types: &[&str],
     credential: Option<crate::app::osc52_read_grants::GrantCredential>,
 ) {
+    kitty_read_listing_as(harness, false, types, credential);
+}
+
+/// [`kitty_read_as`], asking for the type listing (`.`) too when `listing` is set.
+fn kitty_read_listing_as(
+    harness: &mut Harness,
+    listing: bool,
+    types: &[&str],
+    credential: Option<crate::app::osc52_read_grants::GrantCredential>,
+) {
     use crate::app::kitty_clipboard_read::KittyReadRequest;
     use crate::app::osc52_read_ticket::admit_kitty_read;
     let identity = harness.app.pane_by_id(harness.pane).expect("a live pane").read_identity.clone();
     let request = KittyReadRequest {
         id: "k".into(),
         location: sonicterm_vt::vt::KittyClipboardLocation::Standard,
-        listing: false,
+        listing,
         types: types.iter().map(|mime| (*mime).to_owned()).collect(),
         bel: false,
         credential,

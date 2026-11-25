@@ -89,6 +89,20 @@ fn ban_eperm() {
     assert_eq!(clipboard(&harness).as_deref(), Some("before"), "nothing written");
 }
 
+/// Contract: a Ban covers every read under its password, so a listing-only read, which `ask`
+/// otherwise answers without a page, is refused `EPERM` too and lists nothing.
+#[test]
+fn ban_refuses_a_listing_only_read() {
+    let mut harness = asking();
+    kitty_read_as(&mut harness, &["text/plain"], named());
+    choose(&mut harness, 1);
+    drop(harness.take_delivered());
+    kitty_read_listing_as(&mut harness, true, &[], named());
+    assert!(!page_open(&harness), "a banned listing skips the page");
+    let eperm = b"\x1b]5522;type=read:status=EPERM:id=k\x1b\\".to_vec();
+    assert_eq!(delivered_bytes(&harness), vec![eperm], "refused, nothing listed");
+}
+
 /// Contract: a `pw` without a nonempty `name` counts as no password: the page offers no Always or
 /// Ban, no grant is looked up or created, and the next request asks again.
 #[test]

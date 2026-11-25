@@ -369,6 +369,25 @@ fn deny_eperm() {
     assert_eq!(rig.staging.ticket_slots_in_use(), 0);
 }
 
+/// Contract: `osc52_read = "deny"` decides a valid read before anything else: a PRIMARY read off
+/// Linux and a read the staging budget cannot cover both answer `EPERM`, not `ENOSYS` or `EBUSY`.
+#[test]
+fn deny_precedes_enosys_and_ebusy() {
+    let deny = sonicterm_cfg::config::Osc52ReadPolicy::Deny;
+    if !cfg!(target_os = "linux") {
+        // PRIMARY exists only on Linux; elsewhere it would answer `ENOSYS` without the policy.
+        let mut rig = rig();
+        rig.staging.set_read_policy(deny);
+        let reply = rig.reply("type=read:id=p:loc=primary;dGV4dC9wbGFpbg==");
+        assert_eq!(reply, "\x1b]5522;type=read:status=EPERM:loc=primary:id=p\x1b\\");
+    }
+    // A budget smaller than the payload would answer `EBUSY` without the policy.
+    let mut rig = rig_with(4, 1 << 16, Osc52Policy::Allow);
+    rig.staging.set_read_policy(deny);
+    let reply = rig.reply("type=read:id=b;dGV4dC9wbGFpbg==");
+    assert_eq!(reply, "\x1b]5522;type=read:status=EPERM:id=b\x1b\\");
+}
+
 /// The ticket one read packet `body` admitted.
 fn read_ticket(rig: &mut Rig, body: &str) -> crate::app::osc52_read_ticket::ConsentTicket {
     match rig.send(body).pop() {

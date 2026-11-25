@@ -179,6 +179,11 @@ impl super::App {
         // password, whatever answers the read, so a replay never finds it.
         let pasted = self.consume_paste_grant(&ticket);
         match (grant, pasted) {
+            (Some(GrantDecision::Ban), _) => {
+                // A Ban grant refuses the request `EPERM` without a page, before a listing-only
+                // read readable under `ask` is queued: Ban covers every read under its password.
+                self.refuse_ticket(ticket, Instant::now());
+            }
             _ if ticket.readable() => self.clip_state.reads.queued.push_back(ticket),
             (Some(GrantDecision::Always), _) => {
                 // An Always grant approves a waiting ticket without a page.
@@ -190,10 +195,6 @@ impl super::App {
                     // When: the ticket is a read, it queues for the one native reader.
                     self.clip_state.reads.queued.push_back(ticket);
                 }
-            }
-            (Some(GrantDecision::Ban), _) => {
-                // A Ban grant refuses the request `EPERM` without a page.
-                self.refuse_ticket(ticket, Instant::now());
             }
             (None, Some(approval)) => {
                 // A live paste grant approves this one read without a page, bound to its recipient
