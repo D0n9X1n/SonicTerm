@@ -190,6 +190,8 @@ impl super::App {
         match reads.source.gesture_offer(ReadLocation::Clipboard) {
             GestureOffer::Version(version) => OfferBinding::Version(version),
             GestureOffer::RoundTrip if quiet => {
+                // shortcut: on X11 another program's copy between the gesture and the first
+                // sample is not seen; binding it needs the owner's timestamp read at the gesture.
                 OfferBinding::FirstSample { writes_started: domain.writes_started }
             }
             GestureOffer::RoundTrip | GestureOffer::Unavailable => OfferBinding::Unbound,
