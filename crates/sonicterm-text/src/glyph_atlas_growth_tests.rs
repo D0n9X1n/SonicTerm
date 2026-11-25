@@ -407,6 +407,35 @@ fn shrinking_a_grown_atlas_releases_its_pixels() {
     assert_eq!(atlas.growth_policy(), GrowthPolicy::Growable { max: ATLAS_DIM });
 }
 
+/// Shrinking keeps what a real eviction left: the eviction count, `ever_evicted` (an atlas that has
+/// evicted reports `Evicted` for its fit) and the entry cap, so the next fill evicts at that cap.
+#[test]
+fn shrinking_keeps_a_real_evictions_state_and_the_cap() {
+    let mut atlas = GlyphAtlas::growable(START_ATLAS_DIM_2X, ATLAS_DIM);
+    grow_by_inserting(&mut atlas, 1024);
+    let cap = atlas.len();
+    atlas.__set_entry_cap_for_test(cap);
+    let mut tiles = ShapedRasterizer { width: 30, height: 30, is_color: false };
+    atlas.tick_frame();
+    atlas.get_or_insert(numbered_key(100_000), &mut tiles).expect("an insert past the cap");
+    let evictions = atlas.evictions();
+    assert!(evictions > 0, "the insert past the cap evicted");
+    assert_eq!(atlas.fit_outcome(), FitOutcome::Evicted);
+
+    assert!(atlas.shrink_to(START_ATLAS_DIM_2X));
+
+    assert_eq!(atlas.evictions(), evictions, "the eviction count survives");
+    assert_eq!(atlas.fit_outcome(), FitOutcome::Evicted, "ever_evicted survives");
+    for index in 0..cap as u32 {
+        atlas.tick_frame();
+        atlas.get_or_insert(numbered_key(200_000 + index), &mut tiles).expect("a refill");
+    }
+    assert_eq!(atlas.len(), cap, "the refill stops at the kept cap");
+    atlas.tick_frame();
+    atlas.get_or_insert(numbered_key(300_000), &mut tiles).expect("one more");
+    assert!(atlas.evictions() > evictions, "and evicts there again");
+}
+
 /// Shrinking keeps the eviction permission a bounded retry set: an atlas with eviction disabled
 /// stays disabled, where a plain reset would re-enable it.
 #[test]

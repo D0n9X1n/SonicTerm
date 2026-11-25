@@ -81,7 +81,7 @@ impl GlyphAtlas {
         let bpp = BYTES_PER_PIXEL as usize;
         let old_row_bytes = self.width as usize * bpp;
         let new_row_bytes = dim as usize * bpp;
-        let mut grown = vec![0u8; new_row_bytes * dim as usize];
+        let mut grown = super::buffer::AtlasPixels::zeroed(new_row_bytes * dim as usize);
         for (row_index, old_row) in self.pixels.chunks_exact(old_row_bytes).enumerate() {
             let start = row_index * new_row_bytes;
             grown[start..start + old_row_bytes].copy_from_slice(old_row);
@@ -142,10 +142,10 @@ impl GlyphAtlas {
             // When: the atlas is Fixed or dim is not a smaller power of two at or above the floor.
             return false;
         }
-        // A new buffer, not a truncation: `Vec::truncate` would keep the grown capacity. The old
-        // one's pages go back to the system rather than staying in the allocator's cache.
-        let fresh = vec![0u8; dim as usize * dim as usize * BYTES_PER_PIXEL as usize];
-        super::page_release::release_pixel_pages(std::mem::replace(&mut self.pixels, fresh));
+        // A new buffer, not a truncation, so the old one's memory is released with it.
+        self.pixels = super::buffer::AtlasPixels::zeroed(
+            dim as usize * dim as usize * BYTES_PER_PIXEL as usize,
+        );
         self.width = dim;
         self.height = dim;
         // A reset would restart the eviction count and re-enable eviction; shrinking is neither an

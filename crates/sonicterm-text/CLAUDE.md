@@ -40,9 +40,10 @@ cargo build -p sonicterm-text
   counter, and still clear promptly when their owning seam changes.
 - `GlyphAtlas::shrink_to` empties a grown growable atlas to a smaller power of two (at or above
   `MIN_ATLAS_DIM`), replacing the pixel buffer so its capacity falls, and keeps the growth and
-  eviction counts, the eviction permission, `ever_evicted` and the cap. The old buffer goes
-  through `page_release::release_pixel_pages`, which on macOS marks its whole pages
-  `MADV_FREE_REUSABLE` first: macOS keeps a freed large block's pages dirty otherwise.
+  eviction counts, the eviction permission, `ever_evicted` and the cap.
+- Pixels live in `buffer::AtlasPixels`: from 1 MiB on macOS an anonymous `memmap2` mapping,
+  unmapped when dropped (the system allocator keeps a freed large block's pages in the
+  footprint), else a vector. Growth and shrink each replace the buffer.
 - A `GlyphAtlas::growable` atlas doubles up to its maximum before it evicts;
   `new` and `default_size` stay fixed. `grow_to` accepts only the policy's
   next doubling and refuses anything else without changing the atlas. Growth
@@ -50,7 +51,7 @@ cargo build -p sonicterm-text
   typed re-upload rect per tile, advances the identity and counts one growth
   that a reset does not clear; it never rasterizes again.
   `retained_amount().bytes` is the pixel capacity plus the dirty list's
-  capacity. Pixels move only with growth; the dirty list grows with inserts
+  capacity. Pixels move only with growth and shrink; the dirty list grows with inserts
   and a drain shrinks it to 64 rects once it exceeds 1,024, so even a fixed
   atlas's figure varies. A test bounding memory must assert the term it means.
 - `START_ATLAS_DIM_1X` is 1024 and `START_ATLAS_DIM_2X` is 512, each equal to

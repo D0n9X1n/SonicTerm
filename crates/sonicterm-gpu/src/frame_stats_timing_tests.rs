@@ -514,3 +514,19 @@ fn title_and_chrome_run_notes_count_only_inside_a_counting_scope() {
     assert_eq!(off.snapshot(), FrameStats::ZERO, "the gate off moves no counter");
     assert_eq!(sink.snapshot(), on, "and nothing reached the counting renderer afterwards");
 }
+
+/// A growth is pending, so a covered-window shrink leaves its atlas alone, from the moment the atlas
+/// grew until a successful present times it: uncounted, then counted and not yet presented. Once
+/// presented, or with no growth at all, nothing is pending.
+#[test]
+fn a_growth_is_pending_until_a_present_times_it() {
+    let start = Instant::now();
+    let mut episodes = GrowthEpisodes::default();
+    assert!(!episodes.has_pending(0), "no growth");
+    assert!(episodes.has_pending(1), "grown but not yet counted");
+    episodes.count(1, start);
+    assert!(episodes.has_pending(1), "counted and waiting for a present");
+    episodes.present();
+    assert!(!episodes.has_pending(1), "presented and timed");
+    assert!(episodes.has_pending(2), "a later growth is pending again");
+}

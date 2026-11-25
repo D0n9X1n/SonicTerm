@@ -543,7 +543,7 @@ fn slide_until_growth(
             &format!("key {newest} presented without growth: {outcome:?}"),
         )?;
     }
-    Err(format!("{} keys at {SLIDING_FONT_PX}px never grew the 256 atlas", key_count()))
+    Err(format!("{} keys never grew the {} atlas", key_count(), renderer.glyph_atlas_facts().dim))
 }
 
 /// Tests 7 and 8 (case a of test 15): the growing frame retries through the growth path, with no
@@ -795,11 +795,12 @@ fn normal_start(active: &ActiveEventLoop, software: bool) -> Result<(), String> 
 }
 
 /// A covered-window trim shrinks a normal atlas that grew past its start back to that start, on
-/// the CPU and, under wgpu, the GPU upload (GDI keeps 1x1). It is not shrunk while the growing
-/// frame's timing is still pending, and the frame after the shrink presents with the atlas regrown
-/// only as far as the screen needs.
+/// the CPU and, under wgpu, the GPU upload (GDI keeps 1x1). The sliding row draws one new large key
+/// per frame until the atlas grows, whatever its start. While that growth's timing is pending the
+/// trim keeps the atlas; once the retried frame presents, the trim shrinks it, and the next frame
+/// presents from a clean grid with nothing missing (GDI: the same pixels as a fresh renderer).
 fn trim_shrinks_a_grown_atlas(active: &ActiveEventLoop, software: bool) -> Result<(), String> {
-    let size = PhysicalSize::new(1000, 700);
+    let size = PhysicalSize::new(960, 240);
     let role = if software { "atlas-shrink-gdi" } else { "atlas-shrink-wgpu" };
     let (window, mut renderer) = match renderer_starting_at(
         active,
@@ -817,15 +818,16 @@ fn trim_shrinks_a_grown_atlas(active: &ActiveEventLoop, software: bool) -> Resul
         other => other?,
     };
     let start = start_dim(window.scale_factor() as f32, GlyphAtlasStart::Normal);
-    let mut grid = filled_grid(&renderer, &window);
-    let outcome = frame(&mut renderer, &window, &mut grid);
-    let grown = renderer.glyph_atlas_facts().dim;
-    check(grown > start, &format!("{role}: precondition: a full frame grew {start} to {grown}"))?;
+    let mut grid = sliding_grid();
+    let (before, outcome) = slide_until_growth(&mut renderer, &window, &mut grid)?;
+    check(before.dim == start, &format!("{role}: grew from the start {start}"))?;
     check(matches!(outcome, PresentOutcome::AtlasRetry), &format!("{role}: growth: {outcome:?}"))?;
+    let grown = renderer.glyph_atlas_facts().dim;
     let pending = renderer.trim_for_occlusion();
     check(pending.glyph_atlas_shrunk.is_none(), &format!("{role}: kept while timing is pending"))?;
     check(renderer.glyph_atlas_facts().dim == grown, &format!("{role}: the grown atlas is kept"))?;
     present(&mut renderer, &window, &mut grid)?;
+    let upload_before = renderer.__test_glyph_atlas_dimensions().1;
     let report = renderer.trim_for_occlusion();
     check(
         report.glyph_atlas_shrunk == Some((grown, start)),
@@ -835,13 +837,49 @@ fn trim_shrinks_a_grown_atlas(active: &ActiveEventLoop, software: bool) -> Resul
     check((cpu_w, cpu_h) == (start, start), &format!("{role}: CPU atlas {cpu_w}x{cpu_h}"))?;
     let expected_gpu = if software { (1, 1) } else { (start, start) };
     check(gpu == expected_gpu, &format!("{role}: the upload is {gpu:?}, want {expected_gpu:?}"))?;
-    let resident = renderer.glyph_atlas_len();
-    check(resident == 0, &format!("{role}: the shrunk atlas holds no tile, not {resident}"))?;
-    present(&mut renderer, &window, &mut grid)?;
+    let upload_bytes = |(width, height): (u32, u32)| u64::from(width) * u64::from(height) * 4;
+    let texture_delta = upload_bytes(upload_before) - upload_bytes(gpu);
     check(
-        renderer.glyph_atlas_len() > 0,
-        &format!("{role}: the next frame rasterized its glyphs"),
+        report.gpu_released_requested_bytes >= texture_delta,
+        &format!("{role}: the report counts the {texture_delta} glyph texture bytes: {report:?}"),
     )?;
+    check(renderer.glyph_atlas_len() == 0, &format!("{role}: the shrunk atlas holds no tile"))?;
+    // The grid is clean: the frame after the trim must draw every row on its own.
+    let mut presented = false;
+    for _ in 0..4 {
+        match frame(&mut renderer, &window, &mut grid) {
+            PresentOutcome::Presented => {
+                presented = true;
+                break;
+            }
+            // When: the first frame regrows the atlas it retries once; the rows stay as they are.
+            PresentOutcome::AtlasRetry => continue,
+            other => return Err(format!("{role}: the frame after the shrink: {other:?}")),
+        }
+    }
+    check(presented, &format!("{role}: the frame after the shrink presented"))?;
+    check(
+        renderer.last_missing_tofu().is_empty(),
+        &format!("{role}: nothing missing: {:?}", renderer.last_missing_tofu()),
+    )?;
+    if software {
+        // A fresh renderer draws the same row from an atlas that never shrank.
+        let (fresh_window, mut fresh) = renderer_starting_at(
+            active,
+            "atlas-shrink-fresh",
+            true,
+            LARGE_FONT_PX,
+            size,
+            GlyphAtlasStart::Normal,
+        )?;
+        let mut fresh_grid = sliding_grid();
+        slide_to(&mut fresh_grid, before.newest);
+        present(&mut fresh, &fresh_window, &mut fresh_grid)?;
+        check(
+            software_pixels(&renderer, &window) == software_pixels(&fresh, &fresh_window),
+            &format!("{role}: the shrunk atlas draws a fresh renderer's pixels"),
+        )?;
+    }
     reconciles(&renderer)
 }
 

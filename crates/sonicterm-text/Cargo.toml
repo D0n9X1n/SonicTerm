@@ -21,7 +21,7 @@ sonicterm-types.workspace = true
 bytemuck.workspace = true
 tracing.workspace = true
 
-# The freed-page release after a glyph atlas shrink (`page_release.rs`): macOS keeps a freed
-# large allocation's pages dirty until they are marked reusable.
+# Large atlas pixel buffers are anonymous mappings on macOS (`glyph_atlas_buffer.rs`), whose drop
+# unmaps them: the system allocator keeps a freed large block's pages in the footprint.
 [target.'cfg(target_os = "macos")'.dependencies]
-libc.workspace = true
+memmap2 = "0.9"

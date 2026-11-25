@@ -3911,7 +3911,7 @@ name = "sonicterm-text"
 version = "1.5.3"
 dependencies = [
  "bytemuck",
- "libc",
+ "memmap2",
  "sonicterm-types",
  "tracing",
 ]

@@ -187,7 +187,7 @@ struct AtlasAllocation {
 pub struct GlyphAtlas {
     width: u32,
     height: u32,
-    pixels: Vec<u8>,
+    pixels: buffer::AtlasPixels,
     map: HashMap<GlyphKey, AtlasEntry>,
     packer: ShelfPacker,
     /// Rectangles freed by LRU eviction. The allocator scans this
@@ -270,7 +270,7 @@ impl GlyphAtlas {
         Self {
             width,
             height,
-            pixels: vec![0; (width * height * BYTES_PER_PIXEL) as usize],
+            pixels: buffer::AtlasPixels::zeroed((width * height * BYTES_PER_PIXEL) as usize),
             map: HashMap::new(),
             packer: ShelfPacker::new(width, height),
             free_rects: Vec::new(),
@@ -830,12 +830,12 @@ impl Rasterizer for SyntheticRasterizer {
 #[path = "glyph_atlas_tests.rs"]
 mod glyph_atlas_tests;
 
+#[path = "glyph_atlas_buffer.rs"]
+mod buffer;
 #[path = "glyph_atlas_growth.rs"]
 mod growth;
 #[path = "glyph_atlas_packing.rs"]
 mod packing;
-#[path = "glyph_atlas_page_release.rs"]
-mod page_release;
 #[path = "glyph_atlas_pixels.rs"]
 mod pixels;
 pub use packing::{fit_outcome_of_tiles, FitOutcome, ShelfPacker};
