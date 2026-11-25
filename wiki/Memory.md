@@ -231,7 +231,9 @@ process-wide clipboard staging budget of `max(128 MiB, 2 × clipboard_write_limi
 startup: the decoded bytes, the Windows U+FFFD expansion of a non-UTF-8 payload, and one native copy
 per destination (`CF_UNICODETEXT` on Windows, the UTF-8 length elsewhere; an arboard `cp` write on Linux
 reserves two, because CLIPBOARD and PRIMARY keep separate copies). An OSC 5522 commit of several types
-reserves, before its job is posted, every kept buffer plus one native copy of each type: on
+reserves fixed capacities for planning before allocating the tables. The lease stays charged through
+alias disposal and retains the actual capacities of both output vectors, each kept buffer and
+one native copy per type before the job is posted: on
 Windows the `CF_UNICODETEXT` block (two bytes per UTF-8 byte and a terminator), the CF_HTML block
 with its header and wrapper (and the transient header string), `PNG` and custom blocks at their
 size, and a `CF_HDROP` list with space for the decoded strings, their descriptors and the final UTF-16 block. URI preflight scans borrowed lines without allocation, with a limit of 256 items. On macOS each URI list reserves four times its byte length plus 4 KiB per item for pasteboard staging; this is an allowance for native objects, not a measurement of AppKit heap usage. X11 reserves the

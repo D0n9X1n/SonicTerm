@@ -166,6 +166,58 @@ pub(in crate::app) enum Polled {
     Closed,
 }
 
+/// The fields an X11 SelectionNotify must echo. A zero property means explicit refusal.
+#[derive(Clone, Copy)]
+pub(super) struct Conversion {
+    pub(super) requestor: u32,
+    pub(super) selection: u32,
+    pub(super) target: u32,
+    pub(super) property: u32,
+}
+
+impl Conversion {
+    /// Ignore even a well-typed property if the notification belongs to another conversion.
+    pub(super) fn notify(self, received: Self) -> Polled {
+        if received.requestor == self.requestor
+            && received.selection == self.selection
+            && received.target == self.target
+            && (received.property == 0 || received.property == self.property)
+        {
+            Polled::Notify(received.property != 0)
+        } else {
+            // When: received does not match this conversion, its property cannot establish an offer version.
+            Polled::Other
+        }
+    }
+}
+
+/// Native atom IDs used to interpret a GetProperty response, independently of its format width.
+pub(super) struct PropertyAtoms {
+    pub(super) utf8: u32,
+    pub(super) mime_utf8: u32,
+    pub(super) plain: u32,
+    pub(super) generic_text: u32,
+    pub(super) string: u32,
+    pub(super) incr: u32,
+    pub(super) integer: u32,
+}
+
+impl PropertyAtoms {
+    /// Classify the actual property type, including the exact target of a MIME read.
+    pub(super) fn kind(&self, actual: u32, requested: Option<u32>) -> PropertyKind {
+        match actual {
+            atom if Some(atom) == requested => PropertyKind::Requested,
+            atom if [self.utf8, self.plain, self.mime_utf8, self.generic_text].contains(&atom) => {
+                PropertyKind::Utf8
+            }
+            atom if atom == self.string => PropertyKind::Latin1,
+            atom if atom == self.incr => PropertyKind::Incr,
+            atom if atom == self.integer => PropertyKind::Integer,
+            _ => PropertyKind::Other,
+        }
+    }
+}
+
 /// The target a conversion asks the owner for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::app) enum ConvertTarget {

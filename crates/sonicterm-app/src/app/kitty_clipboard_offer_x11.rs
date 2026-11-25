@@ -203,13 +203,9 @@ fn data_atoms(offer: &NativeOffer) -> usize {
             * 4
 }
 
-/// Bytes retained beside the payload: both plan vectors, atom and index tables, eight cursors
-/// and one format-32 wire buffer. INCR writes borrow the already reserved bytes directly.
+/// Extra native tables beyond the shared offer reservation. INCR writes borrow the staged bytes.
 pub(super) fn owner_workspace(offer: &NativeOffer) -> usize {
-    let count = data_atoms(offer);
-    raw_tables(count)
-        + offer.entries.capacity() * size_of::<Vec<u8>>()
-        + offer.representations.capacity() * size_of::<(NativeFormat, usize)>()
+    raw_tables(data_atoms(offer))
 }
 
 /// Index table, atom list and its format-32 wire copy, and the bounded set of INCR cursors.

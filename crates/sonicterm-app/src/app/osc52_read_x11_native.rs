@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
-    self, Atom, ConnectionExt as _, CreateWindowAux, EventMask, Window, WindowClass,
+    self, Atom, ConnectionExt as _, CreateWindowAux, EventMask, WindowClass,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -16,8 +16,8 @@ use super::osc52_read_source::{
     ReadLocation, ReadOutcome, TypeListing, TypeRead, MAX_NATIVE_TYPES_SCANNED,
 };
 use super::osc52_read_x11::{
-    fetch_length_units, offer_version_with, read_selection, wait_for_notify, ConvertTarget, Polled,
-    PropertyKind, PropertyReply, SelectionPort, SELECTION_WAIT,
+    fetch_length_units, offer_version_with, read_selection, wait_for_notify, Conversion,
+    ConvertTarget, Polled, PropertyAtoms, PropertyReply, SelectionPort, SELECTION_WAIT,
 };
 
 /// How long the client sleeps between polls while it waits for an event.
@@ -36,16 +36,9 @@ enum OpenError {
 /// with. Dropping it closes the connection, which destroys the window.
 struct NativePort {
     connection: RustConnection,
-    window: Window,
-    selection: Atom,
-    property: Atom,
+    conversion: Conversion,
     requested: Option<Atom>,
-    conversion: Atom,
-    utf8: Atom,
-    mime_utf8: Atom,
-    text_plain: Atom,
-    generic_text: Atom,
-    incr: Atom,
+    atoms: PropertyAtoms,
     timestamp: Atom,
     targets: Atom,
 }
@@ -113,16 +106,17 @@ impl NativePort {
         };
         Some(Self {
             connection,
-            window,
-            selection,
-            property,
+            conversion: Conversion { requestor: window, selection, target: x11rb::NONE, property },
             requested: None,
-            conversion: x11rb::NONE,
-            utf8,
-            mime_utf8,
-            text_plain,
-            generic_text,
-            incr,
+            atoms: PropertyAtoms {
+                utf8,
+                mime_utf8,
+                plain: text_plain,
+                generic_text,
+                incr,
+                string: xproto::AtomEnum::STRING.into(),
+                integer: xproto::AtomEnum::INTEGER.into(),
+            },
             timestamp,
             targets,
         })
@@ -130,12 +124,12 @@ impl NativePort {
 
     /// Ask the owner to convert the selection to `target` into the read property.
     fn convert_to(&mut self, target: Atom) -> bool {
-        self.conversion = target;
+        self.conversion.target = target;
         let sent = self.connection.convert_selection(
-            self.window,
-            self.selection,
+            self.conversion.requestor,
+            self.conversion.selection,
             target,
-            self.property,
+            self.conversion.property,
             x11rb::CURRENT_TIME,
         );
         sent.is_ok() && self.connection.flush().is_ok()
@@ -157,7 +151,14 @@ impl NativePort {
         let units = u32::try_from(MAX_NATIVE_TYPES_SCANNED).unwrap_or(u32::MAX);
         let reply = self
             .connection
-            .get_property(true, self.window, self.property, xproto::AtomEnum::ANY, 0, units)
+            .get_property(
+                true,
+                self.conversion.requestor,
+                self.conversion.property,
+                xproto::AtomEnum::ANY,
+                0,
+                units,
+            )
             .ok()?
             .reply()
             .ok()?;
@@ -179,17 +180,18 @@ impl NativePort {
 
 impl SelectionPort for NativePort {
     fn owner(&mut self) -> Option<u32> {
-        let reply = self.connection.get_selection_owner(self.selection).ok()?.reply().ok()?;
+        let reply =
+            self.connection.get_selection_owner(self.conversion.selection).ok()?.reply().ok()?;
         Some(reply.owner)
     }
 
     fn convert(&mut self, target: ConvertTarget) -> bool {
         let target = match target {
-            ConvertTarget::Text => self.utf8,
-            ConvertTarget::Latin1 => xproto::AtomEnum::STRING.into(),
-            ConvertTarget::MimeUtf8 => self.mime_utf8,
-            ConvertTarget::Plain => self.text_plain,
-            ConvertTarget::GenericText => self.generic_text,
+            ConvertTarget::Text => self.atoms.utf8,
+            ConvertTarget::Latin1 => self.atoms.string,
+            ConvertTarget::MimeUtf8 => self.atoms.mime_utf8,
+            ConvertTarget::Plain => self.atoms.plain,
+            ConvertTarget::GenericText => self.atoms.generic_text,
             ConvertTarget::Timestamp => self.timestamp,
             ConvertTarget::Mime(atom) => {
                 self.requested = Some(atom);
@@ -203,17 +205,15 @@ impl SelectionPort for NativePort {
         match self.connection.poll_for_event() {
             Err(_) => Polled::Closed,
             Ok(None) => Polled::Idle,
-            Ok(Some(Event::SelectionNotify(notify)))
-                if notify.requestor == self.window
-                    && notify.selection == self.selection
-                    && notify.target == self.conversion
-                    && (notify.property == self.property || notify.property == x11rb::NONE) =>
-            {
-                Polled::Notify(notify.property != x11rb::NONE)
-            }
+            Ok(Some(Event::SelectionNotify(notify))) => self.conversion.notify(Conversion {
+                requestor: notify.requestor,
+                selection: notify.selection,
+                target: notify.target,
+                property: notify.property,
+            }),
             Ok(Some(Event::PropertyNotify(change)))
-                if change.window == self.window
-                    && change.atom == self.property
+                if change.window == self.conversion.requestor
+                    && change.atom == self.conversion.property
                     && change.state == xproto::Property::NEW_VALUE =>
             {
                 Polled::NewValue
@@ -227,8 +227,8 @@ impl SelectionPort for NativePort {
             .connection
             .get_property(
                 delete,
-                self.window,
-                self.property,
+                self.conversion.requestor,
+                self.conversion.property,
                 xproto::AtomEnum::ANY,
                 0,
                 fetch_length_units(max_bytes),
@@ -236,18 +236,7 @@ impl SelectionPort for NativePort {
             .ok()?
             .reply()
             .ok()?;
-        let kind = match reply.type_ {
-            kind if Some(kind) == self.requested => PropertyKind::Requested,
-            kind if [self.utf8, self.text_plain, self.mime_utf8, self.generic_text]
-                .contains(&kind) =>
-            {
-                PropertyKind::Utf8
-            }
-            kind if kind == Atom::from(xproto::AtomEnum::STRING) => PropertyKind::Latin1,
-            kind if kind == self.incr => PropertyKind::Incr,
-            kind if kind == Atom::from(xproto::AtomEnum::INTEGER) => PropertyKind::Integer,
-            _ => PropertyKind::Other,
-        };
+        let kind = self.atoms.kind(reply.type_, self.requested);
         // The reply's value moves into the result; nothing is copied.
         Some(PropertyReply {
             kind,
@@ -258,7 +247,8 @@ impl SelectionPort for NativePort {
     }
 
     fn delete(&mut self) {
-        let _ = self.connection.delete_property(self.window, self.property);
+        let _ =
+            self.connection.delete_property(self.conversion.requestor, self.conversion.property);
         let _ = self.connection.flush();
     }
 

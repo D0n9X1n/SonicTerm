@@ -354,3 +354,33 @@ fn listed_text_mime_targets_read_back() {
         }
     }
 }
+
+/// A format-32 value has authority only when both the packet and the atom describe TIMESTAMP.
+/// Feed native atom IDs through the adapter's classification, not preclassified fake outcomes.
+#[test]
+fn version_refuses_wrong_conversion_or_format32_atom() {
+    let expected = Conversion { requestor: 10, selection: 11, target: 12, property: 13 };
+    let types = PropertyAtoms {
+        utf8: 20,
+        mime_utf8: 21,
+        plain: 22,
+        generic_text: 23,
+        string: 24,
+        incr: 25,
+        integer: 26,
+    };
+    for (notice, actual, version) in [
+        (expected, 26, Some((5u64 << 32) | 42)),
+        (expected, 19, None),
+        (Conversion { target: 14, ..expected }, 26, None),
+    ] {
+        let property = reply(types.kind(actual, None), 32, 0, &42u32.to_ne_bytes());
+        let mut owner = FakeOwner::answering(vec![property], Polled::Closed);
+        owner.owners = VecDeque::from([5, 5]);
+        owner.events = VecDeque::from([expected.notify(notice)]);
+        assert_eq!(offer_version_with(&mut owner), version);
+        if notice.target != expected.target {
+            assert!(!owner.log.iter().any(|call| call.starts_with("fetch")));
+        }
+    }
+}

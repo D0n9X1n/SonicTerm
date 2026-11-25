@@ -805,3 +805,29 @@ fn refusal_order_alias_names_freed_before_their_reservation() {
     });
     assert_eq!(reading, reserved_with_names, "the names freed while still reserved");
 }
+
+/// Watch an alias allocation at the handoff from planning. The input aliases must be freed
+/// before the combined workspace lease is resized to the (smaller) outgoing native offer.
+#[test]
+fn plan_handoff_keeps_charge_until_aliases_drop() {
+    let mut rig = rig();
+    rig.tx.set_holds(text_and_html);
+    rig.send("type=write");
+    rig.data("text/html", &b64("t"));
+    let alias = "x/".to_owned() + &"a".repeat(100);
+    rig.send(&format!("type=walias:mime={};{}", b64("text/html"), b64(&alias)));
+    let open = rig.tx.open.as_ref().unwrap();
+    let before = open.lease.bytes();
+    let workspace = plan_workspace_bytes(["text/html".len(), alias.len()].into_iter());
+    let address = open.aliases[0].0.as_ptr() as usize;
+    let staging = rig.staging.clone();
+    let reading = crate::app::osc52_stream::reserved_at_free(&staging, address, || {
+        let job = posted_job(&mut rig, "type=wdata");
+        assert!(job.offer.is_some());
+    });
+    assert!(
+        reading >= before + workspace,
+        "handoff held {reading}, expected at least {}",
+        before + workspace
+    );
+}

@@ -213,3 +213,33 @@ fn text_plain_parameters_are_validated() {
         assert!(!is_text(name), "{name:?}");
     }
 }
+
+/// A single small representation stresses Vec's minimum nonzero capacity. The planning charge
+/// covers the observed allocator peak, even when the payload and native copies are empty.
+#[test]
+fn plan_workspace_covers_allocator_peak() {
+    let entries = vec![("x/t".to_owned(), Vec::new())];
+    let bound = crate::app::kitty_clipboard_tx::plan_workspace_bytes([3].into_iter());
+    let counter = crate::lib_tests::CountAllocations::start();
+    let result = plan(entries, &[], &|_, _| true);
+    let peak = counter.peak_bytes();
+    drop(counter);
+    assert!(matches!(result, OfferPlan::Offer(_)));
+    assert!(bound >= peak, "workspace {bound}, peak {peak}");
+}
+
+/// The posted offer remains responsible for the two allocations that hold its vector slots,
+/// not just the payloads. Measure those allocations directly by themselves, including spare slots.
+#[test]
+fn live_plan_reservation_covers_vector_capacities() {
+    let counter = crate::lib_tests::CountAllocations::start();
+    let mut entries = Vec::with_capacity(17);
+    entries.push(Vec::new());
+    let mut representations = Vec::with_capacity(31);
+    representations.push((NativeFormat::Png, 0));
+    let offer = NativeOffer { entries, representations, omitted: 0 };
+    let arrays = counter.peak_bytes();
+    drop(counter);
+    let extra = if cfg!(target_os = "linux") { x11::raw_tables(1) } else { 0 };
+    assert_eq!(offer.reserved_bytes(), arrays + extra, "allocated capacity, not logical length");
+}

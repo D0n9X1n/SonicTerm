@@ -393,10 +393,11 @@ fn after_quoted(mut bytes: &[u8]) -> Option<&[u8]> {
 }
 
 /// The most `plan` allocates for names of `name_lengths` (every staged type, then every alias):
-/// per name, its name-table slot, remap slot, representation slot and kept-buffer slot, and a
+/// per name, an input pair, name-table slot, remap slot, representation and kept-buffer slots, and a
 /// copy of the name when it becomes a custom format.
 pub(in crate::app) fn plan_workspace_bytes(name_lengths: impl Iterator<Item = usize>) -> usize {
-    let per_name = std::mem::size_of::<(&str, usize)>()
+    let per_name = std::mem::size_of::<(String, Vec<u8>)>()
+        + std::mem::size_of::<(&str, usize)>()
         + std::mem::size_of::<Option<usize>>()
         + std::mem::size_of::<(NativeFormat, usize)>()
         + std::mem::size_of::<Vec<u8>>();
@@ -722,7 +723,7 @@ impl KittyClipboardTx {
             return KittyStep::Reply(reply.status(KittyClipboardStatus::Enosys));
         }
         // Planning's own allocations (its name table, index maps and custom format names) are
-        // reserved first at their worst case; the reservation ends once the plan is made.
+        // reserved at fixed upper capacities. Keep the charge until input aliases and scratch drop.
         let names = entries.iter().map(|entry| entry.mime.len());
         let plan_bytes =
             plan_workspace_bytes(names.chain(aliases.iter().map(|(alias, _)| alias.len())));
@@ -730,9 +731,10 @@ impl KittyClipboardTx {
             // When: lease.grow_to cannot cover planning's workspace, the write is busy.
             return KittyStep::Reply(reply.status(KittyClipboardStatus::Ebusy));
         }
-        let entries = entries.into_iter().map(|entry| (entry.mime, entry.data)).collect();
-        let planned = plan(entries, &aliases, &self.holds);
-        lease.shrink_to(lease.bytes() - plan_bytes);
+        let mut pairs = Vec::with_capacity(entries.len());
+        pairs.extend(entries.into_iter().map(|entry| (entry.mime, entry.data)));
+        let planned = plan(pairs, &aliases, &self.holds);
+        drop(aliases);
         let offer = match planned {
             OfferPlan::Offer(offer) => Some(offer),
             OfferPlan::Clear => None,
@@ -764,6 +766,8 @@ impl KittyClipboardTx {
             offer => {
                 // Text alone, or a clear, takes the text path as before.
                 let text = offer.map(NativeOffer::into_text).unwrap_or_default();
+                // The text is now the only plan allocation left; its job sizes any native copies.
+                lease.shrink_to(text.capacity());
                 ClipboardJob::kitty(&self.staging, text, lease, targets, reply.clone())
             }
         };

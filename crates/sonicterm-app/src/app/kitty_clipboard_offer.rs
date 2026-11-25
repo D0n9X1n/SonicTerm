@@ -111,7 +111,9 @@ impl NativeOffer {
             self.representations().map(|(format, bytes)| native_copy_bytes(format, bytes)).sum();
         #[cfg(target_os = "linux")]
         let copies = copies + x11::owner_workspace(self);
-        kept + names + copies
+        let tables = self.entries.capacity() * size_of::<Vec<u8>>()
+            + self.representations.capacity() * size_of::<(NativeFormat, usize)>();
+        kept + names + tables + copies
     }
 
     /// A text-only offer that preserves arbitrary bytes on the macOS pasteboard or X11 selection.
@@ -171,8 +173,9 @@ pub(in crate::app) fn plan(
         return OfferPlan::Clear;
     }
     // Names map to entry indices, so resolving aliases copies no data.
-    let mut names: Vec<(&str, usize)> =
-        entries.iter().enumerate().map(|(index, (name, _))| (name.as_str(), index)).collect();
+    // Fix capacities before filling: push must not geometrically grow beyond the planning lease.
+    let mut names = Vec::with_capacity(entries.len() + aliases.len());
+    names.extend(entries.iter().enumerate().map(|(index, (name, _))| (name.as_str(), index)));
     for (alias, target) in aliases {
         let Some(index) = names.iter().find(|(name, _)| name == target).map(|(_, index)| *index)
         else {
@@ -185,7 +188,7 @@ pub(in crate::app) fn plan(
         }
     }
     let mut omitted = 0;
-    let mut representations: Vec<(NativeFormat, usize)> = Vec::new();
+    let mut representations: Vec<(NativeFormat, usize)> = Vec::with_capacity(names.len());
     for (name, index) in names {
         let bytes = entries[index].1.as_slice();
         let Some(format) = native_format(name).filter(|format| holds(format, bytes)) else {
@@ -203,7 +206,7 @@ pub(in crate::app) fn plan(
         return OfferPlan::Unavailable;
     }
     // Buffers no kept format references are dropped here, so they leave the reservation.
-    let mut kept = Vec::new();
+    let mut kept = Vec::with_capacity(entries.len().min(representations.len()));
     let mut remap = vec![None; entries.len()];
     for (index, (_, bytes)) in entries.into_iter().enumerate() {
         if representations.iter().any(|(_, used)| *used == index) {
@@ -244,7 +247,7 @@ fn native_copy_bytes(format: &NativeFormat, bytes: &[u8]) -> usize {
 /// The bytes a format's native name takes beside its buffer.
 fn format_name_bytes(format: &NativeFormat) -> usize {
     match format {
-        NativeFormat::Custom(name) => name.len(),
+        NativeFormat::Custom(name) => name.capacity(),
         _ => 0,
     }
 }
