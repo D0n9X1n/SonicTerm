@@ -191,9 +191,10 @@ fn x11_unconfirmed_ownership_answers_eio() {
         }
     }
     let mut port = Contested { owner: 42, calls: Vec::new() };
-    assert_eq!(claim(&mut port, 9, &[17], 100, &|| false), Published::Unchanged);
+    assert!(!claim(&mut port, 9, [17, 0], 100, &|| false).committed);
     assert!(port.calls.is_empty());
-    assert_eq!(claim(&mut port, 9, &[17], 100, &|| true), Published::Failed);
+    let result = claim(&mut port, 9, [17, 0], 100, &|| true);
+    assert!(result.committed && !result.written());
     assert_eq!(port.calls, [("set", 17), ("get", 17)]);
     assert_eq!(port.owner, 42);
 }
@@ -262,4 +263,79 @@ fn x11_local_replacement_retires_only_confirmed_selections() {
     assert!(old.owner.live(now));
     old.owner.expire(&mut port, now + Duration::from_secs(5));
     assert!(!old.owner.live(now));
+}
+
+/// CLIPBOARD and PRIMARY have one authorization point. Revocation before that point does not
+/// touch either owner; revocation after the first set cannot turn a committed write into Unchanged.
+#[test]
+fn x11_two_selection_claim_checks_binding_once_before_first_set() {
+    use std::cell::Cell;
+    struct Accepting {
+        sets: Vec<u32>,
+    }
+    impl OwnershipPort for Accepting {
+        fn set_owner(&mut self, _: u32, selection: u32, _: u32) -> bool {
+            self.sets.push(selection);
+            true
+        }
+        fn owner(&mut self, _: u32) -> Option<u32> {
+            Some(9)
+        }
+    }
+    for initially_valid in [false, true] {
+        let mut port = Accepting { sets: Vec::new() };
+        let checks = Cell::new(0);
+        let gate = || {
+            checks.set(checks.get() + 1);
+            initially_valid && checks.get() == 1
+        };
+        let result = claim(&mut port, 9, [17, 1], 100, &gate);
+        assert_eq!(checks.get(), 1, "one commit point for both selections");
+        if initially_valid {
+            assert!(result.written());
+            assert_eq!(port.sets, [17, 1]);
+        } else {
+            assert!(!result.committed);
+            assert!(port.sets.is_empty());
+        }
+    }
+}
+
+/// PRIMARY's newer server timestamp can ignore a successful SetSelectionOwner request. The
+/// confirmed CLIPBOARD window must still serve the bytes and hold the lease, despite EIO.
+#[test]
+fn x11_unconfirmed_primary_keeps_clipboard_serving() {
+    struct Competing {
+        clipboard_owner: u32,
+        primary_owner: u32,
+    }
+    impl OwnershipPort for Competing {
+        fn set_owner(&mut self, window: u32, selection: u32, _: u32) -> bool {
+            if selection == 17 {
+                self.clipboard_owner = window;
+            }
+            true
+        }
+        fn owner(&mut self, selection: u32) -> Option<u32> {
+            Some(if selection == 17 { self.clipboard_owner } else { self.primary_owner })
+        }
+    }
+    let now = Instant::now();
+    let staging = ClipboardStaging::with_budget(4096, 64);
+    let mut data = Port::default();
+    let owner = raw_owner(&mut data, &staging, now);
+    let mut offers = std::collections::HashMap::new();
+    let mut port = Competing { clipboard_owner: 42, primary_owner: 43 };
+    let result =
+        install_claim(&mut offers, &mut port, 9, Active { owner, selections: [17, 1] }, &|| true);
+    assert!(result.committed && !result.written(), "failed, not stale or written");
+    assert_eq!((result.clipboard, result.primary), (TargetOutcome::Taken, TargetOutcome::Refused));
+    assert_eq!((port.clipboard_owner, port.primary_owner), (9, 43));
+    let active = offers.get_mut(&9).expect("the confirmed selection keeps its owner window");
+    assert!(active.accepts(17) && !active.accepts(1));
+    assert!(staging.reserved_bytes() > 0);
+    let target = data.intern("TEXT").unwrap();
+    assert!(active.owner.request(&mut data, dest(8), target, now));
+    active.owner.deleted(&mut data, dest(8), now);
+    assert_eq!(data.bytes.last().unwrap().1, [0xfe; 2]);
 }

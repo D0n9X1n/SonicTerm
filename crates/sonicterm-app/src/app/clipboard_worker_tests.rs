@@ -201,18 +201,20 @@ impl ClipboardSink for FakeClipboard {
         &mut self,
         _offer: NativeOffer,
         _lease: ClipLease,
-        _targets: ClipTargets,
+        targets: ClipTargets,
         binding: WriteBinding,
-    ) -> Published {
+    ) -> WriteResult {
         let mut state = self.state();
         if !binding.may_commit() {
-            return Published::Unchanged;
+            return WriteResult::stale();
         }
         state.offers += 1;
-        if state.refuse_offer {
-            Published::Failed
-        } else {
-            Published::Written
+        let outcome =
+            if state.refuse_offer { TargetOutcome::Refused } else { TargetOutcome::Taken };
+        let result = WriteResult::each(targets, outcome);
+        match state.outcomes.pop_front() {
+            Some((clipboard, primary)) => WriteResult { clipboard, primary, ..result },
+            None => result,
         }
     }
 
@@ -715,4 +717,28 @@ fn x11_confirmed_offer_retires_only_replaced_arboard_share() {
         settle(&mut app);
         assert_eq!(staging.reserved_bytes(), shares * copy_bytes);
     }
+}
+
+/// A cp offer whose PRIMARY claim loses is reported as a native failure, but the worker retires
+/// the old CLIPBOARD share. Different prior sizes identify which share survives settlement.
+#[test]
+fn x11_partial_offer_answers_eio_and_retires_only_clipboard_share() {
+    let staging = ClipboardStaging::with_budget(1 << 20, 1 << 20);
+    let mut retained = crate::app::osc52_stream::RetainedCopies::default();
+    let clipboard = ClipTargets { clipboard: true, primary: false };
+    let primary = ClipTargets { clipboard: false, primary: true };
+    let mut sink = FakeClipboard::holding("old");
+    sink.state().retains = true;
+    for (targets, text) in [(clipboard, "clip"), (primary, "primary")] {
+        let (write, _) = commit_program(&mut sink, job_to(&staging, text, targets), None);
+        retained.retain(write.retained);
+    }
+    let both = ClipTargets { clipboard: true, primary: true };
+    let mut job = offer_job(&staging);
+    job.targets = both;
+    sink.state().outcomes.push_back((TargetOutcome::Taken, TargetOutcome::Refused));
+    let (write, _) = commit_program(&mut sink, job, None);
+    assert_eq!(write.outcome, ClipWriteOutcome::Failed, "partial confirmation answers EIO");
+    retained.retain(write.retained);
+    assert_eq!(retained.bytes(), native_clipboard_bytes("primary"));
 }

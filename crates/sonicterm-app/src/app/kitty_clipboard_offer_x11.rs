@@ -1,8 +1,9 @@
 //! One X11 offer. Atoms index the staged buffers; an INCR cursor borrows a slice on each delete,
 //! so neither text aliases nor simultaneous requestors need private copies of the payload.
 
-use super::{CommitGate, NativeFormat, NativeOffer, Published};
-use crate::app::osc52_stream::ClipLease;
+use super::{CommitGate, NativeFormat, NativeOffer};
+use crate::app::clipboard_worker::{TargetOutcome, WriteResult};
+use crate::app::osc52_stream::{ClipLease, ClipTargets};
 use std::time::{Duration, Instant};
 
 const TEXT_NAMES: [&str; 5] =
@@ -89,21 +90,56 @@ trait OwnershipPort {
 fn claim(
     port: &mut impl OwnershipPort,
     window: u32,
-    selections: &[u32],
+    selections: [u32; 2],
     stamp: u32,
     gate: CommitGate<'_>,
-) -> Published {
-    for &selection in selections {
-        if !gate() {
-            // When: gate refuses, no further SetSelectionOwner is authorized.
-            return Published::Unchanged;
+) -> WriteResult {
+    let targets = ClipTargets { clipboard: selections[0] != 0, primary: selections[1] != 0 };
+    let mut result = WriteResult::each(targets, TargetOutcome::Refused);
+    if !gate() {
+        // When: gate refuses before the first SetSelectionOwner, both selections are untouched.
+        return WriteResult::stale();
+    }
+    for (selection, outcome) in
+        selections.into_iter().zip([&mut result.clipboard, &mut result.primary])
+    {
+        if selection == 0 {
+            // When: selection is zero, this destination was not requested.
+            continue;
         }
         if !port.set_owner(window, selection, stamp) || port.owner(selection) != Some(window) {
-            // When: set_owner failed or owner names another window, never acknowledge this offer.
-            return Published::Failed;
+            // When: set_owner failed or owner names another window, keep only already confirmed selections.
+            break;
+        }
+        *outcome = TargetOutcome::Taken;
+    }
+    result
+}
+
+/// Install the window on each confirmed selection, even when its sibling was refused. An older
+/// window on this connection need not receive SelectionClear, so retire those selections locally.
+fn install_claim(
+    offers: &mut std::collections::HashMap<u32, Active>,
+    port: &mut impl OwnershipPort,
+    window: u32,
+    mut active: Active,
+    gate: CommitGate<'_>,
+) -> WriteResult {
+    let result = claim(port, window, active.selections, active.owner.stamp, gate);
+    for (atom, outcome) in active.selections.iter_mut().zip([result.clipboard, result.primary]) {
+        if outcome == TargetOutcome::Taken {
+            for old in offers.values_mut() {
+                old.retire(*atom);
+            }
+        } else {
+            // When: outcome was not Taken, this window must not serve the selection.
+            *atom = 0;
         }
     }
-    Published::Written
+    if active.selections != [0; 2] {
+        offers.insert(window, active);
+    }
+    result
 }
 
 struct Active {

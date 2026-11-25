@@ -279,7 +279,8 @@ pub(in crate::app) fn platform_holds(format: &NativeFormat, bytes: &[u8]) -> boo
 /// before the clipboard changes: false leaves the clipboard untouched.
 pub(in crate::app) type CommitGate<'gate> = &'gate dyn Fn() -> bool;
 
-/// What one gated publish did to the clipboard.
+/// What one gated publish did to a single native clipboard.
+#[cfg(any(test, not(target_os = "linux")))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::app) enum Published {
     /// Every representation was set.

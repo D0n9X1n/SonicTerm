@@ -166,8 +166,9 @@ cargo build -p sonicterm-app
   Windows (`kitty_clipboard_offer_windows.rs` over the `Win32Clipboard` seam,
   `kitty_clipboard_offer_win32.rs`), which empties the clipboard again when any
   `SetClipboardData` fails. X11 publishes program MIME and raw text through its selection-owner
-  thread (`kitty_clipboard_offer_x11_native.rs`): reserve tables first, check the binding before
-  `SetSelectionOwner`, confirm with `GetSelectionOwner`, and keep the lease through admitted INCRs
+  thread (`kitty_clipboard_offer_x11_native.rs`): reserve tables first, check the binding once before
+  the first `SetSelectionOwner`, and confirm each selection with `GetSelectionOwner`. A later refusal
+  reports failure but keeps the window and retires arboard shares for confirmed selections only. Keep the lease through admitted INCRs
   after `SelectionClear`. User copies remain on arboard. `DONE` only when all published, `EIO` otherwise; the job's
   `KittyReply` is answered on the source PTY when it settles. The worker's `select!` also wakes on
   the staging's policy wakeup and the write's 30 s idle / 10 min absolute deadline. Each ready

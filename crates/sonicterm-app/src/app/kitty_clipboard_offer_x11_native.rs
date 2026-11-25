@@ -19,14 +19,13 @@ use x11rb::wrapper::ConnectionExt as _;
 
 use super::*;
 use crate::app::osc52_read_ticket::WriteBinding;
-use crate::app::osc52_stream::ClipTargets;
 
 struct Command {
     offer: NativeOffer,
     lease: ClipLease,
     targets: ClipTargets,
     binding: WriteBinding,
-    answer: SyncSender<Published>,
+    answer: SyncSender<WriteResult>,
 }
 
 /// FIFO handoff from the clipboard worker. The worker waits for confirmation before taking the
@@ -44,26 +43,26 @@ impl SelectionServer {
         lease: ClipLease,
         targets: ClipTargets,
         binding: WriteBinding,
-    ) -> Published {
+    ) -> WriteResult {
         if self.channel.is_none() {
             self.channel = Self::start();
         }
         let Some((commands, wake)) = self.channel.as_mut() else {
             // When: channel could not start, no X selection was touched.
-            return Published::Failed;
+            return WriteResult::each(targets, TargetOutcome::Refused);
         };
         let (answer, result) = mpsc::sync_channel(1);
         let command = Command { offer, lease, targets, binding, answer };
         if commands.send(command).is_err() || wake.write_all(&[1]).is_err() {
             // When: commands or wake disconnected, drop the socket so the next job can reconnect.
             self.channel = None;
-            return Published::Failed;
+            return WriteResult::each(targets, TargetOutcome::Refused);
         }
         match result.recv() {
             Ok(published) => published,
             Err(_) => {
                 self.channel = None;
-                Published::Failed
+                WriteResult::each(targets, TargetOutcome::Refused)
             }
         }
     }
@@ -191,9 +190,11 @@ impl Server {
                 // When: sockets reports a command wake, one byte names a queued command; EOF ends the server.
                 wake.read_exact(&mut [0]).ok()?;
                 let command = commands.recv().ok()?;
-                let result =
-                    self.install(command.offer, command.lease, command.targets, command.binding);
-                let _ = command.answer.send(result.unwrap_or(Published::Failed));
+                let targets = command.targets;
+                let result = self.install(command.offer, command.lease, targets, command.binding);
+                let _ = command.answer.send(
+                    result.unwrap_or_else(|| WriteResult::each(targets, TargetOutcome::Refused)),
+                );
             }
         }
     }
@@ -204,7 +205,7 @@ impl Server {
         lease: ClipLease,
         targets: ClipTargets,
         binding: WriteBinding,
-    ) -> Option<Published> {
+    ) -> Option<WriteResult> {
         let window = self.port.0.generate_id().ok()?;
         self.port
             .0
@@ -225,8 +226,8 @@ impl Server {
             .check()
             .ok()?;
         let result = self.install_on(window, offer, lease, targets, binding);
-        if result != Some(Published::Written) {
-            // When: result is not Written, destroy only our unconfirmed window.
+        if !self.offers.contains_key(&window) {
+            // When: offers has no entry for window, neither selection needs it to serve data.
             let _ = self.port.0.destroy_window(window);
         }
         result
@@ -239,7 +240,7 @@ impl Server {
         lease: ClipLease,
         targets: ClipTargets,
         binding: WriteBinding,
-    ) -> Option<Published> {
+    ) -> Option<WriteResult> {
         // A property notification supplies real server time. Dispatch unrelated events rather
         // than losing an admitted reader's delete while waiting for the timestamp.
         self.port
@@ -266,28 +267,19 @@ impl Server {
         // ChangeProperty has a 24-byte header and BIG-REQUESTS can add another 4 bytes.
         let direct = self.port.0.maximum_request_bytes().checked_sub(28)? & !3;
         let owner = Owner::stage(&mut self.port, offer, lease, stamp, direct, Instant::now())?;
-        let mut selections = [0; 2];
-        let mut count = 0;
-        for (enabled, atom) in
-            [(targets.clipboard, self.clipboard), (targets.primary, u32::from(AtomEnum::PRIMARY))]
-        {
-            if enabled {
-                selections[count] = atom;
-                count += 1;
-            }
-        }
-        let result =
-            claim(&mut self.port, window, &selections[..count], stamp, &|| binding.may_commit());
-        if result == Published::Written {
-            // X11 need not send SelectionClear between windows of the same client.
-            for active in self.offers.values_mut() {
-                for selection in &selections[..count] {
-                    active.retire(*selection);
-                }
-            }
-            self.offers.insert(window, Active { owner, selections });
-        }
-        Some(result)
+        // Fixed slots retain each destination's identity even for PRIMARY-only offers.
+        let primary = u32::from(AtomEnum::PRIMARY);
+        let selections = [
+            if targets.clipboard { self.clipboard } else { 0 },
+            if targets.primary { primary } else { 0 },
+        ];
+        Some(install_claim(
+            &mut self.offers,
+            &mut self.port,
+            window,
+            Active { owner, selections },
+            &|| binding.may_commit(),
+        ))
     }
 
     fn dispatch(&mut self, event: Event) {

@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 
 use super::event_loop::ClipWriteOutcome;
-use super::kitty_clipboard_offer::{CommitGate, NativeOffer, Published};
+#[cfg(not(target_os = "linux"))]
+use super::kitty_clipboard_offer::Published;
+use super::kitty_clipboard_offer::{CommitGate, NativeOffer};
 use super::kitty_clipboard_tx::KittyReply;
 use super::osc52_read_ticket::WriteBinding;
 use super::osc52_stream::{
@@ -73,7 +75,7 @@ pub(in crate::app) struct WriteRequest<'request> {
     pub(in crate::app) snapshot_max_bytes: Option<usize>,
 }
 
-/// What one text write did.
+/// What one native write did, including independent selection confirmations.
 pub(in crate::app) struct WriteResult {
     /// False when the gate refused at the commit point, so nothing changed.
     pub(in crate::app) committed: bool,
@@ -124,10 +126,10 @@ pub(in crate::app) trait ClipboardSink {
         &mut self,
         _offer: NativeOffer,
         _lease: ClipLease,
-        _targets: ClipTargets,
+        targets: ClipTargets,
         _binding: WriteBinding,
-    ) -> Published {
-        Published::Failed
+    ) -> WriteResult {
+        WriteResult::each(targets, TargetOutcome::Refused)
     }
 
     /// Whether the native clipboard keeps its own copy of each written selection until that
@@ -221,23 +223,18 @@ fn commit_program(
         // When: the job carries an offer, every representation is published in one native call
         // behind the gate. On X11 the owner takes the lease for the lifetime of the offer.
         let mut marker = lease.split_off(0);
-        committed.outcome = match sink.publish_offer(offer, lease, targets, binding) {
-            Published::Written => {
-                if sink.retains_copies() {
-                    // The X11 owner holds the payload lease. Zero-byte taken shares retire only
-                    // the previous arboard copies of the selections it replaced.
-                    let result = WriteResult::each(targets, TargetOutcome::Taken);
-                    committed.retained =
-                        RetainedShares::split(&mut marker, 0, result.clipboard, result.primary);
-                }
-                ClipWriteOutcome::Written
-            }
-            Published::Failed => ClipWriteOutcome::Failed,
-            Published::Unchanged => {
-                // When: Unchanged, the gate refused at the commit point; nothing is answered.
-                return (committed.into_stale(), None);
-            }
-        };
+        let result = sink.publish_offer(offer, lease, targets, binding);
+        if !result.committed {
+            // When: committed is false, the gate refused before either selection was changed.
+            return (committed.into_stale(), None);
+        }
+        if sink.retains_copies() {
+            // The owner holds its own lease. Retire only confirmed arboard shares, even on EIO.
+            committed.retained =
+                RetainedShares::split(&mut marker, 0, result.clipboard, result.primary);
+        }
+        committed.outcome =
+            if result.written() { ClipWriteOutcome::Written } else { ClipWriteOutcome::Failed };
         return (committed, None);
     }
     let reassertable = reassert_delay.is_some()
@@ -917,15 +914,19 @@ impl ClipboardSink for NativeSink {
         lease: ClipLease,
         targets: ClipTargets,
         binding: WriteBinding,
-    ) -> Published {
+    ) -> WriteResult {
         #[cfg(target_os = "linux")]
         {
             self.owner.publish(offer, lease, targets, binding)
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _retained = (lease, targets);
-            super::kitty_clipboard_offer::publish_native(&offer, &|| binding.may_commit())
+            let _retained = lease;
+            match super::kitty_clipboard_offer::publish_native(&offer, &|| binding.may_commit()) {
+                Published::Written => WriteResult::each(targets, TargetOutcome::Taken),
+                Published::Failed => WriteResult::each(targets, TargetOutcome::Refused),
+                Published::Unchanged => WriteResult::stale(),
+            }
         }
     }
 }
