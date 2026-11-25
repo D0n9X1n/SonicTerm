@@ -619,11 +619,10 @@ overlays are assembled separately.
 
 The CPU `GlyphAtlas` is a square BGRA8 texture that grows on demand up to
 2048×2048 (16 MiB at four bytes per pixel), with at most 16,384 indexed
-entries. A normal renderer starts at `START_ATLAS_DIM_1X` at scale factors up
-to 1.5 and `START_ATLAS_DIM_2X` above; both are 2048, so a normal renderer
-keeps the full allocation it has always had. A warm spare window starts at the
-256 floor, since it may never draw, and grows after adoption; the memory saving
-applies to warm spares only. When a tile does not fit, the atlas doubles first: resident tiles keep
+entries. A normal renderer starts at `START_ATLAS_DIM_1X` (1024, 4 MiB) at
+scale factors up to 1.5 and `START_ATLAS_DIM_2X` (512, 1 MiB) above. A warm
+spare window starts at the 256 floor, since it may never draw, and grows after
+adoption. When a tile does not fit, the atlas doubles first: resident tiles keep
 their pixel positions, their pixels are copied, their UVs are recomputed, and
 one typed re-upload rectangle per tile is queued; nothing is rasterized again.
 Growth advances the atlas identity, so the frame that grew it is discarded and
@@ -643,7 +642,20 @@ unless all three hold: `SIZING_ORACLE_COMPLETE` is true; the table records
 every required input at that scale (the perf S9 and S12 end-of-run atlas on
 macOS and Windows at scale 1, the working-set helper on both platforms and the
 Windows real renderer for S9 and S12 at each scale); and the start rule over
-those rows selects exactly that size. A measurement that drew any required
+those rows selects exactly that size.
+
+The rule depends on where a growth would land. The perf scenarios run at scale
+1 (`PERF_SCALE`), so there every row sizes the start, including the working-set
+helper's superset, and a scenario never grows the atlas inside a measurement.
+No perf scenario runs at scale 2, so there only the rows that measured a real
+renderer decide the start (`decides_start`). The helper rows still bound growth:
+each must fit within the maximum with no tofu, or the start is the maximum. A 2x
+window that draws more than its start holds doubles toward 2048, at the cost of
+one retried frame per doubling. The working-set step and its local fallback
+check a helper the same way (`helper_bound`): at scale 1 the start must hold its
+need, and at scale 2 it must fit the maximum.
+
+A measurement that drew any required
 glyph as tofu (unresolved, resolved but not rasterized, or too large to place)
 selects 2048, so it
 can never justify a smaller start. Each `glyph_atlas_working_set` row reports
@@ -696,8 +708,8 @@ comparison is exact. On CI a difference fails the step with "re-record the helpe
 rows on <host image>" and names the recording image; identical rows on another
 image pass and print the image mismatch as a note. Off CI, a host on another image
 prints the differences as advisory. Completeness (`incomplete_glyphs` 0), no
-unapproved raster failure and a live fit within the start constant stay mandatory
-on every host. Re-recording also updates the recorded image. To re-record, let CI run on the head that
+unapproved raster failure and a live fit within `helper_bound`'s limit (the start at
+scale 1, the maximum at scale 2) stay mandatory on every host. Re-recording also updates the recorded image. To re-record, let CI run on the head that
 changes the working set, then copy every `glyph_atlas_working_set ...
 source=helper` line (and, when the real renderer changed, every
 `source=real_renderer` line) with its job id and log line into the table,

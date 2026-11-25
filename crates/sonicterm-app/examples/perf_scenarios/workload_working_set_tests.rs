@@ -16,7 +16,7 @@ fn glyph_atlas_working_set() {
     use sonicterm_text::glyph_atlas::{START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
     use sonicterm_text::recording_image::{drift_policy, HostImage};
     use sonicterm_text::start_size_inputs::{
-        ruled_start, start_rule, validate_table_start, RuleInput, SIZING_ORACLE_COMPLETE,
+        helper_bound, ruled_start, validate_table_start, RuleInput, SIZING_ORACLE_COMPLETE,
         START_SIZE_INPUTS,
     };
     let font_dirs =
@@ -131,19 +131,22 @@ fn glyph_atlas_working_set() {
                 incomplete_glyphs,
             });
         }
-        match start_rule(&local) {
-            Ok(need) => {
+        match helper_bound(scale, constant, &local) {
+            Ok(bound) => {
                 println!(
                     "glyph_atlas_working_set platform={platform} scale={scale} need={} \
-                     constant={constant} verdict={}",
-                    need.dim, need.verdict
+                     constant={constant} limit={} verdict={}",
+                    bound.need.dim, bound.limit, bound.need.verdict
                 );
-                if constant < need.dim {
-                    // When: constant is below need.dim, this platform's working set overflows it.
-                    failures.push(format!("{scale}x needs {} but starts at {constant}", need.dim));
+                if bound.limit < bound.need.dim {
+                    // When: limit is below need.dim, this platform's working set overflows it.
+                    failures.push(format!(
+                        "{scale}x needs {} but holds {} (start {constant})",
+                        bound.need.dim, bound.limit
+                    ));
                 }
             }
-            Err(error) => failures.push(format!("{scale}x has no measured need: {error}")),
+            Err(error) => failures.push(format!("{scale}x helper bound: {error}")),
         }
     }
     if !failures.is_empty() {
@@ -391,11 +394,23 @@ fn a_locally_measured_helper_gets_the_producers_checks() {
     let error = validate_local_helper(&drifted, "windows", "S9", 1, &exact).unwrap_err();
     assert!(error.contains("drifted from its recorded helper row"), "{error}");
 
-    // With no recorded row, only the start size can refuse a complete measurement.
+    // With no recorded row, only the start size can refuse a complete measurement at 1x, where the
+    // start must hold it; at 2x the atlas grows to it, so the same need passes.
     let oversized = local_helper(FitOutcome::Fits(2048), [40, 40]);
     let error = validate_local_helper(&oversized, "nowhere", "S9", 1, &exact).unwrap_err();
-    assert!(error.contains("needs 2048 but starts at 1024"), "{error}");
+    assert!(error.contains("needs 2048 but holds 1024 (start 1024)"), "{error}");
     assert_eq!(validate_local_helper(&oversized, "nowhere", "S9", 2, &exact), Ok(Vec::new()));
+
+    // At 2x a helper that does not fit even the maximum is refused: every non-fit outcome rules the
+    // maximum, so growth to the maximum must be checked as a fit, not as a need, under any policy.
+    let advisory = DriftPolicy::Advisory;
+    for outcome in [FitOutcome::DoesNotFit, FitOutcome::FitsWithoutHeadroom, FitOutcome::Evicted] {
+        let unfit = local_helper(outcome, [40, 40]);
+        for policy in [&exact, &advisory] {
+            let error = validate_local_helper(&unfit, "nowhere", "S9", 2, policy).unwrap_err();
+            assert!(error.contains("cannot bound growth"), "{outcome:?} {policy:?}: {error}");
+        }
+    }
 }
 
 /// The renderer fixture's local fallback runs those checks before it uses the measured tiles; a

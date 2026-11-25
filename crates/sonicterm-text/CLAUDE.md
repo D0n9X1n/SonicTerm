@@ -48,10 +48,13 @@ cargo build -p sonicterm-text
   capacity. Pixels move only with growth; the dirty list grows with inserts
   and a drain shrinks it to 64 rects once it exceeds 1,024, so even a fixed
   atlas's figure varies. A test bounding memory must assert the term it means.
-- `START_ATLAS_DIM_1X` is 1024 and `START_ATLAS_DIM_2X` is 2048, each equal to
+- `START_ATLAS_DIM_1X` is 1024 and `START_ATLAS_DIM_2X` is 512, each equal to
   `start_size_inputs::ruled_start` over `START_SIZE_INPUTS` at its scale; a unit
   test checks the equality, because `validate_table_start` accepts the maximum
-  unconditionally. Warm spares start at `MIN_ATLAS_DIM`. The table holds 64 CI
+  unconditionally. At `PERF_SCALE` (1) every row sizes the start; elsewhere only
+  rows `decides_start` admits (not `Helper`) do, and helper rows only bound growth:
+  one incomplete or not fitting selects the maximum. The working-set step and its
+  fallback check helpers through `helper_bound` (start at 1x, maximum at 2x). Warm spares start at `MIN_ATLAS_DIM`. The table holds 64 CI
   rows, each with its `Provenance` (run, attempt, measured SHA, side, pull
   request, set and origin): 32 perf-end rows from a Performance comparison's
   base side, 8 helper rows and 24 Windows real-renderer rows, kept apart by

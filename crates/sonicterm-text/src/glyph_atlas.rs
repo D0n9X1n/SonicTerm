@@ -45,9 +45,11 @@ pub const MIN_ATLAS_DIM: u32 = 256;
 /// starts at 4 MiB and grows by doubling when it needs more; warm spares start at
 /// [`MIN_ATLAS_DIM`].
 pub const START_ATLAS_DIM_1X: u32 = 1024;
-/// Start dimension of a normal scale-2 renderer's glyph atlas, chosen the same way at scale 2. The
-/// largest scale-2 working set fits only 2048, so this is the maximum and saves nothing.
-pub const START_ATLAS_DIM_2X: u32 = 2048;
+/// Start dimension of a normal scale-2 renderer's glyph atlas, chosen by the same rule. No perf
+/// scenario runs at scale 2, so the rows that measured a real renderer decide it (512, 1 MiB) and
+/// the helper's superset only bounds growth: a window that draws more doubles toward
+/// [`ATLAS_DIM`] at the cost of one retried frame per doubling.
+pub const START_ATLAS_DIM_2X: u32 = 512;
 /// Dirty-list capacity above which a drained list is shrunk, so one growth re-upload of
 /// thousands of tiles does not pin its capacity for the atlas's lifetime.
 pub const DIRTY_LIST_SHRINK_ABOVE: usize = 1024;

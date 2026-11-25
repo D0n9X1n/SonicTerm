@@ -10,7 +10,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use sonicterm_gpu::core::{
-    unpad_readback_rows, GlyphAtlasStart, GpuRenderer, PresentOutcome, RendererSettings,
+    start_dim, unpad_readback_rows, GlyphAtlasStart, GpuRenderer, PresentOutcome, RendererSettings,
     SurfaceAppearance,
 };
 use sonicterm_gpu::device_errors::GpuFaultKind;
@@ -99,6 +99,19 @@ fn counting_renderer(
     font_px: f32,
     size: PhysicalSize<u32>,
 ) -> Result<(Arc<Window>, GpuRenderer), String> {
+    renderer_starting_at(active, role, software, font_px, size, GlyphAtlasStart::Minimum)
+}
+
+/// [`counting_renderer`] whose glyph atlas starts as `start` says: the 256 floor for `Minimum`,
+/// the size a window at its native scale starts at for `Normal`.
+fn renderer_starting_at(
+    active: &ActiveEventLoop,
+    role: &'static str,
+    software: bool,
+    font_px: f32,
+    size: PhysicalSize<u32>,
+    start: GlyphAtlasStart,
+) -> Result<(Arc<Window>, GpuRenderer), String> {
     let window = Arc::new(
         active
             .create_window(
@@ -130,7 +143,7 @@ fn counting_renderer(
             software_render_mode: mode,
         },
         role,
-        glyph_atlas_start: GlyphAtlasStart::Minimum,
+        glyph_atlas_start: start,
     };
     let mut renderer = match GpuRenderer::new(window.clone(), active, &Theme::default(), settings) {
         Ok(renderer) => renderer,
@@ -737,11 +750,55 @@ fn two_growths_in_one_frame(active: &ActiveEventLoop) -> Result<(), String> {
     reconciles(&renderer)
 }
 
+/// A normal window's atlas starts at the size its native scale selects (`start_dim`): 1024 at
+/// scale 1, 512 at scale 2, never the maximum. It draws a frame there without growing, and its GPU
+/// upload has the same size (GDI keeps a 1x1 upload). Growth from any start is the cases above.
+fn normal_start(active: &ActiveEventLoop, software: bool) -> Result<(), String> {
+    let size = PhysicalSize::new(480, 120);
+    let role = if software { "atlas-normal-gdi" } else { "atlas-normal-wgpu" };
+    let (window, mut renderer) = match renderer_starting_at(
+        active,
+        role,
+        software,
+        SLIDING_FONT_PX,
+        size,
+        GlyphAtlasStart::Normal,
+    ) {
+        Err(reason) if reason.starts_with("HOST_INCAPABLE") => {
+            // When: the host cannot create a wgpu renderer, report the capability, not a pass.
+            println!("capability=HOST_INCAPABLE case={role} reason={reason}");
+            return Ok(());
+        }
+        other => other?,
+    };
+    let scale = window.scale_factor() as f32;
+    let expected = start_dim(scale, GlyphAtlasStart::Normal);
+    println!("glyph_atlas_normal_start case={role} scale={scale} dim={expected}");
+    check(
+        renderer.glyph_atlas_facts().dim == expected,
+        &format!(
+            "{role}: starts at {} at scale {scale}, want {expected}",
+            renderer.glyph_atlas_facts().dim
+        ),
+    )?;
+    let mut grid = sliding_grid();
+    slide_to(&mut grid, 0);
+    present(&mut renderer, &window, &mut grid)?;
+    check(renderer.glyph_atlas_facts().growths == 0, &format!("{role}: one key never grows it"))?;
+    let ((cpu_w, cpu_h), gpu) = renderer.__test_glyph_atlas_dimensions();
+    check((cpu_w, cpu_h) == (expected, expected), &format!("{role}: CPU atlas {cpu_w}x{cpu_h}"))?;
+    let expected_gpu = if software { (1, 1) } else { (expected, expected) };
+    check(gpu == expected_gpu, &format!("{role}: the upload is {gpu:?}, want {expected_gpu:?}"))?;
+    reconciles(&renderer)
+}
+
 fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
     let mut failures = Vec::new();
     for (name, case) in [
         ("growth retry wgpu", (|active| growth_retry(active, false)) as fn(&ActiveEventLoop) -> _),
         ("growth retry gdi", |active| growth_retry(active, true)),
+        ("normal start wgpu", |active| normal_start(active, false)),
+        ("normal start gdi", |active| normal_start(active, true)),
         ("growth with eviction", growth_with_eviction),
         ("growth then device loss", growth_then_device_loss),
         ("two growths in one frame", two_growths_in_one_frame),
