@@ -320,7 +320,9 @@ fn every_dispatch_wrapper_settles_focus_after_its_event() {
     for dispatch in ["self.do_window_event(", "self.do_user_event("] {
         let at = source.find(dispatch).expect(dispatch);
         let after = &source[at..];
-        let next_statement = after.find(";\n").map(|end| &after[end + 2..]).expect(dispatch);
+        // The statement ends at its `;`; the next one follows after any whitespace, so a CRLF
+        // checkout (Windows) reads the same as an LF one.
+        let next_statement = after.find(';').map(|end| &after[end + 1..]).expect(dispatch);
         assert!(
             next_statement.trim_start().starts_with("self.after_dispatch();"),
             "{dispatch} is not followed by after_dispatch"
