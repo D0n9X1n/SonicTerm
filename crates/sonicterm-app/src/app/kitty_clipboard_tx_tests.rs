@@ -443,7 +443,10 @@ fn event_loop_denial_answers_eperm_on_source_pane() {
 struct PanickingSink;
 
 impl super::super::clipboard_worker::ClipboardSink for PanickingSink {
-    fn write(&mut self, _text: &str, _targets: ClipTargets) -> bool {
+    fn write(
+        &mut self,
+        _request: super::super::clipboard_worker::WriteRequest<'_>,
+    ) -> super::super::clipboard_worker::WriteResult {
         panic!("the clipboard worker dies in its native call");
     }
 }

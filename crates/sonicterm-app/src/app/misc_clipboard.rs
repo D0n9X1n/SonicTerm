@@ -1,6 +1,7 @@
 //! Window-local clipboard copy, paste and refusal handling.
 
 use super::*;
+use crate::app::clipboard_worker::{TargetOutcome, WriteResult};
 use crate::app::osc52_stream::ClipTargets;
 
 /// Whether paste trusts the native clipboard's copied-file list: Windows reads `CF_HDROP` and
@@ -22,11 +23,21 @@ impl App {
         text: &str,
         targets: ClipTargets,
     ) -> bool {
+        self.write_clipboard_inline_targets(text, targets).written()
+    }
+
+    /// [`Self::write_clipboard_inline`] with each selection's outcome: refused when nothing could
+    /// be written, unknown when a native call failed after it may have stored the text.
+    pub(in crate::app) fn write_clipboard_inline_targets(
+        &mut self,
+        text: &str,
+        targets: ClipTargets,
+    ) -> WriteResult {
         #[cfg(any(test, feature = "test-support"))]
         if self.testing.test_clipboard_write_failure {
             // When: `test_clipboard_write_failure` is true, reject at the set_text
             // boundary without changing the in-memory or system clipboard.
-            return false;
+            return WriteResult::each(targets, TargetOutcome::Refused);
         }
         if self.test_clipboard_installed() {
             // When: test_clipboard_installed, keep the copy off the system clipboard; like a
@@ -35,14 +46,14 @@ impl App {
                 self.testing.test_clipboard_text = Some(text.to_owned());
                 self.testing.test_clipboard_files = None;
             }
-            return true;
+            return WriteResult::each(targets, TargetOutcome::Taken);
         }
         let Some(clipboard) = self.clipboard.as_mut() else {
             // When: no clipboard handle was created, no write occurred and callers
             // must preserve any selection that depends on confirmed delivery.
-            return false;
+            return WriteResult::each(targets, TargetOutcome::Refused);
         };
-        crate::app::clipboard_worker::write_native_clipboard(clipboard, text, targets)
+        crate::app::clipboard_worker::write_native_targets(clipboard, text, targets)
     }
 
     /// Whether a test buffer stands in for the native clipboard.

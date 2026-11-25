@@ -10,18 +10,18 @@
 //! proven: its program writes over that limit are refused.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 
 use super::event_loop::ClipWriteOutcome;
+use super::kitty_clipboard_offer::{CommitGate, NativeOffer, Published};
+use super::kitty_clipboard_tx::KittyReply;
+use super::osc52_read_ticket::WriteBinding;
 use super::osc52_stream::{
     native_clipboard_bytes, reassert_eligible, ClipLease, ClipTargets, ClipboardJob,
-    MACOS_PROGRAM_WRITE_LIMIT_BYTES, MAX_PROGRAM_CLIPBOARD_JOBS, REASSERT_MAX_UTF16_UNITS,
+    RetainedShares, MACOS_PROGRAM_WRITE_LIMIT_BYTES, MAX_PROGRAM_CLIPBOARD_JOBS,
+    REASSERT_MAX_UTF16_UNITS,
 };
 use super::spawn_pane::ClipAttempts;
 use super::UserEvent;
@@ -38,39 +38,106 @@ const OSC52_CLIPBOARD_REASSERT_DELAY: Duration = Duration::from_millis(150);
 /// The largest `CF_UNICODETEXT` block a pre-write snapshot reads: 512 KiB, terminator included.
 pub(super) const SNAPSHOT_MAX_BLOCK_BYTES: usize = 2 * REASSERT_MAX_UTF16_UNITS;
 
-/// The native clipboard calls a program write or user copy makes; tests substitute a fake.
-pub(super) trait ClipboardSink {
-    /// Write `text` to `targets`, an empty text clearing them; true when every target took it.
-    fn write(&mut self, text: &str, targets: ClipTargets) -> bool;
+/// What one selection did with a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::app) enum TargetOutcome {
+    /// The write did not name this selection.
+    Untouched,
+    /// The selection took the text.
+    Taken,
+    /// The selection surely kept its previous value.
+    Refused,
+    /// The native call failed after it may have stored the text, so either value may be held.
+    Unknown,
+}
 
-    /// The clipboard's change counter, where the platform has one (Windows).
-    fn sequence(&mut self) -> Option<u32> {
-        None
+impl TargetOutcome {
+    /// Whether the selection holds the write, or was not asked to.
+    pub(in crate::app) fn took(self) -> bool {
+        matches!(self, Self::Taken | Self::Untouched)
+    }
+}
+
+/// One text write a sink makes.
+pub(in crate::app) struct WriteRequest<'request> {
+    /// The text; an empty text clears the selections.
+    pub(in crate::app) text: &'request str,
+    /// The selections it goes to.
+    pub(in crate::app) targets: ClipTargets,
+    /// Checked at the commit point, immediately before the native call changes anything.
+    pub(in crate::app) gate: CommitGate<'request>,
+    /// Read the value the write replaces, when its native block is at most this many bytes, in
+    /// the same native acquisition and before `gate` (Windows).
+    // Only the Windows sink reads it; other sinks have no reassertion to read for.
+    #[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+    pub(in crate::app) snapshot_max_bytes: Option<usize>,
+}
+
+/// What one text write did.
+pub(in crate::app) struct WriteResult {
+    /// False when the gate refused at the commit point, so nothing changed.
+    pub(in crate::app) committed: bool,
+    /// The standard clipboard's outcome.
+    pub(in crate::app) clipboard: TargetOutcome,
+    /// PRIMARY's outcome.
+    pub(in crate::app) primary: TargetOutcome,
+    /// The value the write replaced, when it was asked for and readable.
+    pub(in crate::app) replaced: Option<Snapshot>,
+}
+
+impl WriteResult {
+    /// The gate refused at the commit point: nothing changed.
+    pub(in crate::app) fn stale() -> Self {
+        let untouched = TargetOutcome::Untouched;
+        Self { committed: false, clipboard: untouched, primary: untouched, replaced: None }
     }
 
-    /// The current text, when its native block is at most `max_block_bytes`.
-    fn snapshot(&mut self, _max_block_bytes: usize) -> Option<Snapshot> {
-        None
+    /// Every selection `targets` names had `outcome`.
+    pub(in crate::app) fn each(targets: ClipTargets, outcome: TargetOutcome) -> Self {
+        let pick = |named: bool| if named { outcome } else { TargetOutcome::Untouched };
+        let (clipboard, primary) = (pick(targets.clipboard), pick(targets.primary));
+        Self { committed: true, clipboard, primary, replaced: None }
     }
 
-    /// Whether the clipboard holds exactly `snapshot`: the same block size, then the same units.
-    fn holds(&mut self, _snapshot: &Snapshot) -> bool {
+    /// Whether the write committed and every selection it named took the text.
+    pub(in crate::app) fn written(&self) -> bool {
+        self.committed && self.clipboard.took() && self.primary.took()
+    }
+}
+
+/// The native clipboard calls a program write or user copy makes; tests substitute a fake. Every
+/// call that changes the clipboard checks its gate at the commit point, inside the native
+/// acquisition, after any read or comparison and immediately before the change.
+pub(in crate::app) trait ClipboardSink {
+    /// Write `request.text` to its selections behind `request.gate`.
+    fn write(&mut self, request: WriteRequest<'_>) -> WriteResult;
+
+    /// Write `text` to the standard clipboard again only while it holds exactly `previous`,
+    /// compared and replaced in one native acquisition with `gate` checked after the comparison;
+    /// true when it wrote. Only Windows reasserts.
+    fn reassert(&mut self, _text: &str, _previous: &Snapshot, _gate: CommitGate<'_>) -> bool {
         false
     }
 
-    /// Publish every representation of `offer` in one native operation; true when it took all.
-    fn publish_offer(&mut self, _offer: &super::kitty_clipboard_offer::NativeOffer) -> bool {
-        false
+    /// Publish every representation of `offer` in one native operation behind `gate`.
+    fn publish_offer(&mut self, _offer: &NativeOffer, _gate: CommitGate<'_>) -> Published {
+        Published::Failed
+    }
+
+    /// Whether the native clipboard keeps its own copy of each written selection until that
+    /// selection is replaced, as arboard does on Linux.
+    fn retains_copies(&self) -> bool {
+        cfg!(target_os = "linux")
     }
 }
 
 /// Clipboard text read before a write: its native block size and its UTF-16 units.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(super) struct Snapshot {
+pub(in crate::app) struct Snapshot {
     /// The native block's size in bytes, which a later comparison must match exactly.
-    pub(super) block_bytes: usize,
+    pub(in crate::app) block_bytes: usize,
     /// The text up to its terminator.
-    pub(super) units: Vec<u16>,
+    pub(in crate::app) units: Vec<u16>,
 }
 
 /// One delayed reassertion the worker holds until it is due or a newer job cancels it.
@@ -81,8 +148,8 @@ struct PendingReassert {
     previous: Snapshot,
     /// Covers `text`, its native copy and `previous` until the reassertion settles.
     _lease: ClipLease,
-    /// The policy epoch the write was posted under.
-    epoch: u64,
+    /// What the write was admitted under; the reassertion is refused once it no longer holds.
+    binding: WriteBinding,
     /// When the reassertion runs.
     due: Instant,
 }
@@ -93,113 +160,125 @@ pub(super) struct Committed {
     pub(super) outcome: ClipWriteOutcome,
     /// The text's length, for the status line.
     pub(super) bytes: usize,
-    /// The selections it went to.
-    pub(super) targets: ClipTargets,
-    /// The part of the lease covering arboard's retained copy (Linux), held until SonicTerm's next
-    /// write to that selection replaces it.
-    pub(super) retained: Option<ClipLease>,
-    /// Where an OSC 5522 write's status goes.
-    pub(super) kitty: Option<super::kitty_clipboard_tx::KittyReply>,
+    /// Each selection's share of the lease covering arboard's retained copy (Linux), held until
+    /// that selection is known to be replaced.
+    pub(super) retained: RetainedShares,
+    /// Where an OSC 5522 write's status goes; `None` for OSC 52 and for a write dropped because
+    /// its binding no longer held, which answers nothing.
+    pub(super) kitty: Option<KittyReply>,
+    /// What the write was admitted under, which decides whether its status may still be sent.
+    pub(super) binding: WriteBinding,
 }
 
-/// Commit one program write through `sink`: refused when the policy epoch moved since it was
-/// posted, else the native call, which is the commit point. With `reassert_delay`, a write
-/// within the reassertion bound first snapshots the value it replaces and, once written, arms one
-/// reassertion that keeps the lease; otherwise the lease is released when the call returns.
+impl Committed {
+    /// A write that settled as `outcome` without anything retained; dropping `job` releases its
+    /// lease and program slot.
+    fn settled(job: ClipboardJob, outcome: ClipWriteOutcome) -> Self {
+        let bytes = job.offer.as_ref().map_or(job.text.len(), NativeOffer::byte_len);
+        let ClipboardJob { kitty, binding, .. } = job;
+        let retained = RetainedShares::default();
+        Self { outcome, bytes, retained, kitty, binding }
+    }
+
+    /// A write its binding no longer authorizes: dropped with no clipboard change and no status.
+    fn stale(job: ClipboardJob) -> Self {
+        Self::settled(job, ClipWriteOutcome::Denied).into_stale()
+    }
+
+    /// This write, refused at its commit point: denied, and its program is not answered.
+    fn into_stale(mut self) -> Self {
+        self.outcome = ClipWriteOutcome::Denied;
+        self.kitty = None;
+        self
+    }
+}
+
+/// Commit one program write through `sink`. Its binding is the gate the sink checks at the commit
+/// point, inside the native acquisition and after any read of the value it replaces, so a write
+/// that lost its authority (a policy change; for an approved write, its pane, PTY, command or
+/// READONLY state) is dropped with no clipboard change and no status. With `reassert_delay`, a
+/// write within the reassertion bound reads the value it replaces in that same acquisition and,
+/// once written, arms one reassertion that keeps the lease; otherwise the lease is released when
+/// the call returns.
 fn commit_program(
     sink: &mut dyn ClipboardSink,
     job: ClipboardJob,
-    epoch: u64,
-    live_epoch: &AtomicU64,
     reassert_delay: Option<Duration>,
 ) -> (Committed, Option<PendingReassert>) {
     // The program slot stays in `job` until this returns, after the native call.
-    let ClipboardJob { text, targets, mut lease, kitty, offer, .. } = job;
-    let mut committed = Committed {
-        outcome: ClipWriteOutcome::Denied,
-        bytes: offer.as_ref().map_or(text.len(), |offer| offer.byte_len()),
-        targets,
-        retained: None,
-        kitty,
-    };
-    if epoch != live_epoch.load(Ordering::SeqCst) {
-        // When: the policy epoch moved after the write was posted, a reload denied OSC 52 since.
-        return (committed, None);
-    }
+    let ClipboardJob { text, targets, mut lease, kitty, offer, binding, .. } = job;
+    let bytes = offer.as_ref().map_or(text.len(), NativeOffer::byte_len);
+    let (outcome, retained) = (ClipWriteOutcome::Denied, RetainedShares::default());
+    let mut committed = Committed { outcome, bytes, retained, kitty, binding: binding.clone() };
+    let gate = || binding.may_commit();
     if let Some(offer) = offer {
-        // When: the job carries an offer, every representation is published in one native call,
-        // never reasserted; the lease ends when the call returns.
-        let published = sink.publish_offer(&offer);
-        committed.outcome =
-            if published { ClipWriteOutcome::Written } else { ClipWriteOutcome::Failed };
+        // When: the job carries an offer, every representation is published in one native call
+        // behind the gate, never reasserted; the lease ends when the call returns.
+        committed.outcome = match sink.publish_offer(&offer, &gate) {
+            Published::Written => ClipWriteOutcome::Written,
+            Published::Failed => ClipWriteOutcome::Failed,
+            Published::Unchanged => {
+                // When: Unchanged, the gate refused at the commit point; nothing is answered.
+                return (committed.into_stale(), None);
+            }
+        };
         return (committed, None);
     }
     let reassertable = reassert_delay.is_some()
         && targets.clipboard
         && !text.is_empty()
         && reassert_eligible(&text);
-    let previous = reassertable.then(|| snapshot_previous(sink, &mut lease)).flatten();
-    if !sink.write(&text, targets) {
-        // When: sink.write was refused by the native clipboard, nothing is kept or reasserted.
+    let base = lease.bytes();
+    // The largest replaced value is reserved before it is read; no reassertion when it cannot be.
+    let snapshot_max_bytes = (reassertable && lease.grow_to(base + SNAPSHOT_MAX_BLOCK_BYTES))
+        .then_some(SNAPSHOT_MAX_BLOCK_BYTES);
+    let result = sink.write(WriteRequest { text: &text, targets, gate: &gate, snapshot_max_bytes });
+    let kept = result.replaced.as_ref().map_or(0, |snapshot| snapshot.units.capacity() * 2);
+    lease.shrink_to(base + kept);
+    if !result.committed {
+        // When: result.committed is false, the gate refused at the commit point; nothing changed
+        // and nothing is answered.
+        return (committed.into_stale(), None);
+    }
+    if sink.retains_copies() {
+        // Each selection that took the text, or may have, keeps one native copy's share until it
+        // is replaced, even when the other selection refused the write.
+        let (clipboard, primary) = (result.clipboard, result.primary);
+        let copy_bytes = native_clipboard_bytes(&text);
+        committed.retained = RetainedShares::split(&mut lease, copy_bytes, clipboard, primary);
+    }
+    if !result.written() {
+        // When: result.written() is false, a selection did not take the write; nothing is
+        // reasserted.
         committed.outcome = ClipWriteOutcome::Failed;
         return (committed, None);
     }
     committed.outcome = ClipWriteOutcome::Written;
-    if let (Some(delay), Some(previous)) = (reassert_delay, previous) {
+    if let (Some(delay), Some(previous)) = (reassert_delay, result.replaced) {
         // When: delay is set and previous was read, one reassertion is armed and holds the lease.
         let due = Instant::now() + delay;
-        return (committed, Some(PendingReassert { text, previous, _lease: lease, epoch, due }));
-    }
-    if cfg!(target_os = "linux") {
-        // When: target_os is Linux, arboard keeps a copy until the selection is replaced.
-        lease.shrink_to(native_clipboard_bytes(&text));
-        committed.retained = Some(lease);
+        return (committed, Some(PendingReassert { text, previous, _lease: lease, binding, due }));
     }
     (committed, None)
 }
 
-/// Read the value a reassertable write replaces, reserving the largest snapshot on `lease` first;
-/// `None` when it is unreadable, too large, or the budget cannot cover the read.
-fn snapshot_previous(sink: &mut dyn ClipboardSink, lease: &mut ClipLease) -> Option<Snapshot> {
-    let base = lease.bytes();
-    if !lease.grow_to(base + SNAPSHOT_MAX_BLOCK_BYTES) {
-        // When: grow_to fails, the staging budget cannot cover the read; no reassertion.
-        return None;
-    }
-    let snapshot = sink.snapshot(SNAPSHOT_MAX_BLOCK_BYTES);
-    let kept = snapshot.as_ref().map_or(0, |snapshot| snapshot.units.capacity() * 2);
-    lease.shrink_to(base + kept);
-    snapshot
-}
-
-/// Run one due reassertion: write the program's text again only while the policy epoch is
-/// unchanged, the clipboard holds exactly the value the write replaced, and its change counter
-/// did not move during that comparison, so a newer value always wins. True when it wrote.
-fn reassert(
-    sink: &mut dyn ClipboardSink,
-    pending: PendingReassert,
-    live_epoch: &AtomicU64,
-) -> bool {
-    if pending.epoch != live_epoch.load(Ordering::SeqCst) {
-        // When: the pending epoch differs from live_epoch, a reload denied OSC 52 since.
+/// Run one due reassertion: refused once its binding no longer holds; otherwise the sink writes
+/// the program's text again only while the clipboard holds exactly the value the write replaced,
+/// compared and replaced in one native acquisition with the binding checked again after the
+/// comparison, so a newer value or a revocation always wins. True when it wrote.
+fn reassert(sink: &mut dyn ClipboardSink, pending: PendingReassert) -> bool {
+    if !pending.binding.may_commit() {
+        // When: the binding no longer holds, the clipboard is not even opened.
         return false;
     }
-    let before = sink.sequence();
-    if !sink.holds(&pending.previous) {
-        // When: the sink no longer holds the previous value, its newer owner keeps it.
-        return false;
-    }
-    if sink.sequence() != before {
-        // When: sequence differs from before, a newer value arrived during the comparison.
-        return false;
-    }
-    sink.write(&pending.text, ClipTargets { clipboard: true, primary: false })
+    let gate = || pending.binding.may_commit();
+    sink.reassert(&pending.text, &pending.previous, &gate)
 }
 
 /// One job on the worker's queue.
 enum Job {
-    /// A program write and the policy epoch it was posted under.
-    Program { pane_id: u64, job: ClipboardJob, epoch: u64 },
+    /// A program write from `pane_id`; its binding rides in the job to the commit point.
+    Program { pane_id: u64, job: ClipboardJob },
     /// A user copy to the standard clipboard.
     User { text: String },
 }
@@ -222,7 +301,6 @@ fn run_worker(
     jobs: Receiver<Job>,
     done: Sender<Done>,
     wake: Box<dyn Fn() + Send>,
-    live_epoch: Arc<AtomicU64>,
     reassert_delay: Option<Duration>,
 ) {
     let report = |result: Done| {
@@ -243,7 +321,7 @@ fn run_worker(
                 // When: recv_deadline hit Timeout, no newer job came before the reassertion was due.
                 if let Some(pending) = armed.take() {
                     // When: armed held the due reassertion, it runs and then settles.
-                    let _ = reassert(sink.as_mut(), pending, &live_epoch);
+                    let _ = reassert(sink.as_mut(), pending);
                     report(Done::ReassertSettled);
                 }
                 continue;
@@ -258,15 +336,19 @@ fn run_worker(
             report(Done::ReassertSettled);
         }
         match job {
-            Job::Program { pane_id, job, epoch } => {
-                let (committed, pending) =
-                    commit_program(sink.as_mut(), job, epoch, &live_epoch, reassert_delay);
+            Job::Program { pane_id, job } => {
+                let (committed, pending) = commit_program(sink.as_mut(), job, reassert_delay);
                 let reassert_armed = pending.is_some();
                 armed = pending;
                 report(Done::Program { pane_id, committed, reassert_armed });
             }
             Job::User { text } => {
-                let written = sink.write(&text, ClipTargets { clipboard: true, primary: false });
+                let targets = ClipTargets { clipboard: true, primary: false };
+                // A user copy answers to no program, so nothing can revoke it.
+                let gate = || true;
+                let request =
+                    WriteRequest { text: &text, targets, gate: &gate, snapshot_max_bytes: None };
+                let written = sink.write(request).written();
                 report(Done::User { written });
             }
         }
@@ -275,6 +357,16 @@ fn run_worker(
 
 /// What the event loop runs once a user copy's native result is known.
 pub(in crate::app) type FollowUp = Box<dyn FnOnce(&mut super::App, bool)>;
+
+/// Where a posted write's OSC 5522 status goes if the worker stops before reporting it.
+struct StatusRoute {
+    /// The pane that asked.
+    pane_id: u64,
+    /// The status address; `None` for OSC 52.
+    reply: Option<KittyReply>,
+    /// What the write was admitted under, which decides whether the status may still be sent.
+    binding: WriteBinding,
+}
 
 /// The worker's queue and result channel, as the event loop holds them.
 struct WorkerHandle {
@@ -287,18 +379,15 @@ struct WorkerHandle {
 pub(in crate::app) struct ClipboardDomain {
     /// The worker, started at the first write that needs it.
     worker: Option<WorkerHandle>,
-    /// Bumped by every reload to `osc52 = "deny"`: a program write posted under an older value is
-    /// refused at the worker's commit point, and an armed reassertion is cancelled.
-    policy_epoch: Arc<AtomicU64>,
     /// Posted jobs whose results the event loop has not applied, and an armed reassertion.
     in_flight: usize,
     /// The follow-ups of the user copies in flight, oldest first.
     follow_ups: VecDeque<FollowUp>,
     /// Per pane, its program writes in flight.
     program_panes: HashMap<u64, usize>,
-    /// Each posted program write's pane and OSC 5522 reply, in posting order; the worker reports
-    /// writes in that order, so a lost worker leaves exactly the unreported ones here.
-    program_replies: VecDeque<(u64, Option<super::kitty_clipboard_tx::KittyReply>)>,
+    /// Each posted program write's status route, in posting order; the worker reports writes in
+    /// that order, so a lost worker leaves exactly the unreported ones here.
+    program_replies: VecDeque<StatusRoute>,
 }
 
 impl std::fmt::Debug for ClipboardDomain {
@@ -320,11 +409,7 @@ enum Settled {
     User { follow_up: FollowUp, written: bool },
     /// The worker stopped: the panes whose writes it held, the OSC 5522 statuses those writes
     /// still owe, and the copies it never reported.
-    Lost {
-        panes: Vec<u64>,
-        replies: Vec<(u64, super::kitty_clipboard_tx::KittyReply)>,
-        follow_ups: Vec<FollowUp>,
-    },
+    Lost { panes: Vec<u64>, replies: Vec<StatusRoute>, follow_ups: Vec<FollowUp> },
 }
 
 impl ClipboardDomain {
@@ -336,11 +421,6 @@ impl ClipboardDomain {
     /// Posted jobs whose results are not applied yet, plus an armed reassertion.
     pub(super) fn in_flight(&self) -> usize {
         self.in_flight
-    }
-
-    /// Refuse every program write the worker has not committed and cancel an armed reassertion.
-    pub(in crate::app) fn revoke_program_writes(&self) {
-        self.policy_epoch.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Whether a program write from `pane_id` is still in flight.
@@ -360,10 +440,9 @@ impl ClipboardDomain {
             crossbeam_channel::bounded(MAX_PROGRAM_CLIPBOARD_JOBS + MAX_USER_CLIPBOARD_JOBS);
         // Results wait only for posted jobs, which the same bounds limit.
         let (done_tx, done_rx) = crossbeam_channel::unbounded();
-        let live_epoch = self.policy_epoch.clone();
         let spawned = std::thread::Builder::new()
             .name("sonicterm-clipboard".into())
-            .spawn(move || run_worker(sink, jobs_rx, done_tx, wake, live_epoch, reassert_delay));
+            .spawn(move || run_worker(sink, jobs_rx, done_tx, wake, reassert_delay));
         match spawned {
             Ok(_) => {
                 // The thread is detached; dropping the queue ends it.
@@ -377,30 +456,34 @@ impl ClipboardDomain {
         }
     }
 
-    /// Post `job`; false when no worker runs or it stopped, and the job, its lease and slot drop.
-    fn post(&mut self, job: Job) -> bool {
+    /// Post `job`; it comes back, boxed since this path is rare, when no worker runs or the worker
+    /// stopped.
+    fn post(&mut self, job: Job) -> Result<(), Box<Job>> {
         let Some(worker) = self.worker.as_ref() else {
             // When: no worker runs, there is nothing to post to.
-            return false;
+            return Err(Box::new(job));
         };
-        if worker.jobs.try_send(job).is_err() {
+        if let Err(refused) = worker.jobs.try_send(job) {
             // When: the worker stopped, the job is refused; its result loss is reported on drain.
-            return false;
+            return Err(Box::new(refused.into_inner()));
         }
         self.in_flight += 1;
-        true
+        Ok(())
     }
 
-    /// Post a program write from `pane_id` under the current policy epoch.
-    fn post_program(&mut self, pane_id: u64, job: ClipboardJob) -> bool {
-        let epoch = self.policy_epoch.load(Ordering::SeqCst);
-        let reply = job.kitty.clone();
-        let posted = self.post(Job::Program { pane_id, job, epoch });
-        if posted {
+    /// Post a program write from `pane_id`; it comes back when it could not be posted.
+    fn post_program(&mut self, pane_id: u64, job: ClipboardJob) -> Result<(), Box<ClipboardJob>> {
+        let route = StatusRoute { pane_id, reply: job.kitty.clone(), binding: job.binding.clone() };
+        let Err(refused) = self.post(Job::Program { pane_id, job }) else {
+            // When: post returned Ok, the write is in flight and owes its status on drain.
             *self.program_panes.entry(pane_id).or_default() += 1;
-            self.program_replies.push_back((pane_id, reply));
+            self.program_replies.push_back(route);
+            return Ok(());
+        };
+        match *refused {
+            Job::Program { job, .. } => Err(Box::new(job)),
+            Job::User { .. } => unreachable!("post returns the job it was given"),
         }
-        posted
     }
 
     /// Whether [`MAX_USER_CLIPBOARD_JOBS`] user copies are already in flight.
@@ -410,7 +493,7 @@ impl ClipboardDomain {
 
     /// Post a user copy; its follow-up comes back when it could not be posted.
     fn post_user(&mut self, text: String, follow_up: FollowUp) -> Result<(), FollowUp> {
-        if !self.post(Job::User { text }) {
+        if self.post(Job::User { text }).is_err() {
             // When: post refused the copy, the caller reports the refusal.
             return Err(follow_up);
         }
@@ -472,10 +555,9 @@ impl ClipboardDomain {
         tracing::warn!(in_flight = self.in_flight, "clipboard worker stopped; its writes failed");
         self.worker = None;
         self.in_flight = 0;
-        let replies = self.program_replies.drain(..);
         Settled::Lost {
             panes: self.program_panes.drain().map(|(pane_id, _)| pane_id).collect(),
-            replies: replies.filter_map(|(pane_id, reply)| Some((pane_id, reply?))).collect(),
+            replies: self.program_replies.drain(..).filter(|route| route.reply.is_some()).collect(),
             follow_ups: self.follow_ups.drain(..).collect(),
         }
     }
@@ -530,10 +612,11 @@ impl super::App {
         written
     }
 
-    /// Route one program write: refused here under `osc52 = "deny"`, and under `"ask"` unless it
-    /// was `consented` on its page; posted to the worker in order when one runs, else written here
-    /// when it is small enough, else refused too large. Returns the outcome when it settled here; a
-    /// posted write reports through [`Self::drain_clipboard_completions`].
+    /// Route one program write: dropped unanswered once its binding no longer holds; refused here
+    /// under `osc52 = "deny"`, and under `"ask"` unless it was `consented` on its page; posted to
+    /// the worker in order when one runs, else written here when it is small enough, else refused
+    /// too large. Returns the outcome when it settled here; a posted write reports through
+    /// [`Self::drain_clipboard_completions`].
     pub(in crate::app) fn submit_program_clipboard(
         &mut self,
         pane_id: u64,
@@ -541,12 +624,10 @@ impl super::App {
         consented: bool,
     ) -> Option<ClipWriteOutcome> {
         // An OSC 5522 write settled here is answered now; one on the worker answers on drain.
-        let kitty = job.kitty.clone();
-        let outcome = self.route_program_clipboard(pane_id, job, consented);
-        if let Some(outcome) = outcome {
-            self.send_kitty_status(pane_id, kitty, outcome);
-        }
-        outcome
+        let mut committed = self.route_program_clipboard(pane_id, job, consented)?;
+        let reply = committed.kitty.take();
+        self.send_kitty_status(pane_id, reply, &committed.binding, committed.outcome);
+        Some(self.settle_program(committed))
     }
 
     /// The routing [`Self::submit_program_clipboard`] describes, without the OSC 5522 status.
@@ -555,8 +636,14 @@ impl super::App {
         pane_id: u64,
         job: ClipboardJob,
         consented: bool,
-    ) -> Option<ClipWriteOutcome> {
+    ) -> Option<Committed> {
         use sonicterm_cfg::config::Osc52Policy;
+        if !job.binding.may_commit() {
+            // When: the binding no longer holds (a policy change; for an approved write its pane,
+            // PTY, command or READONLY state), the write is dropped with no status.
+            tracing::debug!(pane_id, "OSC 52 clipboard write dropped: its binding changed");
+            return Some(Committed::stale(job));
+        }
         let policy = self.config.terminal.osc52;
         if policy == Osc52Policy::Deny || (policy == Osc52Policy::Ask && !consented) {
             // When: osc52 is Deny, or Ask and the write was not consented, the clipboard is never
@@ -566,15 +653,17 @@ impl super::App {
                 ?policy,
                 "OSC 52 clipboard write denied by [terminal] osc52"
             );
-            return Some(ClipWriteOutcome::Denied);
+            return Some(Committed::settled(job, ClipWriteOutcome::Denied));
         }
         self.drain_clipboard_completions();
         self.ensure_clipboard_worker();
         if self.clip_state.domain.has_worker() {
             // When: has_worker, every program write goes to it, in order with user copies; a
             // stopped worker refuses the post and the write fails.
-            let posted = self.clip_state.domain.post_program(pane_id, job);
-            return (!posted).then_some(ClipWriteOutcome::Failed);
+            return match self.clip_state.domain.post_program(pane_id, job) {
+                Ok(()) => None,
+                Err(job) => Some(Committed::settled(*job, ClipWriteOutcome::Failed)),
+            };
         }
         if job.offer.is_some() {
             // When: no worker runs and the job carries an offer, it is published here in one
@@ -583,21 +672,20 @@ impl super::App {
         }
         if !self.may_write_inline(job.text.len(), false) {
             // When: may_write_inline refuses its size with no worker, the write is refused.
-            return Some(ClipWriteOutcome::TooLarge);
+            return Some(Committed::settled(job, ClipWriteOutcome::TooLarge));
         }
-        let live_epoch = self.clip_state.domain.policy_epoch.clone();
-        let epoch = live_epoch.load(Ordering::SeqCst);
-        let (committed, _) = commit_program(&mut InlineSink(self), job, epoch, &live_epoch, None);
-        Some(self.settle_program(committed))
+        let (committed, _) = commit_program(&mut InlineSink(self), job, None);
+        Some(committed)
     }
 
     /// Publish an offer job on this thread: refused too large past the inline limit, else every
-    /// representation in one native operation; its lease and slot end when the call returns.
-    fn publish_offer_inline(&mut self, job: ClipboardJob) -> ClipWriteOutcome {
+    /// representation in one native operation behind its binding; its lease and slot end when the
+    /// call returns.
+    fn publish_offer_inline(&mut self, job: ClipboardJob) -> Committed {
         let offer = job.offer.as_ref().expect("an offer job");
         if !self.may_write_inline(offer.byte_len(), false) {
             // When: may_write_inline refuses the offer's size, the write is refused unpublished.
-            return ClipWriteOutcome::TooLarge;
+            return Committed::settled(job, ClipWriteOutcome::TooLarge);
         }
         #[cfg(any(test, feature = "test-support"))]
         if self.testing.test_clipboard_write_failure || self.test_clipboard_installed() {
@@ -605,26 +693,31 @@ impl super::App {
             // buffer takes the offer's text, never the clipboard.
             let text = String::from_utf8_lossy(offer.text().unwrap_or_default()).into_owned();
             let written = self.write_clipboard_inline(&text, job.targets);
-            return if written { ClipWriteOutcome::Written } else { ClipWriteOutcome::Failed };
+            let outcome =
+                if written { ClipWriteOutcome::Written } else { ClipWriteOutcome::Failed };
+            return Committed::settled(job, outcome);
         }
         if !cfg!(target_os = "macos") {
             // When: target_os is not macOS, an offer publishes only on the clipboard worker, so
             // without one it fails rather than block the event loop on the clipboard.
-            return ClipWriteOutcome::Failed;
+            return Committed::settled(job, ClipWriteOutcome::Failed);
         }
-        if super::kitty_clipboard_offer::publish_native(offer) {
-            ClipWriteOutcome::Written
-        } else {
-            // When: publish_native did not take every representation, the write failed.
-            ClipWriteOutcome::Failed
-        }
+        // The event loop is the commit point here: nothing runs between the gate and the publish.
+        let gate = || job.binding.may_commit();
+        let outcome = match super::kitty_clipboard_offer::publish_native(offer, &gate) {
+            Published::Written => ClipWriteOutcome::Written,
+            Published::Failed => ClipWriteOutcome::Failed,
+            Published::Unchanged => {
+                // When: Unchanged, the gate refused at the commit point; nothing is answered.
+                return Committed::stale(job);
+            }
+        };
+        Committed::settled(job, outcome)
     }
 
-    /// Keep a committed write's retained lease and return its outcome.
+    /// Keep each selection's retained share of a committed write and return its outcome.
     fn settle_program(&mut self, committed: Committed) -> ClipWriteOutcome {
-        if let Some(lease) = committed.retained {
-            self.clip_state.retained.retain(committed.targets, lease);
-        }
+        self.clip_state.retained.retain(committed.retained);
         committed.outcome
     }
 
@@ -634,9 +727,9 @@ impl super::App {
         while let Some(settled) = self.clip_state.domain.next_settled() {
             match settled {
                 Settled::Program { pane_id, mut committed } => {
-                    // A worker-settled OSC 5522 write is answered on its source pane now.
-                    let kitty = committed.kitty.take();
-                    self.send_kitty_status(pane_id, kitty, committed.outcome);
+                    // A worker-settled OSC 5522 write is answered now, if its program still asks.
+                    let reply = committed.kitty.take();
+                    self.send_kitty_status(pane_id, reply, &committed.binding, committed.outcome);
                     let bytes = committed.bytes;
                     let outcome = self.settle_program(committed);
                     self.note_clip_write(pane_id, bytes, outcome);
@@ -649,9 +742,11 @@ impl super::App {
                     follow_up(self, written);
                 }
                 Settled::Lost { panes, replies, follow_ups } => {
-                    // An OSC 5522 write the worker never reported failed natively: `EIO`.
-                    for (pane_id, reply) in replies {
-                        self.send_kitty_status(pane_id, Some(reply), ClipWriteOutcome::Failed);
+                    // An OSC 5522 write the worker never reported failed natively: `EIO`, sent only
+                    // while its program still reads the pane.
+                    for route in replies {
+                        let failed = ClipWriteOutcome::Failed;
+                        self.send_kitty_status(route.pane_id, route.reply, &route.binding, failed);
                     }
                     for pane_id in panes {
                         self.note_clip_write(pane_id, 0, ClipWriteOutcome::Failed);
@@ -734,78 +829,102 @@ impl super::App {
 struct InlineSink<'app>(&'app mut super::App);
 
 impl ClipboardSink for InlineSink<'_> {
-    fn write(&mut self, text: &str, targets: ClipTargets) -> bool {
-        self.0.write_clipboard_inline(text, targets)
+    fn write(&mut self, request: WriteRequest<'_>) -> WriteResult {
+        if !(request.gate)() {
+            // When: the gate refuses at the commit point, the event loop writes nothing.
+            return WriteResult::stale();
+        }
+        self.0.write_clipboard_inline_targets(request.text, request.targets)
     }
 }
 
-/// The worker's own native clipboard handle, opened on the worker thread at its first write.
+/// The worker's own native clipboard: an arboard handle opened on the worker thread at its first
+/// write, or, on Windows, one Win32 acquisition per call over the offer backend's seam.
 #[derive(Default)]
 struct NativeSink {
+    #[cfg(not(target_os = "windows"))]
     clipboard: Option<arboard::Clipboard>,
 }
 
 impl ClipboardSink for NativeSink {
-    fn write(&mut self, text: &str, targets: ClipTargets) -> bool {
+    #[cfg(not(target_os = "windows"))]
+    fn write(&mut self, request: WriteRequest<'_>) -> WriteResult {
         if self.clipboard.is_none() {
             // The worker's first write opens its own handle, on the worker thread.
             self.clipboard = arboard::Clipboard::new().ok();
         }
+        if !(request.gate)() {
+            // When: the gate refuses at the commit point, immediately before the native calls.
+            return WriteResult::stale();
+        }
         let Some(clipboard) = self.clipboard.as_mut() else {
-            // When: the native clipboard could not be opened, the write fails.
-            return false;
+            // When: the native clipboard could not be opened, no selection changed.
+            return WriteResult::each(request.targets, TargetOutcome::Refused);
         };
-        write_native_clipboard(clipboard, text, targets)
-    }
-
-    fn publish_offer(&mut self, offer: &super::kitty_clipboard_offer::NativeOffer) -> bool {
-        super::kitty_clipboard_offer::publish_native(offer)
+        write_native_targets(clipboard, request.text, request.targets)
     }
 
     #[cfg(target_os = "windows")]
-    fn sequence(&mut self) -> Option<u32> {
-        Some(win32::sequence())
+    fn write(&mut self, request: WriteRequest<'_>) -> WriteResult {
+        // Windows has no PRIMARY: the clipboard is read, gated and replaced in one acquisition.
+        let (published, replaced) = super::kitty_clipboard_offer::write_windows_text(
+            request.text,
+            request.snapshot_max_bytes,
+            request.gate,
+        );
+        let outcome = match published {
+            Published::Written => TargetOutcome::Taken,
+            Published::Failed => TargetOutcome::Refused,
+            Published::Unchanged => {
+                // When: Unchanged, the gate refused inside the acquisition; nothing changed.
+                return WriteResult::stale();
+            }
+        };
+        WriteResult { replaced, ..WriteResult::each(request.targets, outcome) }
     }
 
     #[cfg(target_os = "windows")]
-    fn snapshot(&mut self, max_block_bytes: usize) -> Option<Snapshot> {
-        win32::snapshot(max_block_bytes)
+    fn reassert(&mut self, text: &str, previous: &Snapshot, gate: CommitGate<'_>) -> bool {
+        let published = super::kitty_clipboard_offer::reassert_windows_text(text, previous, gate);
+        published == Published::Written
     }
 
-    #[cfg(target_os = "windows")]
-    fn holds(&mut self, snapshot: &Snapshot) -> bool {
-        win32::holds(snapshot)
+    fn publish_offer(&mut self, offer: &NativeOffer, gate: CommitGate<'_>) -> Published {
+        super::kitty_clipboard_offer::publish_native(offer, gate)
     }
 }
 
-/// Write `text` to `targets` through `clipboard`; an empty text clears them. True when every
-/// target took it.
-pub(super) fn write_native_clipboard(
+/// Write `text` to `targets` through `clipboard`, an empty text clearing them, with each
+/// selection's outcome on its own. A failed call is `Unknown`, never `Refused`: arboard's X11
+/// backend stores the text before it claims the selection, so the selection may hold it.
+pub(super) fn write_native_targets(
     clipboard: &mut arboard::Clipboard,
     text: &str,
     targets: ClipTargets,
-) -> bool {
-    let mut written = true;
+) -> WriteResult {
+    let outcome =
+        |written: bool| if written { TargetOutcome::Taken } else { TargetOutcome::Unknown };
+    let mut result = WriteResult::each(targets, TargetOutcome::Untouched);
     if targets.primary {
-        written &= write_primary(clipboard, text);
+        result.primary = outcome(write_primary(clipboard, text));
     }
     if targets.clipboard {
-        let result = if text.is_empty() {
+        let set = if text.is_empty() {
             clipboard.clear()
         } else {
             // When: text is non-empty, it replaces the clipboard's contents.
             clipboard.set_text(text)
         };
-        if let Err(error) = result {
+        if let Err(error) = &set {
             tracing::warn!("clipboard set failed: {error}");
-            written = false;
         } else {
-            // When: result is Ok, record the byte count so a silent clipboard failure stays
+            // When: set is Ok, record the byte count so a silent clipboard failure stays
             // distinguishable from a real copy.
             tracing::info!("copied {} bytes", text.len());
         }
+        result.clipboard = outcome(set.is_ok());
     }
-    written
+    result
 }
 
 /// Write PRIMARY, which exists only on Linux.

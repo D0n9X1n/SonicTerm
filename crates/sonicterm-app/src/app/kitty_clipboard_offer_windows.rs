@@ -6,7 +6,8 @@
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
-use super::{NativeFormat, OfferBackend};
+use super::{CommitGate, NativeFormat, OfferBackend, Published};
+use crate::app::clipboard_worker::Snapshot;
 use crate::app::osc52_read_source::TypeRead;
 
 /// The standard clipboard format for NUL-terminated UTF-16 text.
@@ -361,6 +362,34 @@ pub(super) trait Win32Clipboard {
     fn set(&mut self, format: u32, block: Self::Block) -> Result<(), Self::Block>;
     /// Close the clipboard this thread opened.
     fn close(&mut self);
+    /// The clipboard's change counter, which every change to its contents advances.
+    fn sequence(&mut self) -> u32;
+    /// Run `read` over the open clipboard's `CF_UNICODETEXT` block size and its units before the
+    /// terminator, only when `admit` accepts the size reported before the block is locked; `None`
+    /// when there is no text block or `admit` refused it.
+    fn with_text(
+        &mut self,
+        admit: &dyn Fn(usize) -> bool,
+        read: &mut dyn FnMut(usize, &[u16]),
+    ) -> Option<()>;
+}
+
+/// The text the open clipboard holds as a [`Snapshot`], when its block is at most `max_bytes`.
+fn read_snapshot<C: Win32Clipboard>(clipboard: &mut C, max_bytes: usize) -> Option<Snapshot> {
+    let mut snapshot = None;
+    clipboard.with_text(&|block_bytes| block_bytes <= max_bytes, &mut |block_bytes, units| {
+        snapshot = Some(Snapshot { block_bytes, units: units.to_vec() });
+    })?;
+    snapshot
+}
+
+/// Whether the open clipboard holds exactly `previous`: the same block size, checked before the
+/// block is locked, then the same units.
+fn holds_snapshot<C: Win32Clipboard>(clipboard: &mut C, previous: &Snapshot) -> bool {
+    let mut same = false;
+    let admit = |block_bytes: usize| block_bytes == previous.block_bytes;
+    let _ = clipboard.with_text(&admit, &mut |_, units| same = units == previous.units.as_slice());
+    same
 }
 
 /// One Windows publish: every representation staged as a filled global block before the
@@ -389,32 +418,28 @@ impl<C: Win32Clipboard> WindowsOffer<C> {
     }
 }
 
-impl<C: Win32Clipboard> OfferBackend for WindowsOffer<C> {
-    fn stage(&mut self, format: &NativeFormat, bytes: &[u8]) -> bool {
-        let (Some(id), Some(data)) = (self.format_id(format), encode(format, bytes)) else {
-            // When: the format cannot be registered or encoded, the offer cannot be staged.
-            return false;
-        };
-        let fill = |out: &mut [u8]| data.fill(out);
-        let Some(block) = self.clipboard.alloc(data.byte_len(), &fill) else {
-            // When: alloc fails, the offer cannot be staged.
-            return false;
-        };
-        self.staged.push((id, block));
-        true
-    }
-
-    fn publish(&mut self) -> bool {
+impl<C: Win32Clipboard> WindowsOffer<C> {
+    /// One clipboard acquisition: open, run `check` on the open clipboard, then empty it and set
+    /// every staged block, then close. `check` holds the comparison and the commit gate, so no
+    /// other process can change the clipboard between them and the replacement; a refusal closes
+    /// it untouched.
+    fn commit(&mut self, check: &mut dyn FnMut(&mut C) -> bool) -> Published {
         if !self.clipboard.open() {
             // When: open gives up, another process held the clipboard: nothing changed.
             self.discard();
-            return false;
+            return Published::Failed;
+        }
+        if !check(&mut self.clipboard) {
+            // When: check refuses on the open clipboard, it closes untouched.
+            self.clipboard.close();
+            self.discard();
+            return Published::Unchanged;
         }
         if !self.clipboard.empty() {
             // When: empty fails, the clipboard was not taken, so the previous value stays.
             self.clipboard.close();
             self.discard();
-            return false;
+            return Published::Failed;
         }
         let mut published = true;
         for (id, block) in std::mem::take(&mut self.staged) {
@@ -435,7 +460,74 @@ impl<C: Win32Clipboard> OfferBackend for WindowsOffer<C> {
             let _ = self.clipboard.empty();
         }
         self.clipboard.close();
-        published
+        if published {
+            Published::Written
+        } else {
+            // When: published is false, a format was refused and the clipboard was emptied.
+            Published::Failed
+        }
+    }
+
+    /// Replace the clipboard with `text` (an empty text clears it) in one acquisition: with
+    /// `snapshot_max_bytes`, the value it replaces is read first, and `gate` is checked after that
+    /// read, immediately before `EmptyClipboard`. Returns what was replaced when it was read.
+    pub(super) fn write_text(
+        &mut self,
+        text: &str,
+        snapshot_max_bytes: Option<usize>,
+        gate: CommitGate<'_>,
+    ) -> (Published, Option<Snapshot>) {
+        if !text.is_empty() && !self.stage(&NativeFormat::Text, text.as_bytes()) {
+            // When: the text block cannot be staged, the clipboard is never opened.
+            return (Published::Failed, None);
+        }
+        let mut replaced = None;
+        let published = self.commit(&mut |clipboard| {
+            replaced = snapshot_max_bytes.and_then(|max_bytes| read_snapshot(clipboard, max_bytes));
+            gate()
+        });
+        (published, replaced)
+    }
+
+    /// Write `text` again only while the clipboard holds exactly `previous` and its change counter
+    /// stays put across that comparison, compared and replaced in one acquisition; `gate` is
+    /// checked after the comparison, immediately before `EmptyClipboard`.
+    pub(super) fn reassert_text(
+        &mut self,
+        text: &str,
+        previous: &Snapshot,
+        gate: CommitGate<'_>,
+    ) -> Published {
+        if !self.stage(&NativeFormat::Text, text.as_bytes()) {
+            // When: the text block cannot be staged, the clipboard is never opened.
+            return Published::Failed;
+        }
+        self.commit(&mut |clipboard| {
+            let before = clipboard.sequence();
+            // A delayed-rendering owner may still change the data while it is read, so the
+            // counter must not move across the comparison either.
+            holds_snapshot(clipboard, previous) && clipboard.sequence() == before && gate()
+        })
+    }
+}
+
+impl<C: Win32Clipboard> OfferBackend for WindowsOffer<C> {
+    fn stage(&mut self, format: &NativeFormat, bytes: &[u8]) -> bool {
+        let (Some(id), Some(data)) = (self.format_id(format), encode(format, bytes)) else {
+            // When: the format cannot be registered or encoded, the offer cannot be staged.
+            return false;
+        };
+        let fill = |out: &mut [u8]| data.fill(out);
+        let Some(block) = self.clipboard.alloc(data.byte_len(), &fill) else {
+            // When: alloc fails, the offer cannot be staged.
+            return false;
+        };
+        self.staged.push((id, block));
+        true
+    }
+
+    fn publish(&mut self, gate: CommitGate<'_>) -> Published {
+        self.commit(&mut |_| gate())
     }
 
     fn discard(&mut self) {

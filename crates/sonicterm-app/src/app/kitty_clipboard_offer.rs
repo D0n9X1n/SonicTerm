@@ -251,21 +251,60 @@ pub(in crate::app) fn platform_holds(format: &NativeFormat, bytes: &[u8]) -> boo
     }
 }
 
-/// Publish `offer` to the system clipboard in one operation, true only when it took every
-/// representation: on the event-loop thread on macOS, on the clipboard worker on Windows.
-pub(in crate::app) fn publish_native(offer: &NativeOffer) -> bool {
+/// The check a write makes at its commit point, inside the native acquisition and immediately
+/// before the clipboard changes: false leaves the clipboard untouched.
+pub(in crate::app) type CommitGate<'gate> = &'gate dyn Fn() -> bool;
+
+/// What one gated publish did to the clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::app) enum Published {
+    /// Every representation was set.
+    Written,
+    /// The clipboard could not be taken or refused a representation; it holds no partial offer.
+    Failed,
+    /// The gate refused at the commit point, so the clipboard was never changed.
+    Unchanged,
+}
+
+/// Publish `offer` to the system clipboard in one operation, `gate` checked immediately before it
+/// changes: on the event-loop thread on macOS, on the clipboard worker on Windows.
+pub(in crate::app) fn publish_native(offer: &NativeOffer, gate: CommitGate<'_>) -> Published {
     #[cfg(target_os = "macos")]
     {
-        objc2::rc::autoreleasepool(|_| publish_offer(&mut macos::Pasteboard::general(), offer))
+        objc2::rc::autoreleasepool(|_| {
+            publish_offer(&mut macos::Pasteboard::general(), offer, gate)
+        })
     }
     #[cfg(target_os = "windows")]
     {
-        win32::publish(offer)
+        win32::publish(offer, gate)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        publish_offer(&mut TextOnly, offer)
+        publish_offer(&mut TextOnly, offer, gate)
     }
+}
+
+/// Replace the Windows clipboard with `text` in one acquisition: with `snapshot_max_bytes`, the
+/// value it replaces is read first; `gate` is checked after that read, before `EmptyClipboard`.
+#[cfg(target_os = "windows")]
+pub(in crate::app) fn write_windows_text(
+    text: &str,
+    snapshot_max_bytes: Option<usize>,
+    gate: CommitGate<'_>,
+) -> (Published, Option<super::clipboard_worker::Snapshot>) {
+    win32::write_text(text, snapshot_max_bytes, gate)
+}
+
+/// Write `text` to the Windows clipboard again only while it holds exactly `previous`, compared
+/// and replaced in one acquisition, `gate` checked after the comparison, before `EmptyClipboard`.
+#[cfg(target_os = "windows")]
+pub(in crate::app) fn reassert_windows_text(
+    text: &str,
+    previous: &super::clipboard_worker::Snapshot,
+    gate: CommitGate<'_>,
+) -> Published {
+    win32::reassert_text(text, previous, gate)
 }
 
 /// The general pasteboard's MIME names for an OSC 5522 listing; names only, never content.
@@ -306,8 +345,8 @@ impl OfferBackend for TextOnly {
         false
     }
 
-    fn publish(&mut self) -> bool {
-        false
+    fn publish(&mut self, _gate: CommitGate<'_>) -> Published {
+        Published::Failed
     }
 
     fn discard(&mut self) {}
@@ -317,23 +356,28 @@ impl OfferBackend for TextOnly {
 pub(in crate::app) trait OfferBackend {
     /// Allocate and fill the native buffer for `format`; false when it cannot be staged.
     fn stage(&mut self, format: &NativeFormat, bytes: &[u8]) -> bool;
-    /// Replace the clipboard with every staged buffer in one operation; true when it took them all.
-    fn publish(&mut self) -> bool;
+    /// Replace the clipboard with every staged buffer in one operation, checking `gate` immediately
+    /// before the clipboard changes; a refusal discards the buffers, leaving it untouched.
+    fn publish(&mut self, gate: CommitGate<'_>) -> Published;
     /// Free every staged buffer without touching the clipboard.
     fn discard(&mut self);
 }
 
-/// Stage every representation of `offer`, then publish them at once: true only when every one was
-/// published. A staging failure discards the rest and leaves the clipboard untouched.
-pub(in crate::app) fn publish_offer(backend: &mut dyn OfferBackend, offer: &NativeOffer) -> bool {
+/// Stage every representation of `offer`, then publish them at once behind `gate`. A staging
+/// failure discards the rest and leaves the clipboard untouched.
+pub(in crate::app) fn publish_offer(
+    backend: &mut dyn OfferBackend,
+    offer: &NativeOffer,
+    gate: CommitGate<'_>,
+) -> Published {
     for (format, bytes) in offer.representations() {
         if !backend.stage(format, bytes) {
             // When: backend.stage fails, nothing was published, so the previous clipboard stays.
             backend.discard();
-            return false;
+            return Published::Failed;
         }
     }
-    backend.publish()
+    backend.publish(gate)
 }
 
 #[cfg(target_os = "macos")]

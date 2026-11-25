@@ -211,6 +211,145 @@ fn cancelled_kitty_write_consent_answers_eperm_to_the_same_program() {
     }
 }
 
+/// A native clipboard whose writes wait while the test holds `gate`, recording each written text.
+#[derive(Clone, Default)]
+struct BlockingSink {
+    writes: Arc<Mutex<Vec<String>>>,
+    gate: Arc<Mutex<()>>,
+    /// Writes that reached the native call, including one still held at the gate.
+    entered: Arc<AtomicUsize>,
+}
+
+impl BlockingSink {
+    /// Wait until `count` writes have reached the native call.
+    fn wait_entered(&self, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.entered.load(Ordering::SeqCst) < count {
+            assert!(Instant::now() < deadline, "the worker never reached the native call");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+impl crate::app::clipboard_worker::ClipboardSink for BlockingSink {
+    fn write(
+        &mut self,
+        request: crate::app::clipboard_worker::WriteRequest<'_>,
+    ) -> crate::app::clipboard_worker::WriteResult {
+        use crate::app::clipboard_worker::{TargetOutcome, WriteResult};
+        // The commit gate is checked first, as a native sink checks it before its call.
+        if !(request.gate)() {
+            return WriteResult::stale();
+        }
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        let _held = self.gate.lock().unwrap();
+        self.writes.lock().unwrap().push(request.text.to_owned());
+        WriteResult::each(request.targets, TargetOutcome::Taken)
+    }
+
+    fn retains_copies(&self) -> bool {
+        false
+    }
+}
+
+/// Contract: an approved write keeps the identity that authorized it until the clipboard worker
+/// commits it. With the worker busy, Apply, then the pane closing, leaving its window, its command
+/// changing, its window entering READONLY, or `osc52_read` changing drops the write: nothing
+/// reaches the clipboard and the program hears no status. Untouched, it lands and answers `DONE`.
+#[test]
+fn approved_write_rebound_while_worker_busy_is_dropped_silently() {
+    let done = b"\x1b]5522;type=write:status=DONE:id=k\x1b\\".to_vec();
+    let mut failures = Vec::new();
+    for case in ["unchanged", "close", "transfer", "command", "readonly", "osc52_read"] {
+        let mut harness = asking();
+        let sink = BlockingSink::default();
+        let domain = &mut harness.app.clip_state.domain;
+        assert!(domain.start_worker(Box::new(sink.clone()), None, Box::new(|| {})), "{case}");
+        let held = sink.gate.lock().unwrap();
+        // A user copy past the inline limit goes to the worker and holds it in its native call.
+        let blocker = "b".repeat(crate::app::clipboard_worker::INLINE_WRITE_LIMIT_BYTES + 1);
+        assert!(harness.app.set_clipboard_text(blocker), "{case}");
+        kitty_write(&mut harness, "hi");
+        assert!(page_open(&harness), "{case}");
+        harness.app.interaction.command_palette.move_selection_up();
+        press(&mut harness, NamedKey::Enter);
+        assert!(!page_open(&harness), "{case}: Apply answered the page");
+        let main = main_window(&harness);
+        match case {
+            "close" => {
+                // The production close path: the pane leaves its window and is retired.
+                let window = harness.app.registry.windows.get_mut(&main).expect("main");
+                let pane = window.panes.detach(harness.pane).expect("the source pane");
+                harness.app.retire_pane(pane);
+            }
+            "transfer" => {
+                // A transfer detaches the pane and attaches it to its new window.
+                let window = harness.app.registry.windows.get_mut(&main).expect("main");
+                let pane = window.panes.detach(harness.pane).expect("the source pane");
+                assert!(window.panes.attach(pane).is_ok(), "{case}");
+            }
+            "command" => {
+                // The VT worker publishes a prompt or command boundary.
+                let pane = harness.app.pane_by_id(harness.pane).expect("the source pane");
+                pane.read_identity.set_command_epoch(1);
+            }
+            "readonly" => harness.app.enter_copy_mode_for_kind(crate::app::FrontmostKind::Main),
+            "osc52_read" => {
+                let mut config = harness.app.config.clone();
+                config.terminal.osc52_read = Osc52ReadPolicy::Allow;
+                harness.app.apply_new_config(config);
+            }
+            _ => {}
+        }
+        drop(held);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while harness.app.clip_state.domain.in_flight() > 0 {
+            assert!(Instant::now() < deadline, "{case}: the clipboard worker did not settle");
+            harness.app.drain_clipboard_completions();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let writes = sink.writes.lock().unwrap().clone();
+        let program_writes: Vec<&str> = writes[1..].iter().map(String::as_str).collect();
+        let (expected_writes, expected_replies) =
+            if case == "unchanged" { (vec!["hi"], vec![done.clone()]) } else { (vec![], vec![]) };
+        let replies = delivered_bytes(&harness);
+        let slots = (harness.staging.ticket_slots_in_use(), harness.staging.program_slots_in_use());
+        // Every case is checked before the test fails, so one run names each broken case.
+        if program_writes != expected_writes || replies != expected_replies || slots != (0, 0) {
+            failures.push(format!("{case}: writes {program_writes:?}, replies {replies:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Contract: a write's status goes only to the program that asked for it. A write the worker
+/// committed while the pane's command changed lands, but its `DONE` is not sent, because the next
+/// command would read it as input.
+#[test]
+fn committed_write_status_is_not_routed_to_a_later_command() {
+    let mut harness = asking();
+    let sink = BlockingSink::default();
+    let domain = &mut harness.app.clip_state.domain;
+    assert!(domain.start_worker(Box::new(sink.clone()), None, Box::new(|| {})));
+    let held = sink.gate.lock().unwrap();
+    kitty_write(&mut harness, "hi");
+    harness.app.interaction.command_palette.move_selection_up();
+    press(&mut harness, NamedKey::Enter);
+    // The worker is inside the native call: the write is past its commit point.
+    sink.wait_entered(1);
+    let pane = harness.app.pane_by_id(harness.pane).expect("the source pane");
+    pane.read_identity.set_command_epoch(1);
+    drop(held);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while harness.app.clip_state.domain.in_flight() > 0 {
+        assert!(Instant::now() < deadline, "the clipboard worker did not settle");
+        harness.app.drain_clipboard_completions();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(*sink.writes.lock().unwrap(), ["hi"], "the committed write landed");
+    assert_eq!(delivered_bytes(&harness), Vec::<Vec<u8>>::new(), "no status for a later command");
+}
+
 #[cfg(test)]
 #[path = "osc52_read_pipeline_tests_consent_tests_write_tests_grants_tests.rs"]
 mod osc52_read_pipeline_tests_consent_tests_write_tests_grants_tests;

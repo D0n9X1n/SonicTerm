@@ -23,16 +23,21 @@ impl OfferBackend for Fake {
         true
     }
 
-    fn publish(&mut self) -> bool {
+    fn publish(&mut self, gate: CommitGate<'_>) -> Published {
         self.publishes += 1;
+        if !gate() {
+            // The gate refused at the commit point: the staged buffers drop, nothing changes.
+            self.staged.clear();
+            return Published::Unchanged;
+        }
         if self.fail_publish {
             // A failed publish empties the clipboard, as Windows' recovery does.
             self.clipboard.clear();
             self.staged.clear();
-            return false;
+            return Published::Failed;
         }
         self.clipboard = std::mem::take(&mut self.staged);
-        true
+        Published::Written
     }
 
     fn discard(&mut self) {
@@ -89,7 +94,7 @@ fn well_known_and_text_alias_mapping() {
 fn second_native_format_failure_publishes_nothing_eio() {
     let offer = offer(&[("text/plain", "t"), ("text/html", "<b>h</b>")], &|_, _| true);
     let mut fake = Fake { fail_stage_at: Some(1), ..previous() };
-    assert!(!publish_offer(&mut fake, &offer));
+    assert_eq!(publish_offer(&mut fake, &offer, &|| true), Published::Failed);
     assert_eq!(fake.publishes, 0, "no publish after a staging failure");
     assert!(fake.staged.is_empty(), "the staged first format is discarded");
     assert_eq!(fake.clipboard, [(NativeFormat::Text, b"previous".to_vec())]);
@@ -100,7 +105,7 @@ fn second_native_format_failure_publishes_nothing_eio() {
 fn stage_failure_keeps_previous_clipboard() {
     let offer = offer(&[("image/png", "png")], &|_, _| true);
     let mut fake = Fake { fail_stage_at: Some(0), ..previous() };
-    assert!(!publish_offer(&mut fake, &offer));
+    assert_eq!(publish_offer(&mut fake, &offer, &|| true), Published::Failed);
     assert_eq!((fake.publishes, fake.clipboard.len()), (0, 1));
 }
 
@@ -109,7 +114,7 @@ fn stage_failure_keeps_previous_clipboard() {
 fn publish_failure_is_never_done() {
     let offer = offer(&[("text/plain", "t"), ("image/png", "p")], &|_, _| true);
     let mut fake = Fake { fail_publish: true, ..previous() };
-    assert!(!publish_offer(&mut fake, &offer));
+    assert_eq!(publish_offer(&mut fake, &offer, &|| true), Published::Failed);
     assert_eq!(fake.publishes, 1);
 }
 
@@ -131,7 +136,7 @@ fn omitted_plus_published_done() {
     let offer = offer(&pairs, &holds);
     assert_eq!(offer.omitted(), 2);
     let mut fake = previous();
-    assert!(publish_offer(&mut fake, &offer));
+    assert_eq!(publish_offer(&mut fake, &offer, &|| true), Published::Written);
     let html = (NativeFormat::Html, b"h".to_vec());
     assert_eq!(fake.clipboard, [html, (NativeFormat::Text, b"t".to_vec())]);
 }

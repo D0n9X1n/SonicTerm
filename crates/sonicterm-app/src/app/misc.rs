@@ -80,7 +80,7 @@ impl App {
         match kind {
             FrontmostKind::Child(id) => {
                 if let Some(child) = self.registry.windows.get_mut(&id) {
-                    child.copy_mode = state;
+                    child.set_copy_mode(state);
                     mark_all_panes_dirty(&child.panes);
                 }
             }

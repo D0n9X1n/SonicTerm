@@ -8,34 +8,100 @@ use sonicterm_grid::grid::{CellFlags, Color};
 use sonicterm_ui::selection::Selection;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// What the fake clipboard holds and records, shared by the test and the worker thread.
 #[derive(Default)]
 struct FakeState {
     /// The current clipboard text.
     value: String,
-    /// The change counter: every write and every external change advances it.
-    sequence: u32,
     /// Every text written through the sink, in order.
     writes: Vec<String>,
     /// Writes that reached the native call, including one still held at the gate.
     entered: usize,
     /// A value put back right after the next write, as a failing helper's cleanup does.
     revert_to: Option<String>,
-    /// Advance the counter during the next comparison, as a newer write racing it would.
-    race_comparison: bool,
     /// Offers published through the sink, each one native call.
     offers: usize,
     /// Refuse the next offers, as a failed `SetClipboardData` does.
     refuse_offer: bool,
+    /// Comparisons started: a pre-write snapshot or a reassertion's check of the replaced value.
+    compares: usize,
+    /// The comparison, counted from 1, that waits on `compare_gate` while the test holds it.
+    gated_compare: Option<usize>,
+    /// Another program's copy armed to land right after comparison N ends, at the handoff to the
+    /// write: it lands at the next moment no native acquisition holds the clipboard.
+    handoff_copy: Option<(usize, String)>,
+    /// The armed copy's comparison ended; it lands once the clipboard is free.
+    handoff_due: bool,
+    /// Whether the fake keeps its own copy of each written selection, as arboard does on Linux.
+    retains: bool,
+    /// What each selection does with the next writes (CLIPBOARD, PRIMARY), instead of taking it.
+    outcomes: std::collections::VecDeque<(TargetOutcome, TargetOutcome)>,
 }
 
-/// A fake native clipboard; while the test holds `gate`, a write waits inside the native call.
+impl FakeState {
+    /// Start the next comparison and return its number, counted from 1.
+    fn start_compare(&mut self) -> usize {
+        self.compares += 1;
+        self.compares
+    }
+
+    /// Comparison `number` ended: a copy armed for it is due at the next free moment.
+    fn end_compare(&mut self, number: usize) {
+        if self.handoff_copy.as_ref().is_some_and(|(at, _)| *at == number) {
+            self.handoff_due = true;
+        }
+    }
+
+    /// Another program replaces the clipboard with a due copy, now that nothing holds it open.
+    fn land_due_copy(&mut self) {
+        if std::mem::take(&mut self.handoff_due) {
+            if let Some((_, value)) = self.handoff_copy.take() {
+                self.value = value;
+            }
+        }
+    }
+
+    /// The current value as a `CF_UNICODETEXT` snapshot, when its block is at most
+    /// `max_block_bytes`; an empty clipboard has no block.
+    fn snapshot(&self, max_block_bytes: usize) -> Option<Snapshot> {
+        let mut units: Vec<u16> = self.value.encode_utf16().collect();
+        units.shrink_to_fit();
+        let block_bytes = units.len() * 2 + 2;
+        (!units.is_empty() && block_bytes <= max_block_bytes)
+            .then_some(Snapshot { block_bytes, units })
+    }
+
+    /// Whether the clipboard holds exactly `previous`: the same block size, then the same units.
+    fn holds(&self, previous: &Snapshot) -> bool {
+        let units: Vec<u16> = self.value.encode_utf16().collect();
+        units.len() * 2 + 2 == previous.block_bytes && units == previous.units
+    }
+
+    /// Replace the clipboard with `text` where `targets` names it, record the write, and put a
+    /// reverted value back as a failing helper's cleanup does.
+    fn replace(&mut self, text: &str, targets: ClipTargets) {
+        self.writes.push(text.to_owned());
+        if targets.clipboard {
+            self.value = text.to_owned();
+        }
+        if let Some(previous) = self.revert_to.take() {
+            self.value = previous;
+        }
+    }
+}
+
+/// A fake native clipboard in which every `write` and `reassert` is one acquisition: a comparison
+/// and the replacement happen while no other program can change the clipboard, and another
+/// program's due copy lands only when the acquisition ends. While the test holds `gate`, a write
+/// waits inside the native call; while it holds `compare_gate`, the comparison `gated_compare`
+/// names waits before it reads.
 #[derive(Clone, Default)]
 struct FakeClipboard {
     state: Arc<Mutex<FakeState>>,
     gate: Arc<Mutex<()>>,
+    compare_gate: Arc<Mutex<()>>,
 }
 
 impl FakeClipboard {
@@ -52,9 +118,7 @@ impl FakeClipboard {
 
     /// Another program changes the clipboard to `value`.
     fn set_external(&self, value: &str) {
-        let mut state = self.state();
-        state.value = value.to_owned();
-        state.sequence += 1;
+        self.state().value = value.to_owned();
     }
 
     /// Wait until `count` writes have reached the native call.
@@ -65,52 +129,89 @@ impl FakeClipboard {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
+
+    /// Wait until `count` comparisons have started.
+    fn wait_compares(&self, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.state().compares < count {
+            assert!(Instant::now() < deadline, "the worker never reached the comparison");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Start a comparison, waiting while the test holds `compare_gate` over it; returns its number.
+    fn begin_compare(&self) -> usize {
+        let (number, gated) = {
+            let mut state = self.state();
+            let number = state.start_compare();
+            (number, state.gated_compare == Some(number))
+        };
+        if gated {
+            drop(self.compare_gate.lock().unwrap());
+        }
+        number
+    }
 }
 
 impl ClipboardSink for FakeClipboard {
-    fn write(&mut self, text: &str, targets: ClipTargets) -> bool {
+    fn write(&mut self, request: WriteRequest<'_>) -> WriteResult {
+        let replaced = request.snapshot_max_bytes.and_then(|max_bytes| {
+            let number = self.begin_compare();
+            let mut state = self.state();
+            let snapshot = state.snapshot(max_bytes);
+            state.end_compare(number);
+            snapshot
+        });
+        if !(request.gate)() {
+            // The gate refused at the commit point: the acquisition ends untouched.
+            self.state().land_due_copy();
+            return WriteResult::stale();
+        }
         self.state().entered += 1;
         let _held = self.gate.lock().unwrap();
         let mut state = self.state();
-        state.writes.push(text.to_owned());
-        if targets.clipboard {
-            state.value = text.to_owned();
-            state.sequence += 1;
-        }
-        if let Some(previous) = state.revert_to.take() {
-            state.value = previous;
-            state.sequence += 1;
-        }
-        true
+        state.replace(request.text, request.targets);
+        // The acquisition ends after the replacement; a copy due during it lands only now.
+        state.land_due_copy();
+        let taken = WriteResult::each(request.targets, TargetOutcome::Taken);
+        let Some((clipboard, primary)) = state.outcomes.pop_front() else {
+            return WriteResult { replaced, ..taken };
+        };
+        WriteResult { replaced, clipboard, primary, ..taken }
     }
 
-    fn sequence(&mut self) -> Option<u32> {
-        Some(self.state().sequence)
-    }
-
-    fn publish_offer(&mut self, _offer: &crate::app::kitty_clipboard_offer::NativeOffer) -> bool {
+    fn reassert(&mut self, text: &str, previous: &Snapshot, gate: CommitGate<'_>) -> bool {
+        let number = self.begin_compare();
+        let same = {
+            let mut state = self.state();
+            let same = state.holds(previous);
+            state.end_compare(number);
+            same
+        };
+        let written = same && gate();
         let mut state = self.state();
+        if written {
+            state.replace(text, ClipTargets { clipboard: true, primary: false });
+        }
+        state.land_due_copy();
+        written
+    }
+
+    fn publish_offer(&mut self, _offer: &NativeOffer, gate: CommitGate<'_>) -> Published {
+        let mut state = self.state();
+        if !gate() {
+            return Published::Unchanged;
+        }
         state.offers += 1;
-        !state.refuse_offer
-    }
-
-    fn snapshot(&mut self, max_block_bytes: usize) -> Option<Snapshot> {
-        let state = self.state();
-        let mut units: Vec<u16> = state.value.encode_utf16().collect();
-        units.shrink_to_fit();
-        // A `CF_UNICODETEXT` block holds the units and a terminator; an empty clipboard has none.
-        let block_bytes = units.len() * 2 + 2;
-        (!units.is_empty() && block_bytes <= max_block_bytes)
-            .then_some(Snapshot { block_bytes, units })
-    }
-
-    fn holds(&mut self, snapshot: &Snapshot) -> bool {
-        let mut state = self.state();
-        let units: Vec<u16> = state.value.encode_utf16().collect();
-        if std::mem::take(&mut state.race_comparison) {
-            state.sequence += 1;
+        if state.refuse_offer {
+            Published::Failed
+        } else {
+            Published::Written
         }
-        units.len() * 2 + 2 == snapshot.block_bytes && units == snapshot.units
+    }
+
+    fn retains_copies(&self) -> bool {
+        self.state().retains
     }
 }
 
@@ -225,10 +326,12 @@ fn user_copy_queue_full_refused_before_post_keeps_selection() {
 }
 
 /// A program write's lease and slot stay reserved while the worker's native call runs, and are
-/// released when it returns; only Linux keeps the part covering arboard's retained copy.
+/// released when it returns; only a sink that keeps its own copy (arboard on Linux) keeps the part
+/// covering it.
 #[test]
 fn lease_held_until_worker_native_call_returns() {
     let fake = FakeClipboard::holding("before");
+    fake.state().retains = true;
     let mut app = app_with_worker("before", &fake, None);
     let staging = app.clip_state.staging.clone();
     let job = ClipboardJob::for_test(&staging, "leased text");
@@ -240,9 +343,7 @@ fn lease_held_until_worker_native_call_returns() {
     assert_eq!(staging.program_slots_in_use(), 1, "and so is the program slot");
     drop(held);
     settle(&mut app);
-    let native = native_clipboard_bytes("leased text");
-    let retained = if cfg!(target_os = "linux") { native } else { 0 };
-    assert_eq!(staging.reserved_bytes(), retained);
+    assert_eq!(staging.reserved_bytes(), native_clipboard_bytes("leased text"));
     assert_eq!(staging.program_slots_in_use(), 0);
 }
 
@@ -338,7 +439,7 @@ fn committed_over(
     let staging = ClipboardStaging::with_budget(64 << 20, 64 << 20);
     let job = ClipboardJob::for_test(&staging, text);
     let delay = Some(Duration::ZERO);
-    let (committed, pending) = commit_program(&mut fake, job, 0, &AtomicU64::new(0), delay);
+    let (committed, pending) = commit_program(&mut fake, job, delay);
     assert_eq!(committed.outcome, ClipWriteOutcome::Written);
     (fake, staging, pending)
 }
@@ -350,45 +451,35 @@ fn reassert_restores_a_reverted_write_once() {
     let (mut fake, staging, pending) = committed_over("old", "program");
     let pending = pending.expect("a write over a readable value arms one reassertion");
     fake.set_external("old");
-    assert!(reassert(&mut fake, pending, &AtomicU64::new(0)));
+    assert!(reassert(&mut fake, pending));
     assert_eq!(fake.state().value, "program");
     assert_eq!(fake.state().writes, ["program", "program"]);
     assert_eq!(staging.reserved_bytes(), 0, "the settled reassertion released its lease");
 }
 
-/// A newer clipboard value always wins: a different value is never overwritten, and a write
-/// that still holds is not written again.
+/// A reassertion compares with the value the write replaced, read in the write's own acquisition:
+/// a newer value is never overwritten, and a write that still holds is not written again.
 #[test]
 fn reassert_cancelled_by_newer_value() {
     let (mut fake, _staging, pending) = committed_over("old", "program");
     fake.set_external("newer external copy");
-    assert!(!reassert(&mut fake, pending.expect("armed"), &AtomicU64::new(0)));
+    assert!(!reassert(&mut fake, pending.expect("armed")));
     assert_eq!(fake.state().value, "newer external copy");
     let (mut fake, _staging, pending) = committed_over("old", "program");
-    assert!(!reassert(&mut fake, pending.expect("armed"), &AtomicU64::new(0)));
+    assert!(!reassert(&mut fake, pending.expect("armed")));
     assert_eq!(fake.state().writes, ["program"], "a write that still holds is not repeated");
 }
 
-/// A change counter that moves during the comparison means a newer value arrived, so the
-/// reassertion is cancelled even though the compared text matched.
-#[test]
-fn reassert_cancelled_by_sequence_change() {
-    let (mut fake, _staging, pending) = committed_over("old", "program");
-    fake.set_external("old");
-    fake.state().race_comparison = true;
-    assert!(!reassert(&mut fake, pending.expect("armed"), &AtomicU64::new(0)));
-    assert_eq!(fake.state().value, "old");
-    assert_eq!(fake.state().writes, ["program"]);
-}
-
-/// A policy epoch that moved after the write, a reload to `osc52 = "deny"`, cancels the
-/// reassertion.
+/// A policy generation that moved after the write, a reload of `osc52` or `osc52_read`, cancels
+/// the reassertion before the clipboard is compared.
 #[test]
 fn reassert_cancelled_by_policy_revocation() {
-    let (mut fake, _staging, pending) = committed_over("old", "program");
+    let (mut fake, staging, pending) = committed_over("old", "program");
     fake.set_external("old");
-    assert!(!reassert(&mut fake, pending.expect("armed"), &AtomicU64::new(1)));
+    staging.bump_policy_generation();
+    assert!(!reassert(&mut fake, pending.expect("armed")));
     assert_eq!(fake.state().value, "old");
+    assert_eq!(fake.state().compares, 1, "only the write's own read compared anything");
 }
 
 /// A reassertion is armed only for a non-empty write within 262,144 UTF-16 units over a readable
@@ -457,7 +548,7 @@ fn offer_job_publishes_once_on_worker_eio_on_refusal() {
         let staging = ClipboardStaging::with_budget(64 << 20, 64 << 20);
         let job = offer_job(&staging);
         let delay = Some(Duration::ZERO);
-        let (committed, pending) = commit_program(&mut fake, job, 0, &AtomicU64::new(0), delay);
+        let (committed, pending) = commit_program(&mut fake, job, delay);
         let expected = if refuse { ClipWriteOutcome::Failed } else { ClipWriteOutcome::Written };
         assert_eq!(committed.outcome, expected);
         assert!(pending.is_none(), "an offer is never reasserted");
@@ -474,4 +565,128 @@ fn offer_job_publishes_once_on_worker_eio_on_refusal() {
     assert_eq!(app.submit_program_clipboard(1, job, false), None, "posted to the worker");
     settle(&mut app);
     assert_eq!(fake.state().offers, 1);
+}
+
+/// Reload `[terminal] osc52 = "deny"` through the production config path.
+fn reload_deny(app: &mut App) {
+    let mut deny = Config::default();
+    deny.terminal.osc52 = Osc52Policy::Deny;
+    app.apply_new_config(deny);
+}
+
+/// Contract: a reload to `osc52 = "deny"` that lands while the write reads the value it replaces
+/// stops the write: the policy is checked after that read, at the commit point, not before it.
+#[test]
+fn policy_revoked_while_snapshot_blocked_stops_the_write() {
+    let fake = FakeClipboard::holding("old");
+    fake.state().gated_compare = Some(1);
+    let mut app = app_with_worker("old", &fake, Some(Duration::from_secs(3600)));
+    let held = fake.compare_gate.lock().unwrap();
+    let job = ClipboardJob::for_test(&app.clip_state.staging, "program");
+    assert_eq!(app.submit_program_clipboard(1, job, false), None, "posted to the worker");
+    fake.wait_compares(1);
+    reload_deny(&mut app);
+    drop(held);
+    wait_until(&mut app, |app| !app.clip_state.domain.program_pending(1));
+    assert_eq!(fake.state().value, "old", "the denied write never replaced the clipboard");
+    assert!(fake.state().writes.is_empty());
+}
+
+/// Contract: another program's copy that lands at the handoff from the pre-write read to the write
+/// is never overwritten: the read and the replacement share one native acquisition, so that copy
+/// can only land after the write and wins.
+#[test]
+fn external_copy_at_snapshot_write_handoff_is_not_overwritten() {
+    let fake = FakeClipboard::holding("old");
+    fake.state().handoff_copy = Some((1, "external".into()));
+    let mut app = app_with_worker("old", &fake, Some(Duration::from_secs(3600)));
+    let job = ClipboardJob::for_test(&app.clip_state.staging, "program");
+    let _ = app.submit_program_clipboard(1, job, false);
+    wait_until(&mut app, |app| !app.clip_state.domain.program_pending(1));
+    assert_eq!(fake.state().value, "external", "the newer external copy wins");
+}
+
+/// Contract: a reload to `osc52 = "deny"` that lands while a reassertion compares the clipboard
+/// with the value it replaced stops the reassertion; the policy is checked after the comparison.
+#[test]
+fn policy_revoked_while_reassert_comparison_blocked_stops_it() {
+    let fake = FakeClipboard::holding("old");
+    fake.state().revert_to = Some("old".into());
+    fake.state().gated_compare = Some(2);
+    let mut app = app_with_worker("old", &fake, Some(Duration::from_millis(1)));
+    let held = fake.compare_gate.lock().unwrap();
+    let job = ClipboardJob::for_test(&app.clip_state.staging, "program");
+    let _ = app.submit_program_clipboard(1, job, false);
+    fake.wait_compares(2);
+    reload_deny(&mut app);
+    drop(held);
+    settle(&mut app);
+    assert_eq!(fake.state().value, "old", "the revoked reassertion did not write");
+    assert_eq!(fake.state().writes, ["program"]);
+}
+
+/// Contract: another program's copy that lands at the handoff from a reassertion's comparison to
+/// its write is never overwritten: compare and replace share one native acquisition.
+#[test]
+fn external_copy_at_reassert_compare_write_handoff_is_not_overwritten() {
+    let fake = FakeClipboard::holding("old");
+    fake.state().revert_to = Some("old".into());
+    fake.state().handoff_copy = Some((2, "external".into()));
+    let mut app = app_with_worker("old", &fake, Some(Duration::from_millis(1)));
+    let job = ClipboardJob::for_test(&app.clip_state.staging, "program");
+    let _ = app.submit_program_clipboard(1, job, false);
+    settle(&mut app);
+    assert_eq!(fake.state().value, "external", "the newer external copy wins");
+}
+
+/// A program write of `text` to `targets`, its lease covering the text and one native copy per
+/// selection, as the reader thread reserves it.
+fn job_to(staging: &Arc<ClipboardStaging>, text: &str, targets: ClipTargets) -> ClipboardJob {
+    let mut job = ClipboardJob::for_test(staging, text);
+    let copies = usize::from(targets.clipboard) + usize::from(targets.primary);
+    assert!(job.lease.grow_to(text.len() + copies * native_clipboard_bytes(text)));
+    job.targets = targets;
+    job
+}
+
+/// Contract: where the native clipboard keeps its own copy of each selection (arboard on Linux),
+/// a `cp` write keeps one share per selection, and a later CLIPBOARD-only write replaces only
+/// CLIPBOARD's: PRIMARY still holds the first write, so its share stays reserved.
+#[test]
+fn clipboard_only_replacement_keeps_primary_share() {
+    let fake = FakeClipboard::holding("old");
+    fake.state().retains = true;
+    let mut app = app_with_worker("old", &fake, None);
+    let staging = app.clip_state.staging.clone();
+    let both = ClipTargets { clipboard: true, primary: true };
+    let _ = app.submit_program_clipboard(1, job_to(&staging, "aaaa", both), false);
+    settle(&mut app);
+    assert_eq!(staging.reserved_bytes(), 2 * native_clipboard_bytes("aaaa"), "one share each");
+    let clipboard = ClipTargets { clipboard: true, primary: false };
+    let _ = app.submit_program_clipboard(1, job_to(&staging, "bb", clipboard), false);
+    settle(&mut app);
+    let expected = native_clipboard_bytes("aaaa") + native_clipboard_bytes("bb");
+    assert_eq!(staging.reserved_bytes(), expected, "PRIMARY's share of the first write stays");
+}
+
+/// Contract: a `cp` write that one selection refuses keeps the share of the selection that took
+/// it and releases the refused one's; an ambiguous native failure keeps the larger of the old and
+/// new shares, since that selection may hold either copy.
+#[test]
+fn partial_failure_keeps_the_share_of_the_selection_that_took_it() {
+    let fake = FakeClipboard::holding("old");
+    fake.state().retains = true;
+    let mut app = app_with_worker("old", &fake, None);
+    let staging = app.clip_state.staging.clone();
+    let both = ClipTargets { clipboard: true, primary: true };
+    fake.state().outcomes.push_back((TargetOutcome::Taken, TargetOutcome::Refused));
+    let _ = app.submit_program_clipboard(1, job_to(&staging, "aaaa", both), false);
+    settle(&mut app);
+    let aaaa = native_clipboard_bytes("aaaa");
+    assert_eq!(staging.reserved_bytes(), aaaa, "CLIPBOARD took it; PRIMARY's share was released");
+    fake.state().outcomes.push_back((TargetOutcome::Unknown, TargetOutcome::Taken));
+    let _ = app.submit_program_clipboard(1, job_to(&staging, "bb", both), false);
+    settle(&mut app);
+    let expected = aaaa + native_clipboard_bytes("bb");
+    assert_eq!(staging.reserved_bytes(), expected, "the larger CLIPBOARD share and PRIMARY's");
 }

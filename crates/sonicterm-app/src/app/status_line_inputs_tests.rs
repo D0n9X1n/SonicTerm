@@ -606,17 +606,17 @@ fn a_denied_osc52_write_leaves_the_clipboard_alone() {
 /// result: the summary is held until the pane's write settles, then shows the write and its count.
 #[test]
 fn clip_summary_waits_for_a_write_on_the_clipboard_worker() {
-    use crate::app::clipboard_worker::ClipboardSink;
-    use crate::app::osc52_stream::{ClipState, ClipTargets, ClipboardJob, ClipboardStaging};
+    use crate::app::clipboard_worker::{ClipboardSink, TargetOutcome, WriteRequest, WriteResult};
+    use crate::app::osc52_stream::{ClipState, ClipboardJob, ClipboardStaging};
     use crate::app::spawn_pane::ClipAttempts;
     use std::sync::{Arc, Mutex};
 
     /// A sink whose writes wait while the test holds its gate.
     struct GatedSink(Arc<Mutex<()>>);
     impl ClipboardSink for GatedSink {
-        fn write(&mut self, _text: &str, _targets: ClipTargets) -> bool {
+        fn write(&mut self, request: WriteRequest<'_>) -> WriteResult {
             let _held = self.0.lock().unwrap();
-            true
+            WriteResult::each(request.targets, TargetOutcome::Taken)
         }
     }
 

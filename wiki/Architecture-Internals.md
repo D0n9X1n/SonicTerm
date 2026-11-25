@@ -476,14 +476,17 @@ visible, history, and saved-primary rows without reflow or later resurrection.
 Clipboard serialization keeps isolated or incomplete right-edge box drawing.
 It removes only a coherent multi-row side that ends in a lower-right frame
 corner. On Windows, the clipboard worker gives a successful OSC 52 write of at
-most 262,144 UTF-16 units one reassertion 150 ms later. Before writing, it
-snapshots the `CF_UNICODETEXT` value it replaces, only when `GlobalSize` reports a
-block of at most 512 KiB. When due, it writes again only when the policy is
-unchanged, no newer clipboard job was posted (any newer job cancels it), the
-current block has exactly the snapshot's `GlobalSize` (checked before
-`GlobalLock`) and the same UTF-16 units, and `GetClipboardSequenceNumber` did not
-move during that comparison. A newer, larger or unreadable clipboard owner is
-never overwritten, and a clear is never reasserted.
+most 262,144 UTF-16 units one reassertion 150 ms later. The write reads the
+`CF_UNICODETEXT` value it replaces (only when `GlobalSize` reports a block of at
+most 512 KiB), checks its binding and replaces the clipboard in one
+`OpenClipboard` acquisition. When due, the reassertion writes again only when the
+write's binding still holds, no newer clipboard job was posted (any newer job
+cancels it), the current block has exactly the snapshot's `GlobalSize` (checked
+before `GlobalLock`) and the same UTF-16 units, `GetClipboardSequenceNumber` did
+not move during that comparison, and the binding still holds after it. The
+comparison and the replacement share one acquisition, so no other program can
+change the clipboard between them. A newer, larger or unreadable clipboard owner
+is never overwritten, and a clear is never reasserted.
 
 Nested applications under rmux/tmux emit OSC 52 through `DCS tmux` passthrough.
 Trusted sessions require both options; `set-clipboard` alone does not relay the

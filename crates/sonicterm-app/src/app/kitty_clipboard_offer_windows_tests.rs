@@ -1,4 +1,4 @@
-use super::super::{plan, publish_offer, NativeOffer, OfferPlan};
+use super::super::{plan, publish_offer, NativeOffer, OfferPlan, Published};
 use super::*;
 use std::collections::HashMap;
 
@@ -19,6 +19,15 @@ struct FakeWin32 {
     fail_alloc_at: Option<usize>,
     sets: usize,
     fail_set_at: Option<usize>,
+    /// The change counter: every empty, set and external copy advances it.
+    sequence: u32,
+    /// Advance the counter while the next text block is read, as a delayed-rendering owner does.
+    race_read: bool,
+    /// Another program's copy that tries to land while the clipboard is open: it waits for
+    /// `CloseClipboard`, as `OpenClipboard` makes every other process wait.
+    external_copy: Option<Vec<u8>>,
+    /// Every clipboard call in order, shared so a test's gate can record itself between them.
+    log: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
 }
 
 impl Win32Clipboard for FakeWin32 {
@@ -60,6 +69,7 @@ impl Win32Clipboard for FakeWin32 {
         }
         self.opens += 1;
         self.is_open = true;
+        self.log.borrow_mut().push("open");
         true
     }
 
@@ -67,6 +77,8 @@ impl Win32Clipboard for FakeWin32 {
         assert!(self.is_open, "EmptyClipboard only while open");
         self.empties += 1;
         self.clipboard.clear();
+        self.sequence += 1;
+        self.log.borrow_mut().push("empty");
         true
     }
 
@@ -79,6 +91,8 @@ impl Win32Clipboard for FakeWin32 {
         }
         let bytes = self.live.remove(&block).expect("a live block");
         self.clipboard.push((format, bytes));
+        self.sequence += 1;
+        self.log.borrow_mut().push("set");
         Ok(())
     }
 
@@ -86,6 +100,48 @@ impl Win32Clipboard for FakeWin32 {
         assert!(self.is_open, "CloseClipboard only while open");
         self.closes += 1;
         self.is_open = false;
+        self.log.borrow_mut().push("close");
+        if let Some(bytes) = self.external_copy.take() {
+            // The other program was waiting for the clipboard; it takes it now.
+            self.clipboard = vec![(CF_UNICODETEXT, bytes)];
+            self.sequence += 1;
+        }
+    }
+
+    fn sequence(&mut self) -> u32 {
+        self.sequence
+    }
+
+    fn with_text(
+        &mut self,
+        admit: &dyn Fn(usize) -> bool,
+        read: &mut dyn FnMut(usize, &[u16]),
+    ) -> Option<()> {
+        assert!(self.is_open, "GetClipboardData only while open");
+        self.log.borrow_mut().push("read");
+        let bytes = self.clipboard.iter().find(|(format, _)| *format == CF_UNICODETEXT)?.1.clone();
+        if std::mem::take(&mut self.race_read) {
+            self.sequence += 1;
+        }
+        if !admit(bytes.len()) {
+            return None;
+        }
+        let units: Vec<u16> =
+            bytes.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+        let text_units = units.iter().position(|unit| *unit == 0).unwrap_or(units.len());
+        read(bytes.len(), &units[..text_units]);
+        Some(())
+    }
+}
+
+impl FakeWin32 {
+    /// The text the clipboard holds now, decoded from its `CF_UNICODETEXT` block.
+    fn text(&self) -> Option<String> {
+        let bytes = &self.clipboard.iter().find(|(format, _)| *format == CF_UNICODETEXT)?.1;
+        let units: Vec<u16> =
+            bytes.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+        let text_units = units.iter().position(|unit| *unit == 0).unwrap_or(units.len());
+        Some(String::from_utf16_lossy(&units[..text_units]))
     }
 }
 
@@ -123,7 +179,7 @@ fn block(format: &NativeFormat, bytes: &[u8]) -> Vec<u8> {
 fn set_clipboard_data_failure_empties_and_eio_never_done() {
     let offer = offer(&[("text/plain", b"t"), ("text/html", b"<b>h</b>"), ("image/png", b"png")]);
     let mut backend = WindowsOffer::new(FakeWin32 { fail_set_at: Some(1), ..previous() });
-    assert!(!publish_offer(&mut backend, &offer));
+    assert_eq!(publish_offer(&mut backend, &offer, &|| true), Published::Failed);
     let fake = &backend.clipboard;
     assert!(fake.clipboard.is_empty(), "the first format was emptied again");
     assert_eq!((fake.opens, fake.empties, fake.closes), (1, 2, 1));
@@ -145,7 +201,7 @@ fn windows_publish_every_format_in_one_session() {
         ("text/uri-list", b"file:///C:/a%20b.txt\r\n"),
     ]);
     let mut backend = WindowsOffer::new(previous());
-    assert!(publish_offer(&mut backend, &offer));
+    assert_eq!(publish_offer(&mut backend, &offer, &|| true), Published::Written);
     let fake = &backend.clipboard;
     assert_eq!((fake.opens, fake.empties, fake.closes), (1, 1, 1));
     assert_eq!(fake.registered, [HTML_FORMAT_NAME, PNG_FORMAT_NAME, custom]);
@@ -162,7 +218,8 @@ fn windows_publish_every_format_in_one_session() {
 fn windows_registered_custom_mime_round_trip() {
     let custom = "application/vnd.sonicterm+json";
     let mut backend = WindowsOffer::new(previous());
-    assert!(publish_offer(&mut backend, &offer(&[(custom, b"{\"a\":1}")])));
+    let custom_offer = offer(&[(custom, b"{\"a\":1}")]);
+    assert_eq!(publish_offer(&mut backend, &custom_offer, &|| true), Published::Written);
     assert_eq!(backend.clipboard.registered, [custom]);
     assert_eq!(backend.clipboard.clipboard, [(0xC000, b"{\"a\":1}".to_vec())]);
 }
@@ -173,12 +230,12 @@ fn windows_registered_custom_mime_round_trip() {
 fn stage_or_open_failure_keeps_previous_clipboard() {
     let offer = offer(&[("text/plain", b"t"), ("text/html", b"h")]);
     let mut backend = WindowsOffer::new(FakeWin32 { fail_alloc_at: Some(1), ..previous() });
-    assert!(!publish_offer(&mut backend, &offer));
+    assert_eq!(publish_offer(&mut backend, &offer, &|| true), Published::Failed);
     assert_eq!(backend.clipboard.opens, 0);
     assert!(backend.clipboard.live.is_empty());
     assert_eq!(backend.clipboard.clipboard, previous().clipboard);
     let mut backend = WindowsOffer::new(FakeWin32 { refuse_open: true, ..previous() });
-    assert!(!publish_offer(&mut backend, &offer));
+    assert_eq!(publish_offer(&mut backend, &offer, &|| true), Published::Failed);
     assert!(backend.clipboard.live.is_empty());
     assert_eq!(backend.clipboard.clipboard, previous().clipboard);
 }
@@ -314,4 +371,110 @@ fn native_copies_fit_their_reservation() {
         let native = encode(&format, bytes).expect("encodable").byte_len();
         assert!(native <= copy_bound(&format, bytes.len()), "{format:?} {bytes:?}: {native}");
     }
+}
+
+/// The fake holding `text` as its only `CF_UNICODETEXT` block.
+fn holding_text(text: &str) -> FakeWin32 {
+    FakeWin32 { clipboard: vec![(CF_UNICODETEXT, utf16_block(text))], ..FakeWin32::default() }
+}
+
+/// The snapshot a write over `text` reads.
+fn snapshot_of(text: &str) -> Snapshot {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    Snapshot { block_bytes: units.len() * 2 + 2, units }
+}
+
+/// Contract: a program text write reads the value it replaces, checks its gate and replaces the
+/// clipboard in one acquisition: one open, the read, the gate, then `EmptyClipboard`, the set and
+/// one close, so nothing can change the clipboard between the check and the replacement.
+#[test]
+fn text_write_reads_gates_and_replaces_in_one_acquisition() {
+    let mut backend = WindowsOffer::new(holding_text("old"));
+    let log = backend.clipboard.log.clone();
+    let gate = || {
+        log.borrow_mut().push("gate");
+        true
+    };
+    let (published, replaced) = backend.write_text("program", Some(1 << 20), &gate);
+    assert_eq!(published, Published::Written);
+    let replaced = replaced.expect("the replaced value was read");
+    assert_eq!(replaced.units, "old".encode_utf16().collect::<Vec<_>>());
+    assert_eq!(*log.borrow(), ["open", "read", "gate", "empty", "set", "close"]);
+    assert_eq!(backend.clipboard.text().as_deref(), Some("program"));
+}
+
+/// Contract: another program's copy that tries to land between the read of the replaced value
+/// and the write waits for the acquisition to end, so it lands after the write and wins; the
+/// program write never overwrites it.
+#[test]
+fn external_copy_during_text_write_lands_after_it() {
+    let mut backend = WindowsOffer::new(holding_text("old"));
+    backend.clipboard.external_copy = Some(utf16_block("external"));
+    let (published, _) = backend.write_text("program", Some(1 << 20), &|| true);
+    assert_eq!(published, Published::Written);
+    assert_eq!(backend.clipboard.text().as_deref(), Some("external"));
+}
+
+/// Contract: a gate that refuses at the commit point, after the replaced value was read, closes
+/// the clipboard untouched and frees the staged block: `Unchanged`, nothing emptied or set.
+#[test]
+fn refused_gate_leaves_the_clipboard_untouched() {
+    let mut backend = WindowsOffer::new(holding_text("old"));
+    let (published, replaced) = backend.write_text("program", Some(1 << 20), &|| false);
+    assert_eq!(published, Published::Unchanged);
+    assert!(replaced.is_some(), "the read ran before the gate");
+    let fake = &backend.clipboard;
+    assert_eq!((fake.opens, fake.empties, fake.sets, fake.closes), (1, 0, 0, 1));
+    assert_eq!(fake.text().as_deref(), Some("old"));
+    assert!(fake.live.is_empty(), "the staged block was freed");
+    let offer = offer(&[("text/plain", b"t"), ("text/html", b"h")]);
+    let mut backend = WindowsOffer::new(holding_text("old"));
+    assert_eq!(publish_offer(&mut backend, &offer, &|| false), Published::Unchanged);
+    assert_eq!((backend.clipboard.empties, backend.clipboard.sets), (0, 0));
+    assert!(backend.clipboard.live.is_empty());
+}
+
+/// Contract: a reassertion writes the program's text again only while the clipboard holds exactly
+/// the value the write replaced, its change counter stays put across that comparison, and its gate
+/// still passes after it; compare and replace share one acquisition, so a newer value always wins.
+#[test]
+fn reassert_compares_and_replaces_in_one_acquisition() {
+    let previous = snapshot_of("old");
+    let mut backend = WindowsOffer::new(holding_text("old"));
+    assert_eq!(backend.reassert_text("program", &previous, &|| true), Published::Written);
+    let fake = &backend.clipboard;
+    assert_eq!((fake.opens, fake.closes), (1, 1));
+    assert_eq!(fake.text().as_deref(), Some("program"));
+
+    let mut backend = WindowsOffer::new(holding_text("newer"));
+    assert_eq!(backend.reassert_text("program", &previous, &|| true), Published::Unchanged);
+    assert_eq!(backend.clipboard.text().as_deref(), Some("newer"), "a newer value wins");
+
+    let mut backend = WindowsOffer::new(holding_text("old"));
+    backend.clipboard.race_read = true;
+    let published = backend.reassert_text("program", &previous, &|| true);
+    assert_eq!(published, Published::Unchanged, "the counter moved during the comparison");
+    assert_eq!(backend.clipboard.text().as_deref(), Some("old"));
+
+    let mut backend = WindowsOffer::new(holding_text("old"));
+    assert_eq!(backend.reassert_text("program", &previous, &|| false), Published::Unchanged);
+    assert_eq!(backend.clipboard.text().as_deref(), Some("old"), "a revoked gate writes nothing");
+    assert!(backend.clipboard.live.is_empty());
+
+    let mut backend = WindowsOffer::new(holding_text("old"));
+    backend.clipboard.external_copy = Some(utf16_block("external"));
+    assert_eq!(backend.reassert_text("program", &previous, &|| true), Published::Written);
+    let text = backend.clipboard.text();
+    assert_eq!(text.as_deref(), Some("external"), "a copy at the handoff lands after the write");
+}
+
+/// Contract: an empty program write clears the clipboard in one acquisition: opened, emptied and
+/// closed, with nothing set.
+#[test]
+fn empty_text_write_clears_in_one_acquisition() {
+    let mut backend = WindowsOffer::new(holding_text("old"));
+    assert_eq!(backend.write_text("", None, &|| true).0, Published::Written);
+    let fake = &backend.clipboard;
+    assert_eq!((fake.opens, fake.empties, fake.sets, fake.closes), (1, 1, 0, 1));
+    assert!(fake.clipboard.is_empty());
 }

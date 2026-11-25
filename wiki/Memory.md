@@ -228,8 +228,9 @@ closes the owner. No pane carries this class.
 
 OSC 52, OSC 1337 `Copy=:` and OSC 5522 writes reserve every buffer before allocating it from one
 process-wide clipboard staging budget of `max(128 MiB, 2 × clipboard_write_limit_bytes)` at
-startup: the decoded bytes, the U+FFFD expansion of a non-UTF-8 payload, and the native copy
-(`CF_UNICODETEXT` on Windows, the UTF-8 length elsewhere). An OSC 5522 commit of several types
+startup: the decoded bytes, the U+FFFD expansion of a non-UTF-8 payload, and one native copy
+per destination (`CF_UNICODETEXT` on Windows, the UTF-8 length elsewhere; a `cp` write on Linux
+reserves two, because CLIPBOARD and PRIMARY keep separate copies). An OSC 5522 commit of several types
 reserves, before its job is posted, every kept buffer plus one native copy of each type: on
 Windows the `CF_UNICODETEXT` block (two bytes per UTF-8 byte and a terminator), the CF_HTML block
 with its header and wrapper (and the transient header string), `PNG` and custom blocks at their
@@ -239,8 +240,11 @@ cover answers `EBUSY`. Each retention pass charges what
 live leases hold, as `ClipboardStaging`, to the tracking-only process owner, with one item per
 posted program write (at most 8), so a large write never trips a pane backstop. A lease is
 released when the native clipboard call returns; on Linux and Windows that call runs on the
-clipboard worker, so the lease moves into the worker's job. On Linux the part covering arboard's
-copy stays charged until SonicTerm's next write to that selection, or a user copy, replaces it.
+clipboard worker, so the lease moves into the worker's job. On Linux each selection keeps its own
+share covering arboard's copy, charged until SonicTerm's next write to that selection, or a user
+copy to it, replaces it: a CLIPBOARD-only write releases only CLIPBOARD's share. When one
+selection refuses a write, the other's share is still kept; when a native call fails after it may
+have stored the text, the larger of the old and new shares stays charged.
 A Windows write armed for reassertion keeps its lease, plus its snapshot of the replaced value
 (at most 512 KiB, reserved before the read), until the reassertion runs or a newer job cancels
 it. A write the budget cannot cover is refused busy.

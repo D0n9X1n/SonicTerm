@@ -437,3 +437,23 @@ fn clipboard_staging_charged_to_process_owner() {
     app.charge_clipboard_staging();
     assert_eq!(app.governor.snapshot(root).unwrap().owner_class_bytes[class], 0);
 }
+
+/// Contract: a write to both CLIPBOARD and PRIMARY reserves one native copy per selection before
+/// it is posted, so a budget that covers one copy but not two refuses the `cp` write busy and
+/// admits the same text to one selection.
+#[test]
+fn two_selection_write_reserves_a_native_copy_each() {
+    let text = "hello";
+    let budget = text.len() + 2 * native_clipboard_bytes(text) - 1;
+    let both = ClipTargets { clipboard: true, primary: true };
+    let one = ClipTargets { clipboard: true, primary: false };
+    for (targets, admitted) in [(both, false), (one, true)] {
+        let staging = staging(budget, budget);
+        let mut lease = staging.lease();
+        let bytes = text.as_bytes().to_vec();
+        assert!(lease.grow_to(bytes.capacity()));
+        let result = into_text(bytes, lease, targets);
+        assert_eq!(result.is_ok(), admitted, "{targets:?}");
+        assert!(result.is_ok() || matches!(result, Err(Osc52Refusal::Busy)), "{targets:?}");
+    }
+}

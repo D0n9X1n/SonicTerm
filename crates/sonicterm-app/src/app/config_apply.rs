@@ -601,18 +601,10 @@ impl App {
             }
         }
 
-        // A reload to `osc52 = "deny"` refuses every program write the clipboard worker has not
-        // committed and cancels an armed reassertion, so a later reload back to allow cannot
-        // replay what the denial stopped. A change to `"ask"` does the same: writes posted under
-        // allow were never approved. A reload that keeps `"ask"` leaves approved writes alone.
-        let osc52 = new_cfg.terminal.osc52;
-        let entered_ask =
-            osc52 == sonicterm_cfg::config::Osc52Policy::Ask && self.config.terminal.osc52 != osc52;
-        if osc52 == sonicterm_cfg::config::Osc52Policy::Deny || entered_ask {
-            self.clip_state.domain.revoke_program_writes();
-        }
-        // Reads that end from now on follow the reloaded `osc52_read`; a change to either policy
-        // revokes every outstanding read ticket.
+        // Reads that end from now on follow the reloaded `osc52_read`. A change to `osc52` or
+        // `osc52_read` starts a new policy generation, which revokes every outstanding ticket and
+        // every program write (approved or auto-allowed) not yet committed, and cancels an armed
+        // reassertion: each one's binding is checked at its commit point.
         self.publish_clipboard_policies(&new_cfg);
         // A changed write limit applies to streams opened from now on; open streams and leases
         // keep what they reserved.

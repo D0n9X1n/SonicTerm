@@ -343,17 +343,22 @@ impl super::App {
         let pane_id = ticket.binding().pane_id;
         tracing::debug!(pane_id, reason = ?ticket.cancel_reason(), "OSC 52 read cancelled");
         self.clip_state.reads.last_cancel = Some(reason);
-        let asker_present = self.pane_by_id(pane_id).is_some_and(|pane| {
-            pane.pty.as_ref().map_or(0, |pty| pty.incarnation()) == ticket.binding().incarnation
-                && pane.read_identity.command_epoch() == ticket.binding().command_epoch
-        });
-        let kitty = ticket.take_write().and_then(|job| job.kitty.clone());
+        let write = ticket.take_write();
         drop(ticket);
-        if asker_present {
+        if let Some(job) = write {
             // The waiting program hears the refusal; another PTY or command would read the
-            // status as input, so it is never sent there.
-            self.send_kitty_status(pane_id, kitty, super::event_loop::ClipWriteOutcome::Denied);
+            // status as input, so the binding withholds it there.
+            self.deny_write_status(pane_id, job);
         }
+    }
+
+    /// Answer a refused asked write `EPERM` while its program still reads the pane; dropping
+    /// `job` frees its lease and slot.
+    fn deny_write_status(&mut self, pane_id: u64, job: super::osc52_stream::ClipboardJob) {
+        let (reply, binding) = (job.kitty.clone(), job.binding.clone());
+        drop(job);
+        let denied = super::event_loop::ClipWriteOutcome::Denied;
+        self.send_kitty_status(pane_id, reply, &binding, denied);
     }
 
     /// Run the read pipeline now.
@@ -458,9 +463,11 @@ impl super::App {
             // dropping the ticket frees the job.
             let pane_id = ticket.binding().pane_id;
             let mut ticket = ticket;
-            let kitty = ticket.take_write().and_then(|job| job.kitty.clone());
+            let write = ticket.take_write();
             drop(ticket);
-            self.send_kitty_status(pane_id, kitty, super::event_loop::ClipWriteOutcome::Denied);
+            if let Some(job) = write {
+                self.deny_write_status(pane_id, job);
+            }
             tracing::debug!(pane_id, "OSC 52 asked write refused");
             self.show_clip_outcome(pane_id, super::event_loop::ClipWriteOutcome::Denied, 0, now);
             return;
@@ -676,14 +683,18 @@ impl super::App {
     }
 
     /// Hand an approved write's job to the clipboard ordering domain, with its lease; the ticket
-    /// and its slots end here. The write's native result shows on the clip segment once it settles.
+    /// and its slots end here. The job's binding records the approval, so the worker's commit
+    /// point refuses it once its pane, PTY, command, READONLY state or either clipboard policy
+    /// changed. The write's native result shows on the clip segment once it settles.
     pub(in crate::app) fn submit_approved_write(&mut self, mut ticket: ConsentTicket) {
         let pane_id = ticket.binding().pane_id;
-        let Some(job) = ticket.take_write() else {
+        let Some(mut job) = ticket.take_write() else {
             // When: take_write is None, the ticket holds no write.
             return;
         };
         drop(ticket);
+        // Apply (or an Always grant) just revalidated the ticket, READONLY included.
+        job.binding.approve();
         let bytes = job.text.len();
         match self.submit_program_clipboard(pane_id, job, true) {
             Some(outcome) => self.show_clip_outcome(pane_id, outcome, bytes, Instant::now()),

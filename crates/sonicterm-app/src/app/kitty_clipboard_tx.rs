@@ -626,18 +626,26 @@ impl KittyClipboardTx {
 impl super::App {
     /// Answer a settled OSC 5522 write on pane `pane_id`'s PTY: `DONE` when written, `EIO` on a
     /// native failure, `EPERM` when the policy or the user refused it, `EFBIG` when too large.
-    /// The reply carries no clipboard data, so it rides a zero-byte custody.
+    /// It is sent only while `binding`'s program still reads the pane, so a status never becomes
+    /// input to a later command. The reply carries no clipboard data, so it rides a zero-byte
+    /// custody.
     pub(in crate::app) fn send_kitty_status(
         &mut self,
         pane_id: u64,
         reply: Option<KittyReply>,
+        binding: &super::osc52_read_ticket::WriteBinding,
         outcome: super::event_loop::ClipWriteOutcome,
     ) {
         use super::event_loop::ClipWriteOutcome;
         let Some(reply) = reply else {
-            // When: reply is None, the write came from OSC 52 and has no status to send.
+            // When: reply is None, the write came from OSC 52 or was dropped, so nothing is sent.
             return;
         };
+        if !self.write_status_owed(pane_id, binding) {
+            // When: write_status_owed is false, the program that asked no longer reads the pane.
+            tracing::debug!(pane_id, "OSC 5522 write status withheld: its program is gone");
+            return;
+        }
         let status = match outcome {
             ClipWriteOutcome::Written => KittyClipboardStatus::Done,
             ClipWriteOutcome::Failed => KittyClipboardStatus::Eio,
@@ -651,6 +659,27 @@ impl super::App {
             // The pane's writer is gone or busy: the status is dropped and only its name logged.
             tracing::debug!(pane_id, ?status, "OSC 5522 write status dropped");
         }
+    }
+
+    /// Whether a write's status still has its asker on pane `pane_id`: the pane's identity names
+    /// the same PTY incarnation and command `binding` was admitted under, and a live pane still
+    /// runs that PTY. A closed pane owes nothing it could deliver; its send fails on its own.
+    pub(in crate::app) fn write_status_owed(
+        &self,
+        pane_id: u64,
+        binding: &super::osc52_read_ticket::WriteBinding,
+    ) -> bool {
+        if !binding.asker_reads() {
+            // When: asker_reads is false, the PTY or command changed since the write was admitted.
+            return false;
+        }
+        let Some(source) = binding.source() else {
+            // When: the write has no source pane, nothing can have changed under it.
+            return true;
+        };
+        self.pane_by_id(pane_id).is_none_or(|pane| {
+            pane.pty.as_ref().map_or(0, |pty| pty.incarnation()) == source.incarnation
+        })
     }
 }
 

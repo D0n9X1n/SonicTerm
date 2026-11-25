@@ -305,7 +305,7 @@ impl App {
     #[doc(hidden)]
     pub fn copy_mode_set(&mut self, copy_mode: Option<CopyModeState>) {
         if let Some(main) = self.main_mut() {
-            main.copy_mode = copy_mode;
+            main.set_copy_mode(copy_mode);
         }
     }
 

@@ -1,4 +1,4 @@
-use super::super::{plan, publish_offer, NativeOffer, OfferPlan};
+use super::super::{plan, publish_offer, NativeOffer, OfferPlan, Published};
 use super::*;
 use crate::app::osc52_read_source::{TypeListing, TypeRead};
 use objc2::runtime::AnyObject;
@@ -51,7 +51,8 @@ fn macos_png_html_text_custom_mime_one_change_count() {
         ]);
         assert_eq!(offer.omitted(), 0);
         let before = board.0.changeCount();
-        assert!(publish_offer(&mut Pasteboard::on(board.0.clone()), &offer));
+        let published = publish_offer(&mut Pasteboard::on(board.0.clone()), &offer, &|| true);
+        assert_eq!(published, Published::Written);
         assert_eq!(board.0.changeCount(), before + 1, "one publish, one change");
         assert_eq!(board.data("public.utf8-plain-text").as_deref(), Some(text));
         assert_eq!(board.data("public.html").as_deref(), Some(&b"<b>h</b>"[..]));
@@ -87,10 +88,9 @@ fn dynamic_uti_round_trips_mime() {
 fn stage_failure_leaves_previous_offer() {
     objc2::rc::autoreleasepool(|_| {
         let board = Private::new();
-        assert!(publish_offer(
-            &mut Pasteboard::on(board.0.clone()),
-            &offer(&[("text/plain", b"previous")])
-        ));
+        let previous = offer(&[("text/plain", b"previous")]);
+        let published = publish_offer(&mut Pasteboard::on(board.0.clone()), &previous, &|| true);
+        assert_eq!(published, Published::Written);
         let before = board.0.changeCount();
         // A uri-list line that is not a URI cannot be held, so a fake plan that kept it fails at
         // staging.
@@ -105,7 +105,8 @@ fn stage_failure_leaves_previous_offer() {
             OfferPlan::Offer(offer) => offer,
             other => panic!("{other:?}"),
         };
-        assert!(!publish_offer(&mut Pasteboard::on(board.0.clone()), &forced));
+        let published = publish_offer(&mut Pasteboard::on(board.0.clone()), &forced, &|| true);
+        assert_eq!(published, Published::Failed);
         assert_eq!(board.0.changeCount(), before, "nothing was cleared");
         assert_eq!(board.data("public.utf8-plain-text").as_deref(), Some(&b"previous"[..]));
     });
@@ -132,7 +133,8 @@ fn macos_uri_list_file_and_url_items() {
         let files_offer = offer(&[("text/plain", b"t"), ("text/uri-list", list)]);
         assert_eq!(files_offer.omitted(), 0);
         let before = board.0.changeCount();
-        assert!(publish_offer(&mut Pasteboard::on(board.0.clone()), &files_offer));
+        let board_writer = &mut Pasteboard::on(board.0.clone());
+        assert_eq!(publish_offer(board_writer, &files_offer, &|| true), Published::Written);
         assert_eq!(board.0.changeCount(), before + 1, "one publish, one change");
         let files = item_strings(&board, "public.file-url");
         assert_eq!(files, [Some("file:///tmp/a%20b".into()), Some("file:///tmp/c".into())]);
@@ -143,7 +145,8 @@ fn macos_uri_list_file_and_url_items() {
 
         let url = Private::new();
         let url_offer = offer(&[("text/uri-list", b"https://example.com/x\r\n")]);
-        assert!(publish_offer(&mut Pasteboard::on(url.0.clone()), &url_offer));
+        let url_writer = &mut Pasteboard::on(url.0.clone());
+        assert_eq!(publish_offer(url_writer, &url_offer, &|| true), Published::Written);
         assert_eq!(item_strings(&url, "public.url"), [Some("https://example.com/x".into())]);
         for refused in [
             &b"file:///tmp/a\r\nhttps://example.com/\r\n"[..],
@@ -170,7 +173,8 @@ fn read_and_list_non_text_types() {
             ("image/png", b"\x89PNG"),
             (custom, b"custom"),
         ]);
-        assert!(publish_offer(&mut Pasteboard::on(board.0.clone()), &typed));
+        let published = publish_offer(&mut Pasteboard::on(board.0.clone()), &typed, &|| true);
+        assert_eq!(published, Published::Written);
         let read = |mime: &str, cap: usize| read_type(&board.0, mime, cap);
         assert_eq!(read("text/html", 64), TypeRead::Bytes(b"<b>h</b>".to_vec()));
         assert_eq!(read("image/png", 64), TypeRead::Bytes(b"\x89PNG".to_vec()));

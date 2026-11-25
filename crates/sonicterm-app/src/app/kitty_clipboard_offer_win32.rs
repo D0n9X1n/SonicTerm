@@ -10,17 +10,19 @@ use windows::Win32::{
     System::{
         DataExchange::{
             CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
-            GetClipboardFormatNameW, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+            GetClipboardFormatNameW, GetClipboardSequenceNumber, OpenClipboard,
+            RegisterClipboardFormatW, SetClipboardData,
         },
         Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT},
     },
 };
 
 use super::windows_formats::{
-    hdrop_uri_list, html_fragment, Win32Clipboard, WindowsOffer, CF_HDROP, HTML_FORMAT_NAME,
-    PNG_FORMAT_NAME,
+    hdrop_uri_list, html_fragment, Win32Clipboard, WindowsOffer, CF_HDROP, CF_UNICODETEXT,
+    HTML_FORMAT_NAME, PNG_FORMAT_NAME,
 };
-use super::{native_format, publish_offer, NativeFormat, NativeOffer};
+use super::{native_format, publish_offer, CommitGate, NativeFormat, NativeOffer, Published};
+use crate::app::clipboard_worker::Snapshot;
 use crate::app::osc52_read_source::{TypeRead, MAX_NATIVE_TYPES_SCANNED};
 
 /// Attempts to open a clipboard another process briefly holds.
@@ -107,12 +109,68 @@ impl Win32Clipboard for Win32 {
             // SAFETY: this thread opened the clipboard in open; it is closed once here.
             unsafe { CloseClipboard() };
     }
+
+    fn sequence(&mut self) -> u32 {
+        // SAFETY: GetClipboardSequenceNumber takes no arguments and only reads a session counter.
+        unsafe { GetClipboardSequenceNumber() }
+    }
+
+    fn with_text(
+        &mut self,
+        admit: &dyn Fn(usize) -> bool,
+        read: &mut dyn FnMut(usize, &[u16]),
+    ) -> Option<()> {
+        let handle =
+            // SAFETY: the clipboard is open on this thread; the handle stays owned by the clipboard.
+            unsafe { GetClipboardData(CF_UNICODETEXT) }.ok()?;
+        let block = HGLOBAL(handle.0);
+        let block_bytes =
+            // SAFETY: block is the clipboard's live text handle while the clipboard stays open.
+            unsafe { GlobalSize(block) };
+        if block_bytes == 0 || !admit(block_bytes) {
+            // When: block_bytes is unknown or admit refuses it, the block is never locked.
+            return None;
+        }
+        let base =
+            // SAFETY: block is a live moveable allocation, so GlobalLock returns its base or null.
+            unsafe { GlobalLock(block) }.cast::<u16>();
+        if base.is_null() {
+            // When: base is null, GlobalLock failed and there is nothing to read.
+            return None;
+        }
+        let units =
+            // SAFETY: base points at block_bytes locked bytes until GlobalUnlock; block_bytes / 2
+            // u16 units stay in bounds.
+            unsafe { std::slice::from_raw_parts(base, block_bytes / 2) };
+        let text_units = units.iter().position(|unit| *unit == 0).unwrap_or(units.len());
+        read(block_bytes, &units[..text_units]);
+        let _ =
+            // SAFETY: block was locked above; a final unlock reports an error with no lock left.
+            unsafe { GlobalUnlock(block) };
+        Some(())
+    }
 }
 
-/// Publish `offer` on the Windows clipboard in one `OpenClipboard` session; true only when every
-/// representation was set.
-pub(super) fn publish(offer: &NativeOffer) -> bool {
-    publish_offer(&mut WindowsOffer::new(Win32), offer)
+/// Publish `offer` on the Windows clipboard in one `OpenClipboard` session, `gate` checked
+/// immediately before `EmptyClipboard`.
+pub(super) fn publish(offer: &NativeOffer, gate: CommitGate<'_>) -> Published {
+    publish_offer(&mut WindowsOffer::new(Win32), offer, gate)
+}
+
+/// Replace the clipboard with `text` in one acquisition, reading what it replaces first when
+/// `snapshot_max_bytes` is set; `gate` is checked after that read, before `EmptyClipboard`.
+pub(super) fn write_text(
+    text: &str,
+    snapshot_max_bytes: Option<usize>,
+    gate: CommitGate<'_>,
+) -> (Published, Option<Snapshot>) {
+    WindowsOffer::new(Win32).write_text(text, snapshot_max_bytes, gate)
+}
+
+/// Write `text` again only while the clipboard holds exactly `previous`, compared and replaced in
+/// one acquisition; `gate` is checked after the comparison, before `EmptyClipboard`.
+pub(super) fn reassert_text(text: &str, previous: &Snapshot, gate: CommitGate<'_>) -> Published {
+    WindowsOffer::new(Win32).reassert_text(text, previous, gate)
 }
 
 /// The clipboard, open on this thread for one read until dropped.

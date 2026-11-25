@@ -138,9 +138,16 @@ cargo build -p sonicterm-app
   `Copy=:` writes (`osc52_stream.rs`) reserve every buffer from `ClipboardStaging` before
   allocating it and take a program slot before posting. On Linux and Windows they reach the
   native clipboard only on the one clipboard worker (`clipboard_worker.rs`), which runs program
-  writes and user copies strictly in the event loop's posting order (at most 4 user copies wait)
-  and rechecks the policy epoch at the commit point; the lease moves into the job and is released
-  when the native call returns. The event loop writes a user copy itself only when nothing is in
+  writes and user copies strictly in the event loop's posting order (at most 4 user copies wait).
+  Each job carries its `WriteBinding` (`osc52_read_ticket.rs`: the policy generation; for an
+  approved write also the pane, PTY incarnation, owner and command epochs and the READONLY epoch at
+  Apply), checked at the commit point: on Windows inside one `OpenClipboard` acquisition, after the
+  snapshot or comparison and before `EmptyClipboard` (`WindowsOffer::write_text`/`reassert_text`
+  over the `Win32Clipboard` seam), elsewhere immediately before the native call. A stale binding
+  drops the write with no status, and an OSC 5522 status goes out only while the PTY and command
+  that asked still own the pane (`write_status_owed`). The lease moves into the job and is
+  released when the native call returns; on Linux each selection keeps its own retained share
+  (`osc52_stream_retained.rs`). The event loop writes a user copy itself only when nothing is in
   flight and it is at most 512 KiB. macOS has no worker and refuses program writes over 512 KiB.
   Clipboard reads and `osc52 = "ask"` writes need a consent ticket (`osc52_read_ticket.rs`), taken
   in the VT worker before any event is posted: one read and one asked write per pane, 8 per

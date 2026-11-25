@@ -13,7 +13,7 @@ use objc2::runtime::{AnyClass, AnyObject, ProtocolObject};
 use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardWriting};
 use objc2_foundation::{NSArray, NSData, NSString};
 
-use super::{NativeFormat, OfferBackend};
+use super::{CommitGate, NativeFormat, OfferBackend, Published};
 use crate::app::osc52_read_source::{
     list_native_types, TypeListing, TypeRead, MAX_NATIVE_TYPES_SCANNED,
 };
@@ -184,13 +184,22 @@ impl OfferBackend for Pasteboard {
         self.item.setData_forType(&NSData::with_bytes(bytes), &kind)
     }
 
-    fn publish(&mut self) -> bool {
+    fn publish(&mut self, gate: CommitGate<'_>) -> Published {
         let item = std::mem::replace(&mut self.item, NSPasteboardItem::new());
         let mut items = vec![ProtocolObject::<dyn NSPasteboardWriting>::from_retained(item)];
         let extra = self.extra.drain(..);
         items.extend(extra.map(ProtocolObject::<dyn NSPasteboardWriting>::from_retained));
+        if !gate() {
+            // When: gate refuses at the commit point, the staged items drop and nothing changes.
+            return Published::Unchanged;
+        }
         self.board.clearContents();
-        self.board.writeObjects(&NSArray::from_retained_slice(&items))
+        if self.board.writeObjects(&NSArray::from_retained_slice(&items)) {
+            Published::Written
+        } else {
+            // When: writeObjects refuses the items, the cleared pasteboard holds no partial offer.
+            Published::Failed
+        }
     }
 
     fn discard(&mut self) {

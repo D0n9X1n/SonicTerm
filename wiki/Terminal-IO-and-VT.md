@@ -293,10 +293,16 @@ process, else refused busy); the ticket holds the write, its lease and its progr
 the read ticket's revalidation rules below, and its page is titled `Let tab N, pane M write to
 the clipboard?`. Apply hands the write to the clipboard worker's ordering domain; Deny, Escape,
 an outside click or expiry drop it, and nothing is ever sent back to the program. The event loop
-refuses a write under `"deny"`, and under `"ask"` any write that was not approved. On
-Linux and Windows it posts the write to one clipboard worker thread, which rechecks the policy
-and calls the native clipboard; that call is the commit point, and the write's lease is
-released when it returns. Program writes and user copies share the worker's queue and run
+refuses a write under `"deny"`, and under `"ask"` any write that was not approved. Every write
+carries what it was admitted under to its commit point: the policy generation, and for an
+approved write also its pane, PTY, window owner, command and the window's READONLY state at
+Apply. A change to `osc52` or `osc52_read` drops every program write not yet committed; an
+approved write is also dropped when its pane closes or moves, its PTY or command changes, or its
+window enters READONLY. A dropped write changes nothing and answers nothing. On Linux and Windows
+the event loop posts the write to one clipboard worker thread, which checks that binding
+immediately before the native call (on Windows inside the same clipboard acquisition, after
+reading the value it replaces and before `EmptyClipboard`); that call is the commit point, and
+the write's lease is released when it returns. Program writes and user copies share the worker's queue and run
 strictly in the order the event loop handled them, so a later user copy always wins. The event
 loop writes a user copy itself only when nothing is queued and the copy is at most 512 KiB; at
 most 4 user copies wait on the worker, and one more is refused with the copy-failure notice and
@@ -420,10 +426,11 @@ answers `EPERM`, `ask` opens the same consent page as an OSC 52 write, and a ref
 answers `EPERM`. The write then follows the OSC 52 write path to the clipboard worker, and the
 event loop answers `DONE`, `EIO` (native failure) or `EPERM` on the source pane's PTY. A write
 the clipboard worker held when it stopped answers `EIO`. An asked write whose consent ends without
-an answer (its page lost, its pane moved, the policy changed) answers `EPERM` while the same PTY
-and command still own the pane; after a PTY or command change, or once the pane closed, nothing
-is sent, because another program would read it as input. Omitted representations are released
-at the commit.
+an answer (its page lost, its pane moved, the policy changed) answers `EPERM`. Every status is
+sent only while the PTY and command that sent the write still own the pane; after a PTY or
+command change, or once the pane closed, nothing is sent, because another program would read it
+as input. A write dropped at its commit point because its binding changed answers nothing.
+Omitted representations are released at the commit.
 
 An open write ends `EBUSY` 30 s after its last packet or 10 min after it opened, and `EPERM`
 when the policy becomes `deny`; the VT worker wakes for both even while the child prints

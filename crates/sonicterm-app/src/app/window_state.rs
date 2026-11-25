@@ -311,6 +311,17 @@ pub(crate) fn window_redraw_requests_for(window: &WindowState) -> u64 {
 }
 
 impl WindowState {
+    /// Replace this window's copy mode. Entering READONLY revokes every clipboard write already
+    /// approved for one of its panes, whose binding records the READONLY epoch at Apply.
+    pub(in crate::app) fn set_copy_mode(&mut self, copy_mode: Option<CopyModeState>) {
+        if copy_mode.as_ref().is_some_and(CopyModeState::is_read_only) {
+            for (_, pane) in &self.panes {
+                pane.read_identity.bump_readonly();
+            }
+        }
+        self.copy_mode = copy_mode;
+    }
+
     /// Record a press on the tab at `tab_index` of this window's bar at `press_pos`: the
     /// pointer is down, the tab is pressed and a drag session starts, so a drag can reorder,
     /// transfer or tear the tab out. Both left-button handlers call it after activating the tab.

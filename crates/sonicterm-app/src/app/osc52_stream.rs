@@ -16,7 +16,7 @@ use sonicterm_cfg::config::{Osc52Policy, Osc52ReadPolicy};
 use sonicterm_vt::vt::{ClipboardInbox, ClipboardPhase};
 
 use super::osc52_read_ticket::{
-    admit_read, admit_write, Admission, ConsentTicket, ReadIdentity, WriteAdmission,
+    admit_read, admit_write, Admission, ConsentTicket, ReadIdentity, WriteAdmission, WriteBinding,
 };
 use super::spawn_pane::ClipAttempts;
 pub(super) use super::spawn_pane::Osc52Refusal;
@@ -297,6 +297,14 @@ impl ClipLease {
         reserved
     }
 
+    /// Move `bytes` of this reservation, at most what it holds, into a new lease on the same
+    /// staging; the total reserved is unchanged.
+    pub(in crate::app) fn split_off(&mut self, bytes: usize) -> ClipLease {
+        let moved = bytes.min(self.bytes);
+        self.bytes -= moved;
+        ClipLease { staging: self.staging.clone(), bytes: moved }
+    }
+
     /// Shrink the reservation to `total` bytes.
     pub(in crate::app) fn shrink_to(&mut self, total: usize) {
         if total < self.bytes {
@@ -510,8 +518,14 @@ pub(in crate::app) fn reassert_eligible(text: &str) -> bool {
 }
 
 /// Build the text for decoded `bytes`, invalid sequences replaced by U+FFFD, with `lease` grown
-/// first to cover the text and its native copy.
-fn into_text(bytes: Vec<u8>, mut lease: ClipLease) -> Result<(String, ClipLease), Osc52Refusal> {
+/// first to cover the text and one native copy per selection `targets` names: arboard keeps a
+/// separate copy of each selection it wrote (X11 PRIMARY and CLIPBOARD are independent buffers).
+fn into_text(
+    bytes: Vec<u8>,
+    mut lease: ClipLease,
+    targets: ClipTargets,
+) -> Result<(String, ClipLease), Osc52Refusal> {
+    let copies = usize::from(targets.clipboard) + usize::from(targets.primary);
     let mut lossy_len = 0usize;
     let mut valid = true;
     for chunk in bytes.utf8_chunks() {
@@ -533,8 +547,9 @@ fn into_text(bytes: Vec<u8>, mut lease: ClipLease) -> Result<(String, ClipLease)
         String::from_utf8_lossy(&bytes).into_owned()
     };
     lease.shrink_to(text.capacity());
-    if !lease.grow_to(text.capacity() + native_clipboard_bytes(&text)) {
-        // When: lease cannot grow over the native copy, the write is refused busy.
+    let native_bytes = native_clipboard_bytes(&text).saturating_mul(copies);
+    if !lease.grow_to(text.capacity().saturating_add(native_bytes)) {
+        // When: lease cannot grow over every selection's native copy, the write is refused busy.
         return Err(Osc52Refusal::Busy);
     }
     Ok((text, lease))
@@ -545,13 +560,15 @@ fn into_text(bytes: Vec<u8>, mut lease: ClipLease) -> Result<(String, ClipLease)
 pub(in crate::app) struct ClipboardJob {
     pub(in crate::app) text: String,
     pub(in crate::app) targets: ClipTargets,
-    /// Covers `text` and its native copy until the native call returns.
+    /// Covers `text` and one native copy per selection until the native call returns.
     pub(in crate::app) lease: ClipLease,
     _slot: ProgramSlot,
     /// Where an OSC 5522 write's status goes once it settles; `None` for OSC 52.
     pub(in crate::app) kitty: Option<super::kitty_clipboard_tx::KittyReply>,
     /// An OSC 5522 write's representations beside text, published together; `text` is then empty.
     pub(in crate::app) offer: Option<super::kitty_clipboard_offer::NativeOffer>,
+    /// What the write was admitted under, checked at the commit point and before its status.
+    pub(in crate::app) binding: WriteBinding,
 }
 
 impl ClipboardJob {
@@ -563,7 +580,16 @@ impl ClipboardJob {
         assert!(lease.grow_to(text.len() + native_clipboard_bytes(text)), "test staging budget");
         let slot = staging.take_program_slot().expect("a free program slot");
         let targets = ClipTargets { clipboard: true, primary: false };
-        Self { text: text.to_owned(), targets, lease, _slot: slot, kitty: None, offer: None }
+        let binding = WriteBinding::unbound(staging);
+        Self {
+            text: text.to_owned(),
+            targets,
+            lease,
+            _slot: slot,
+            kitty: None,
+            offer: None,
+            binding,
+        }
     }
 
     /// The write an OSC 5522 commit resolved: `bytes` become text with `lease` grown first, and a
@@ -575,9 +601,10 @@ impl ClipboardJob {
         targets: ClipTargets,
         reply: super::kitty_clipboard_tx::KittyReply,
     ) -> Result<Self, Osc52Refusal> {
-        let (text, lease) = into_text(bytes, lease)?;
+        let (text, lease) = into_text(bytes, lease, targets)?;
         let slot = staging.take_program_slot().ok_or(Osc52Refusal::Busy)?;
-        Ok(Self { text, targets, lease, _slot: slot, kitty: Some(reply), offer: None })
+        let binding = WriteBinding::unbound(staging);
+        Ok(Self { text, targets, lease, _slot: slot, kitty: Some(reply), offer: None, binding })
     }
 
     /// The multi-representation write an OSC 5522 commit planned, `lease` already covering it.
@@ -590,7 +617,8 @@ impl ClipboardJob {
     ) -> Result<Self, Osc52Refusal> {
         let slot = staging.take_program_slot().ok_or(Osc52Refusal::Busy)?;
         let (text, kitty, offer) = (String::new(), Some(reply), Some(offer));
-        Ok(Self { text, targets, lease, _slot: slot, kitty, offer })
+        let binding = WriteBinding::unbound(staging);
+        Ok(Self { text, targets, lease, _slot: slot, kitty, offer, binding })
     }
 }
 
@@ -864,10 +892,11 @@ impl Osc52Intake {
     ) -> Result<ClipboardJob, Osc52Refusal> {
         let targets = clip_targets(kinds, cfg!(target_os = "linux"))?;
         let (bytes, lease) = decoder?.finish()?;
-        let (text, lease) = into_text(bytes, lease)?;
+        let (text, lease) = into_text(bytes, lease, targets)?;
         // The slot is taken here, in the reader thread, before the write is posted.
         let slot = self.staging.take_program_slot().ok_or(Osc52Refusal::Busy)?;
-        Ok(ClipboardJob { text, targets, lease, _slot: slot, kitty: None, offer: None })
+        let binding = WriteBinding::unbound(&self.staging);
+        Ok(ClipboardJob { text, targets, lease, _slot: slot, kitty: None, offer: None, binding })
     }
 
     /// Match the parser's open stream after a section: start tracking a stream that opened with
@@ -902,39 +931,9 @@ impl Osc52Intake {
     }
 }
 
-/// Leases covering arboard's retained copy of SonicTerm's last write to each selection.
-#[derive(Debug, Default)]
-pub(in crate::app) struct RetainedCopies {
-    clipboard: Option<ClipLease>,
-    primary: Option<ClipLease>,
-}
-
-impl RetainedCopies {
-    /// Hold `lease` for the selections `targets` names, replacing what each held.
-    pub(in crate::app) fn retain(&mut self, targets: ClipTargets, lease: ClipLease) {
-        if targets.primary && targets.clipboard {
-            // One write replaced both selections, so one lease covers the one copy kept.
-            self.primary = None;
-        }
-        if targets.clipboard {
-            self.clipboard = Some(lease);
-        } else {
-            // When: targets has no clipboard, the write reached only PRIMARY and replaces its lease.
-            self.primary = Some(lease);
-        }
-    }
-
-    /// A user copy replaced the clipboard selection, so its retained copy is gone.
-    pub(in crate::app) fn release_clipboard(&mut self) {
-        self.clipboard = None;
-    }
-
-    /// Bytes the retained leases hold.
-    #[cfg(test)]
-    pub(in crate::app) fn bytes(&self) -> usize {
-        self.clipboard.iter().chain(&self.primary).map(ClipLease::bytes).sum()
-    }
-}
+#[path = "osc52_stream_retained.rs"]
+mod retained;
+pub(in crate::app) use retained::{RetainedCopies, RetainedShares};
 
 /// The App's clipboard-write state: the shared staging, its governor charge, retained copies.
 #[derive(Debug)]
