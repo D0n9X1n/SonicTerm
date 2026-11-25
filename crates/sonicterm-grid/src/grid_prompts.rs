@@ -193,13 +193,16 @@ impl Grid {
     }
 
     /// In-place scrolling does not rebase absolute marks. Invalidate only the newest pre-C
-    /// proof when the moved rows include its A or any of the possible input span from B down.
+    /// proof when the moved rows include A or the input span from B down. While the prompt
+    /// is still being drawn, the first B will establish input at its post-scroll position.
     pub(super) fn invalidate_input_on_row_move(&mut self, top: usize, bottom: usize) {
         let history = self.scrollback.len() as u64;
         let moved = history + top as u64..=history + bottom as u64;
         if let Some(prompt) = self.prompts.back_mut().filter(|prompt| !prompt.output_seen) {
-            prompt.input_proof_lost |= prompt.start_row.is_some_and(|row| moved.contains(&row))
-                || prompt.input_start.is_some_and(|(row, _)| row <= *moved.end());
+            prompt.input_proof_lost |= prompt.input_start.is_some_and(|(input_row, _)| {
+                input_row <= *moved.end()
+                    || prompt.start_row.is_some_and(|row| moved.contains(&row))
+            });
         }
     }
 

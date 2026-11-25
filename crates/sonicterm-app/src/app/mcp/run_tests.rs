@@ -404,3 +404,19 @@ fn readiness_downward_move_cannot_discard_draft_evidence() {
         assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
     }
 }
+
+/// Drawing the prompt may scroll A's row at a partial bottom margin before B exists. B marks
+/// the input at its new position; only subsequent input cells participate in the draft check.
+#[test]
+fn two_line_prompt_at_partial_bottom_margin_is_ready_after_b() {
+    let mut parser = parsed_sized(20, 6, 0, b"\x1b[2;5r\x1b[5;1H\x1b]133;A\x07first\r\n$ ");
+    let first_line: String = parser.grid().row(3).iter().take(5).map(|cell| cell.ch).collect();
+    assert_eq!(first_line, "first", "the line feed moved the first prompt line up");
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::NoShellIntegration));
+    let seq = parser.grid().newest_prompt().unwrap().seq;
+    parser.advance(b"\x1b]133;B\x07");
+    assert_eq!(parser.grid().newest_prompt().unwrap().input_start, Some((4, 2)));
+    assert_eq!(check_prompt(parser.grid(), None), Ok(seq));
+    parser.advance(b"draft");
+    assert_eq!(check_prompt(parser.grid(), None), Err(Refusal::DraftPresent));
+}

@@ -1043,8 +1043,9 @@ URI to 8 KiB and client id to 1 KiB.
     generation, the prompt options and the newest command text. They never open or close a
     prompt region, end a pinned run or change exit trust; those depend on `A`, `B`, `C` and
     `D` alone. A fresh line can still physically scroll. A full upward scroll rebases the marks or
-    evicts them with their rows; a partial-margin move through the marked prompt or its input
-    invalidates the proof of a blank draft. Clipping a mark or nonblank draft cell on resize also
+    evicts them with their rows. After `B`, a partial-margin move through the marked prompt or
+    its input invalidates the proof of a blank draft. Before `B`, the prompt can scroll as it
+    is drawn; `B` then records where input starts. Clipping a mark or nonblank draft cell on resize also
     invalidates it, even if the new size never reaches the PTY. `run_command` then refuses
     (`no_shell_integration`) until a fresh `A` and `B`, not just regrowth of the grid. The primary
     and alternate screens keep separate states.

@@ -314,7 +314,9 @@ iTerm2 and kitty do. It refuses a pane whose prompt has text typed after it, who
 input queue is not empty, or into which anyone typed while the previous command
 ran. It also refuses (`no_shell_integration`) when the marks no longer locate the input:
 the prompt's `A` left the grid, a resize clipped `B` or nonblank input (including a later draft row),
-or in-place scrolling moved marked rows or their possible input. Growing the grid or repeating `B`
+or in-place scrolling after `B` moved marked rows or their possible input. A partial-margin scroll
+while the shell draws a multiline prompt does not invalidate the first `B` that follows it.
+Growing the grid or repeating `B`
 is not recovery: the shell must open a fresh `A` followed by `B`. That check is best effort, because a terminal cannot see what the shell has
 consumed, so use `run_command` on panes the agent created, where only the agent
 types. It never waits on a busy pane: when the pane's output parser stays locked for
