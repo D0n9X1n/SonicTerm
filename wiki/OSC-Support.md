@@ -86,8 +86,9 @@ sequence is covered by the unit tests, and the forms below are the samples, not 
 | A 1005, 1015 and 1016 mouse report | input | unchanged | unchanged |
 | DECRQM 5522 | output | unchanged | dropped |
 | The DECRQM 5522 reply | input | unchanged | changed on the way |
-| Rows shrink at a prompt (`redraw=last`) | input | the console's own repaint, not the program's rows | the same |
+| Rows shrink at a prompt (`redraw=last`) | input | changed: the console sends its own stream, not the program's rows | the same |
 
-So with the system ConPTY a program cannot turn on these mouse modes, set colors or reach the clipboard, though the
-few forms in the unchanged rows still work. Forms not sampled, such as OSC 0, 2, 8, 9, 99 and `1337 ; File=`, have
-no recorded Windows result.
+So in the sampled cases the system ConPTY drops the color, pointer, program-status, OSC 52 and OSC 5522 forms and the
+mouse mode requests, while `1337 ; Copy=:` still reaches the clipboard and the other unchanged rows still work. The
+resize row shows only that the stream changes; it does not establish where the cursor or history ends up. Forms
+not sampled, such as OSC 0, 2, 8, 9, 99 and `1337 ; File=`, have no recorded Windows result.
