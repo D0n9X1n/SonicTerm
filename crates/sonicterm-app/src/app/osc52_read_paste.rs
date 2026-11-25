@@ -7,11 +7,9 @@
 //!
 //! The gesture binds the offer by reading its version where that is a counter read (macOS
 //! `changeCount`, Windows `GetClipboardSequenceNumber`). X11 needs a round trip to the owner, so
-//! there the capture's first sample stands for the pasted offer only when that capture started at
-//! the gesture, with no other capture outstanding and no SonicTerm write in flight, and no write
-//! SonicTerm started since then. Otherwise no grant is issued; the event still goes out and the
-//! follow-up read asks. A copy another X11 program makes between the gesture and that first sample
-//! is not visible to SonicTerm without a round trip.
+//! the gesture cannot observe which offer the user pasted: another program's copy before any later
+//! sample would be indistinguishable from it. An X11 paste event therefore carries no one-time
+//! grant; the event still goes out and the follow-up read asks.
 //!
 //! Each gesture takes a new paste generation, recorded per recipient pane, so a newer paste
 //! supersedes a capture still in progress for that pane: the older capture's event carries no
@@ -47,10 +45,7 @@ struct Recipient {
 enum OfferBinding {
     /// The version read at the gesture; a grant needs the capture's stable version to equal it.
     Version(u64),
-    /// X11: the capture started at the gesture, so its first sample is the pasted offer while no
-    /// write SonicTerm starts moves `writes_started` from this count.
-    FirstSample { writes_started: u64 },
-    /// Nothing ties the gesture to an offer, so no grant is issued.
+    /// Nothing ties the gesture to an offer (X11, or no version), so no grant is issued.
     Unbound,
 }
 
@@ -178,22 +173,12 @@ impl super::App {
     }
 
     /// How this gesture binds the offer: its version where the source reads one on the event
-    /// loop; on X11 the capture's first sample, only when that capture starts now with no
-    /// SonicTerm write in flight; otherwise unbound.
+    /// loop; otherwise unbound. An X11 version needs a round trip, so no sample taken after the
+    /// gesture can stand for the offer the user pasted.
     fn gesture_offer_binding(&self) -> OfferBinding {
-        let (reads, domain) = (&self.clip_state.reads, &self.clip_state.domain);
-        // On X11 the first sample binds only when this capture starts now (is_idle) and no write in
-        // flight can land before that sample unseen; otherwise another capture or a write could
-        // change the offer first, so nothing binds.
-        let quiet = reads.paste_capture.is_idle() && domain.in_flight() == 0;
         // shortcut: a paste reads the standard clipboard only.
-        match reads.source.gesture_offer(ReadLocation::Clipboard) {
+        match self.clip_state.reads.source.gesture_offer(ReadLocation::Clipboard) {
             GestureOffer::Version(version) => OfferBinding::Version(version),
-            GestureOffer::RoundTrip if quiet => {
-                // shortcut: on X11 another program's copy between the gesture and the first
-                // sample is not seen; binding it needs the owner's timestamp read at the gesture.
-                OfferBinding::FirstSample { writes_started: domain.writes_started }
-            }
             GestureOffer::RoundTrip | GestureOffer::Unavailable => OfferBinding::Unbound,
         }
     }
@@ -303,10 +288,6 @@ impl super::App {
         let offer_version = match gesture.offer {
             OfferBinding::Version(version) => {
                 captured.version.filter(|sampled| *sampled == version)
-            }
-            OfferBinding::FirstSample { writes_started } => {
-                let unwritten = self.clip_state.domain.writes_started == writes_started;
-                captured.version.filter(|_| unwritten)
             }
             OfferBinding::Unbound => None,
         };

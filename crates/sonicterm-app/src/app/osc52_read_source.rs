@@ -188,7 +188,8 @@ pub(in crate::app) enum GestureOffer {
     /// The offer's version, read from a counter without opening the clipboard (macOS, Windows).
     #[cfg_attr(not(any(test, target_os = "macos", target_os = "windows")), allow(dead_code))]
     Version(u64),
-    /// The version needs a round trip to the owner (X11), so the gesture reads none.
+    /// The version needs a round trip to the owner (X11), so the gesture reads none and no
+    /// one-time grant can bind to the offer.
     #[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
     RoundTrip,
     /// The platform cannot version an offer, so no grant can bind to it.

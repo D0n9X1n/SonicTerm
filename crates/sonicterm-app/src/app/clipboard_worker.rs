@@ -397,8 +397,6 @@ pub(in crate::app) struct ClipboardDomain {
     /// Each posted program write's status route, in posting order; the worker reports writes in
     /// that order, so a lost worker leaves exactly the unreported ones here.
     program_replies: VecDeque<StatusRoute>,
-    /// Writes started: each job posted here and each `write_clipboard_inline_targets` call.
-    pub(super) writes_started: u64,
 }
 
 impl std::fmt::Debug for ClipboardDomain {
@@ -479,7 +477,6 @@ impl ClipboardDomain {
             return Err(Box::new(refused.into_inner()));
         }
         self.in_flight += 1;
-        self.writes_started += 1;
         Ok(())
     }
 

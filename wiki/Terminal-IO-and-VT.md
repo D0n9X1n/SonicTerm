@@ -534,18 +534,16 @@ version of the offer the user pasted:
 | --- | --- |
 | macOS | the general pasteboard's `changeCount` |
 | Windows | `GetClipboardSequenceNumber`; 0 (no clipboard access) is no version |
-| Linux (X11, XWayland) | the selection owner's window and its `TIMESTAMP` answer, within the 2 s selection wait; the owner is read before the conversion and again after the answer and must not change; no owner, a changed owner, no answer, or an answer that is not one nonzero format-32 `INTEGER` item is no version |
+| Linux (X11, XWayland) | none at the gesture: the selection owner's `TIMESTAMP` needs a round trip, so an X11 paste event carries no one-time grant |
 
 The paste binds that offer at the gesture, on the event loop. On macOS and Windows it reads the
 version there, since both are counter reads that open nothing, and a grant needs the capture's
 version, read before and after the listing and unchanged across it, to equal it. The X11 version
-needs a round trip, so the gesture reads none: the capture's first sample stands for the pasted
-offer only when that capture started at the gesture, with no other capture running or waiting and
-no SonicTerm clipboard write in flight, and only when SonicTerm started no clipboard write before
-the capture settled. A copy another X11 program makes between the gesture and that first sample
-is not visible without a round trip. With no version, a version that moved during the listing, an
-offer other than the one bound at the gesture, or no password, the event is still sent but issues
-no grant. The first OSC 5522 read from that pane at that location carrying the
+needs a round trip, so the gesture cannot observe which offer the user pasted: another program's
+copy before any later sample would look the same. An X11 paste event therefore carries no
+one-time grant; its follow-up read takes normal consent. With no version, a version that moved
+during the listing, an offer other than the one bound at the gesture, or no password, the event
+is still sent but issues no grant. The first OSC 5522 read from that pane at that location carrying the
 password and a nonempty `name` consumes the grant atomically on the event loop. It is approved
 without a page only while the recipient is unchanged and within 60 s; otherwise it takes normal
 consent. The approval stays bound to the recipient and the offer until delivery: the reader
