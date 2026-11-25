@@ -33,6 +33,15 @@ struct FakeWin32 {
     locks: usize,
 }
 
+struct WindowProbe(std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>);
+
+// Lifecycle: WindowProbe records destruction after the mutating session closes.
+impl Drop for WindowProbe {
+    fn drop(&mut self) {
+        self.0.borrow_mut().push("release window");
+    }
+}
+
 impl Win32Clipboard for FakeWin32 {
     type Block = u64;
 
@@ -76,9 +85,10 @@ impl Win32Clipboard for FakeWin32 {
         true
     }
 
-    fn open_owned(&mut self) -> bool {
+    type Owner = WindowProbe;
+    fn open_owned(&mut self) -> Option<Self::Owner> {
         self.owned_opens += 1;
-        self.open()
+        self.open().then(|| WindowProbe(self.log.clone()))
     }
 
     fn empty(&mut self) -> bool {
@@ -418,7 +428,7 @@ fn text_write_reads_gates_and_replaces_in_one_acquisition() {
     assert_eq!(published, Published::Written);
     let replaced = replaced.expect("the replaced value was read");
     assert_eq!(replaced.units, "old".encode_utf16().collect::<Vec<_>>());
-    assert_eq!(*log.borrow(), ["open", "read", "gate", "empty", "set", "close"]);
+    assert_eq!(*log.borrow(), ["open", "read", "gate", "empty", "set", "close", "release window"]);
     assert_eq!(backend.clipboard.text().as_deref(), Some("program"));
 }
 
@@ -604,4 +614,13 @@ fn windows_mutations_use_worker_owned_acquisition() {
         Published::Written
     );
     assert_eq!(backend.clipboard.owned_opens, 2);
+}
+
+/// A successful publish closes the open session and releases its owning window before the worker
+/// can park. The log observes destruction of the acquisition token, not just a CloseClipboard call.
+#[test]
+fn windows_mutation_releases_window_after_close() {
+    let mut backend = WindowsOffer::new(previous());
+    assert_eq!(backend.write_text("text", None, &|| true).0, Published::Written);
+    assert!(backend.clipboard.log.borrow().ends_with(&["close", "release window"]));
 }

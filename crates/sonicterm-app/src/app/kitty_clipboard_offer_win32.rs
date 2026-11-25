@@ -61,17 +61,13 @@ impl OwnerWindow {
     }
 }
 
-// Lifecycle: OwnerWindow calls DestroyWindow on its worker thread when the thread-local slot drops.
+// Lifecycle: OwnerWindow calls DestroyWindow after CloseClipboard, before the worker can park.
 impl Drop for OwnerWindow {
     fn drop(&mut self) {
         let _ =
             // SAFETY: this thread created the owned HWND, which remains live until this drop.
             unsafe { DestroyWindow(self.0) };
     }
-}
-
-thread_local! {
-    static OWNER_WINDOW: std::cell::OnceCell<OwnerWindow> = const { std::cell::OnceCell::new() };
 }
 
 /// Open the clipboard with the worker's window for writes, or no window for reads.
@@ -134,18 +130,13 @@ impl Win32Clipboard for Win32 {
         open_clipboard(None)
     }
 
-    fn open_owned(&mut self) -> bool {
-        OWNER_WINDOW.with(|slot| {
-            if slot.get().is_none() {
-                // When: slot has no window, the worker creates it at its first mutation.
-                let Some(window) = OwnerWindow::create() else {
-                    // When: create fails, refuse before opening or emptying the clipboard.
-                    return false;
-                };
-                let _ = slot.set(window);
-            }
-            open_clipboard(Some(slot.get().expect("created owner window").0))
-        })
+    type Owner = OwnerWindow;
+
+    fn open_owned(&mut self) -> Option<Self::Owner> {
+        // Per the SetClipboardData contract, a non-null immediate HGLOBAL belongs to the system.
+        // No delayed format needs this window after close, or WM_DESTROYCLIPBOARD on an idle worker.
+        let owner = OwnerWindow::create()?;
+        open_clipboard(Some(owner.0)).then_some(owner)
     }
 
     fn empty(&mut self) -> bool {
