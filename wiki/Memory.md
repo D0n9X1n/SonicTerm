@@ -488,6 +488,25 @@ mapped buffers the draw reads) stayed at the clear-only figure in the probe,
 but only while no frame copied: new glyphs (atlas writes), buffer growth or a
 fallback bring the copy back. SonicTerm does not use such a path.
 
+The figure is held once for the shared device, not once per window. Every
+window shares one device and queue, so these readings cannot tell a per-process
+cost from a per-device one. In a release build at scale 2, each window's shell
+printed a line every 50 ms (952x905 pt windows, `footprint` read after 45 s):
+
+| Windows presenting | Graphics | Change |
+| --- | --- | --- |
+| 1 | 246 MB | — |
+| 2 | 272 MB | +26 MB |
+| 4 | 322 MB | +76 MB, about 25 MB per window |
+
+Each added window brings its own frame texture, GPU glyph atlas and present
+buffers, not another copy of the presenting cost. One window that printed for
+20 s and then went quiet read 221 MB while printing and 29 MB in every later
+sample, from about 10 s to 100 s after its output stopped; when it is released
+within those first 10 s is not measured. With frame latency 1 instead of 2 the
+same window read 221 MB, and its total footprint 309 MB against 310 MB, so
+frame latency changed only the drawable limit, not this figure.
+
 The Memory Usage report's `GPU (OS)` row and the `graphics_os_*` snapshot
 fields read the kernel's per-task graphics ledgers, not the `footprint`
 category above. `GPU requested` shows only what SonicTerm asked for. The three
