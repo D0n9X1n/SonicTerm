@@ -745,6 +745,8 @@ struct Performer {
     bracketed_paste: bool,
     /// DECSET 5522: the program asked for paste events instead of pasted text.
     paste_events: bool,
+    /// Set-to-reset transitions of `paste_events`, by DECRST or RIS; wraps.
+    paste_events_resets: u64,
     /// DECSET 1005/1006/1015/1016 mouse report encoding.
     mouse_format: MouseFormat,
     /// DECCKM ?1 — application cursor keys. When set, the arrow keys (and the

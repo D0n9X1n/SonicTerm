@@ -140,3 +140,17 @@ fn native_listing_is_bounded() {
     assert_eq!(listing.len(), 16);
     assert!(inspected.get() <= MAX_NATIVE_TYPES_SCANNED, "{} inspected", inspected.get());
 }
+
+/// Contract: the native source reports an offer version where the platform has one: macOS reads
+/// the general pasteboard's change count (a read, which changes nothing), and PRIMARY has no
+/// version off Linux, so no paste grant can bind to it.
+#[test]
+fn native_offer_version_where_the_platform_has_one() {
+    let source = NativeSource;
+    if cfg!(target_os = "macos") {
+        assert!(source.offer_version(ReadLocation::Clipboard).is_some(), "changeCount");
+    }
+    if !cfg!(target_os = "linux") {
+        assert_eq!(source.offer_version(ReadLocation::Primary), None);
+    }
+}

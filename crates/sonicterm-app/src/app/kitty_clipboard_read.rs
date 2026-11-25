@@ -263,6 +263,43 @@ pub(in crate::app) fn build_read_reply(
     reply
 }
 
+/// The unsolicited paste event DECSET 5522 asks for: OK, the listing `DATA` packet and DONE, ST
+/// terminated with no `id`, each carrying `password` as Base64 in `pw`; `loc=primary` marks only
+/// the OK packet. A listing the platform could not take is sent empty, so the event still arrives.
+pub(in crate::app) fn paste_event_reply(
+    location: KittyClipboardLocation,
+    password: Option<&str>,
+    listing: &TypeListing,
+) -> Vec<u8> {
+    let joined = match listing {
+        TypeListing::Types(names) => join_listing(names.clone()),
+        TypeListing::Unsupported | TypeListing::Failed => String::new(),
+    };
+    let mut event = Vec::with_capacity(160 + 2 * joined.len());
+    let primary = location == KittyClipboardLocation::Primary;
+    for (status, body) in [("OK", None), ("DATA", Some(joined.as_bytes())), ("DONE", None)] {
+        event.extend_from_slice(b"\x1b]5522;type=read:status=");
+        event.extend_from_slice(status.as_bytes());
+        if primary && status == "OK" {
+            event.extend_from_slice(b":loc=primary");
+        }
+        if body.is_some() {
+            // The listing packet names its MIME type `.`.
+            event.extend_from_slice(b":mime=Lg==");
+        }
+        if let Some(password) = password {
+            event.extend_from_slice(b":pw=");
+            push_base64(&mut event, password.as_bytes());
+        }
+        if let Some(body) = body.filter(|body| !body.is_empty()) {
+            event.push(b';');
+            push_base64(&mut event, body);
+        }
+        event.extend_from_slice(b"\x1b\\");
+    }
+    event
+}
+
 #[cfg(test)]
 #[path = "kitty_clipboard_read_tests.rs"]
 mod kitty_clipboard_read_tests;

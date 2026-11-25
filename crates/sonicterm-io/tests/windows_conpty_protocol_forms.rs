@@ -86,6 +86,27 @@ fn cases() -> Vec<Case> {
 \x1b]5522;type=read:status=DONE:id=r\x1b\\",
             ))
             .output_required(),
+        // DECSET 5522 paste event: the mode reaches the host, and an injected event (OK, the `.`
+        // listing of `text/plain`, DONE, each with a one-time `pw`) reaches the child.
+        Case::new("decset5522-paste-event", "\x1b[?5522h")
+            .input(echo(
+                b"\x1b]5522;type=read:status=OK:pw=b3Rw\x1b\\\
+\x1b]5522;type=read:status=DATA:mime=Lg==:pw=b3Rw;dGV4dC9wbGFpbgo=\x1b\\\
+\x1b]5522;type=read:status=DONE:pw=b3Rw\x1b\\",
+            ))
+            .trailer("\x1b[?5522l"),
+        // The follow-up read naming itself and echoing the one-time `pw` reaches the host, and an
+        // injected OK/DATA/DONE reaches the child.
+        Case::new(
+            "osc5522-read-paste-otp",
+            "\x1b]5522;type=read:id=r:name=UGFzdGUgZXZlbnQ=:pw=b3Rw;dGV4dC9wbGFpbg==\x1b\\",
+        )
+        .input(echo(
+            b"\x1b]5522;type=read:status=OK:id=r\x1b\\\
+\x1b]5522;type=read:status=DATA:id=r:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\\
+\x1b]5522;type=read:status=DONE:id=r\x1b\\",
+        ))
+        .output_required(),
         Case::new("osc7501-report", "\x1b]7501;app=fixture:state=working:progress=40\x07"),
         Case::new("osc7501-clear", "\x1b]7501;state=clear\x07"),
         Case::new("osc7501-query", "\x1b]7501;?\x07")

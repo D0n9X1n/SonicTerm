@@ -393,7 +393,7 @@ lock:
 | `type=walias:mime=…` | records the aliases in order; an empty `mime` answers `EINVAL` |
 | `type=wdata` without `mime` | commits |
 | `type=read` | served as below; a payload that is not strict Base64 of UTF-8 is dropped with no reply |
-| DECSET/DECRST `?5522`, DECRQM `?5522` | the mode is stored per pane and reset by DECRST and RIS; DECRQM answers `0` and a paste still sends text, because paste events are not sent yet |
+| DECSET/DECRST `?5522`, DECRQM `?5522` | the mode is stored per pane and reset by DECRST and RIS; DECRQM answers `1` or `2`; while it is set, a paste sends a paste event (below) instead of the text |
 
 Every buffer is reserved from the clipboard staging budget before it grows, and the transaction
 limit is `clipboard_write_limit_bytes`, read when the write opens: past it the write ends
@@ -455,13 +455,50 @@ a new PTY and any `osc52`/`osc52_read` change revoke its grants, and `deny` neve
 A read a grant approved is still revalidated at delivery, so a later `deny` or a transfer sends
 nothing. Grants, names and passwords never reach logs or `Debug` output.
 
+Paste events (DECSET 5522). A paste chooses its panes before it reads the clipboard: the source
+pane and the broadcast receivers the existing admission accepts. A pane whose program set mode
+5522 gets a paste event instead of its paste, unless `osc52_read = "deny"`, under which every pane
+gets the text. The VT worker publishes the mode with its reset count, so a paste never takes the
+parser lock. Only the other panes read the clipboard, so an offer holding only an image still
+reaches a mode pane, and an open search and copied files route as before, for those panes only.
+Each mode pane gets its own event through the sensitive reply channel: `OK`, the type listing as
+one `DATA` packet with `mime=Lg==`, then `DONE`, each ST-terminated with no `id` and the same
+`pw`, the Base64 of a one-time password made from 16 bytes of the OS CSPRNG. The listing follows
+the rules above and is empty when the platform cannot list types. A writer that refuses the event
+drops it, and that pane's paste, with no retry.
+
+The event's grant is created only after the pane's writer admitted the event, and a pane holds
+the grant of its last paste. It is bound to the pane, its PTY incarnation, owner epoch and RIS
+count, its mode 5522 state and reset count, the policy generation, the location, and the
+clipboard offer version, read before and after the listing:
+
+| Platform | Offer version |
+| --- | --- |
+| macOS | the general pasteboard's `changeCount` |
+| Windows | `GetClipboardSequenceNumber`; 0 (no clipboard access) is no version |
+| Linux (X11, XWayland) | the selection owner's window and its `TIMESTAMP` answer, within the 2 s selection wait; no owner or no answer is no version |
+
+With no version, a version that moved during the listing, or no password, the event is still sent
+but issues no grant. The first OSC 5522 read from that pane at that location carrying the
+password and a nonempty `name` consumes the grant atomically on the event loop. It is served
+without a page only while the recipient is unchanged, within 60 s, and a fresh read of the offer
+version still matches; otherwise it takes normal consent. A session grant's Always or Ban still
+decides first. A replay, a read without a `name`, and a read from another pane find no grant.
+DECRST 5522, RIS, a move to another window, a new PTY, any `osc52`/`osc52_read` change and 60 s
+revoke it. The listing and version reads run on the event loop, as a paste's text read does, so
+on X11 an owner that never answers holds the paste for the 2 s selection wait per read. One-time
+passwords never reach logs or `Debug` output.
+
 Intentional differences: at most 1 MiB per packet (Ghostty 8 MiB; kitty 256 KiB unless the
 packet is complete); a commit with nothing the platform can hold answers `ENOSYS`; Ghostty's
 metadata, MIME and alias bounds apply (kitty has none); the idle and absolute timeouts exist
 (neither reference times out); RIS aborts an open write (both references clear only grants);
 reads accept at most 16 data types (Ghostty 4, kitty all), serve at most 8 MiB per type and a
 12 MiB reply (kitty has no limit), and a read while the same pane already reads answers `EPERM`
-(as kitty) while a full process gate answers `EBUSY`.
+(as kitty) while a full process gate answers `EBUSY`. Under `osc52_read = "deny"` a paste with
+mode 5522 set stays plain text (Ghostty and kitty send the event and then refuse the read, which
+loses the paste). The one-time grant is also bound to the clipboard offer version and expires
+after 60 s (neither reference binds it to the offer). WezTerm does not implement paste events.
 
 ### Host reports
 
@@ -470,7 +507,7 @@ SonicTerm answers:
 
 | Request | Reply |
 | --- | --- |
-| DECRQM `CSI ? Ps $ p` | `CSI ? Ps ; Pm $ y`: `Pm` 1 set, 2 reset, for modes 1, 7, 47, 67, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 1047, 1049, 2004, 2026, 2031 and 9001 (each of 1000/1002/1003 reads set only while it is the selected tracking mode, and each of 1005/1006/1015/1016 only while it is the selected report format); 0 (not recognized) for every other mode, including 25, so a program that probes them falls back at once. A request naming several modes gets no reply. |
+| DECRQM `CSI ? Ps $ p` | `CSI ? Ps ; Pm $ y`: `Pm` 1 set, 2 reset, for modes 1, 7, 47, 67, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 1047, 1049, 2004, 2026, 2031, 5522 and 9001 (each of 1000/1002/1003 reads set only while it is the selected tracking mode, and each of 1005/1006/1015/1016 only while it is the selected report format); 0 (not recognized) for every other mode, including 25, so a program that probes them falls back at once. A request naming several modes gets no reply. |
 | DSR 996 `CSI ? 996 n` | `CSI ? 997 ; 1 n` for a dark theme, `; 2 n` for a light one, from the theme's `appearance`. |
 | DEC mode 2031 | While a program has set it, every theme change that alters a readable color (foreground, background, cursor, selection background and foreground, cursor text, the 16 theme colors) or the scheme sends the same `CSI ? 997 ; Ps n` report, also when the scheme stays the same, so a program that re-reads colors on the report picks up the new palette. A reload, the theme picker's preview and its choice all count; the report goes through the pane's reply path. It fingerprints the theme defaults, so it fires even when a program's override hides the changed default from a query. SonicTerm does not follow the system's light or dark appearance, so the report fires only when the theme changes. |
 | `OSC 4 ; N ; ?` | `OSC 4 ; N ; rgb:rrrr/gggg/bbbb` with the request's terminator: the color the program set, else 0..=15 from the theme and 16..=255 from the xterm 6×6×6 cube and gray ramp, the same table the renderer draws with. |

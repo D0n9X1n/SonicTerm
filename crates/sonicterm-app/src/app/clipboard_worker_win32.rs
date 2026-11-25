@@ -30,7 +30,7 @@ const OPEN_ATTEMPTS: usize = 5;
 const OPEN_RETRY: Duration = Duration::from_millis(5);
 
 /// The clipboard's change counter, which every change to its contents advances.
-pub(super) fn sequence() -> u32 {
+pub(in crate::app) fn sequence() -> u32 {
     // SAFETY: GetClipboardSequenceNumber takes no arguments and only reads a session counter.
     unsafe { GetClipboardSequenceNumber() }
 }

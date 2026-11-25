@@ -177,10 +177,16 @@ impl Parser {
         self.performer.bracketed_paste
     }
 
-    /// Whether DECSET ?5522 (paste events) is set; RIS and DECRST reset it. DECRQM does not report
-    /// it until a paste sends the event the mode asks for.
+    /// Whether DECSET ?5522 (paste events) is set; RIS and DECRST reset it, and DECRQM reports it.
     pub fn paste_events_enabled(&self) -> bool {
         self.performer.paste_events
+    }
+
+    /// Pack DECSET ?5522 into one word the host reads without the parser lock: the set bit in bit
+    /// 0, the count of set-to-reset transitions above it, so a reset is visible in the word even
+    /// when the mode was set again before the host looked.
+    pub fn paste_events_snapshot(&self) -> u64 {
+        (self.performer.paste_events_resets << 1) | u64::from(self.performer.paste_events)
     }
 
     /// The mouse report encoding the program selected (DECSET 1005, 1006, 1015 or 1016).
@@ -254,6 +260,15 @@ impl Parser {
 }
 
 impl Performer {
+    /// Set or reset DECSET ?5522, counting a set-to-reset transition so the host's snapshot moves.
+    pub(super) fn set_paste_events(&mut self, set: bool) {
+        if self.paste_events && !set {
+            // A set-to-reset transition ends every grant bound to the set mode.
+            self.paste_events_resets = self.paste_events_resets.wrapping_add(1);
+        }
+        self.paste_events = set;
+    }
+
     /// Active kitty keyboard protocol flags (top of the push/pop stack).
     /// Empty stack reports 0, meaning legacy (non-kitty) key encoding.
     pub(super) fn kitty_keyboard_flags(&self) -> u8 {
@@ -400,7 +415,7 @@ impl Performer {
                 }
                 9001 => self.win32_input = set,
                 2004 => self.bracketed_paste = set,
-                5522 => self.paste_events = set,
+                5522 => self.set_paste_events(set),
                 1005 | 1006 | 1015 | 1016 => {
                     self.mouse_format = match (set, code) {
                         (true, 1005) => MouseFormat::Utf8,

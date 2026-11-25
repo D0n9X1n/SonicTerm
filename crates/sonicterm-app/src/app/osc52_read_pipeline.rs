@@ -18,8 +18,10 @@ use super::osc52_read::{READ_REPLY_BUDGET_BYTES, TICKET_LIFETIME};
 use sonicterm_vt::vt::KittyClipboardStatus;
 
 use super::kitty_clipboard_read::build_read_reply;
-use super::osc52_read_grants::{GrantDecision, GrantKey, SessionGrants};
-use super::osc52_read_source::{read_replies, ClipboardTextSource, NativeSource};
+use super::osc52_read_grants::{
+    GrantDecision, GrantKey, PasteBinding, PasteGrant, SessionGrants, PASTE_GRANT_LIFETIME,
+};
+use super::osc52_read_source::{read_replies, ClipboardTextSource, NativeSource, ReadLocation};
 use super::osc52_read_ticket::{CancelReason, ClipboardTicketHandle, ConsentTicket, ReadBinding};
 use super::osc52_stream::{ClipLease, ClipboardStaging};
 use super::UserEvent;
@@ -89,6 +91,8 @@ pub(in crate::app) struct ClipboardReads {
     pub(in crate::app) last_cancel: Option<CancelReason>,
     /// The Always and Ban answers OSC 5522 programs named themselves for.
     pub(in crate::app) grants: SessionGrants,
+    /// The one-time grants DECSET 5522 paste events issued, one per pane at most.
+    pub(in crate::app) paste_grants: super::osc52_read_grants::PasteGrants,
     /// Replaces the PTY's sensitive-reply slot in tests.
     #[cfg(test)]
     pub(in crate::app) port: Option<ReplyPort>,
@@ -111,6 +115,7 @@ impl Default for ClipboardReads {
             done_rx,
             last_cancel: None,
             grants: SessionGrants::default(),
+            paste_grants: super::osc52_read_grants::PasteGrants::default(),
             #[cfg(test)]
             port: None,
         }
@@ -141,6 +146,7 @@ impl ClipboardReads {
             && self.in_flight.is_none()
             && self.retries.is_empty()
             && self.grants.is_empty()
+            && self.paste_grants.is_empty()
     }
 }
 
@@ -159,6 +165,9 @@ impl super::App {
         }
         let grant =
             self.grant_key(&ticket).and_then(|key| self.clip_state.reads.grants.lookup(&key));
+        // A paste event's one-time grant is consumed by the first named read that carries its
+        // password, whatever answers the read, so a replay never finds it.
+        let pasted = self.consume_paste_grant(&ticket);
         match grant {
             _ if ticket.readable() => self.clip_state.reads.queued.push_back(ticket),
             Some(GrantDecision::Always) => {
@@ -176,6 +185,12 @@ impl super::App {
                 // A Ban grant refuses the request `EPERM` without a page.
                 self.refuse_ticket(ticket, Instant::now());
             }
+            None if pasted => {
+                // A live paste grant approves this one read without a page.
+                let mut ticket = ticket;
+                ticket.approve();
+                self.clip_state.reads.queued.push_back(ticket);
+            }
             None => {
                 // With no grant, the ticket waits for an answer or its expiry.
                 self.clip_state.reads.waiting.push(ticket);
@@ -184,14 +199,83 @@ impl super::App {
         self.pump_clipboard_reads();
     }
 
+    /// Take the paste grant `ticket`'s read names by its pane, location and password, and say
+    /// whether it still holds: its recipient's identity and DECSET 5522 word unchanged since the
+    /// event, the ticket admitted under that same reset count, within its lifetime, and a fresh
+    /// read of the offer version equal to the one the event was bound to. Taken either way.
+    fn consume_paste_grant(&mut self, ticket: &ConsentTicket) -> bool {
+        let Some(request) = ticket.kitty_read() else {
+            // When: the ticket is no OSC 5522 read, no paste grant can answer it.
+            return false;
+        };
+        let Some(credential) = request.credential.as_ref() else {
+            // When: request.credential is None (no nonempty name and pw), nothing is consumed.
+            return false;
+        };
+        let pane_id = ticket.binding().pane_id;
+        let grants = &mut self.clip_state.reads.paste_grants;
+        let Some(grant) = grants.take_for(pane_id, request.location, credential) else {
+            // When: take_for finds no grant for this pane, location and password, none applies.
+            return false;
+        };
+        let now = Instant::now();
+        if !self.paste_grant_live(&grant, now)
+            || grant.binding.reset_epoch != ticket.binding().reset_epoch
+        {
+            // When: the recipient changed or the grant expired, the read takes normal consent.
+            return false;
+        }
+        let location = match request.location {
+            sonicterm_vt::vt::KittyClipboardLocation::Standard => ReadLocation::Clipboard,
+            sonicterm_vt::vt::KittyClipboardLocation::Primary => ReadLocation::Primary,
+        };
+        // The offer is read again now: a clipboard changed since the event ends the grant.
+        // shortcut: this read runs on the event loop; on X11 it can take the 2 s selection wait.
+        self.clip_state.reads.source.offer_version(location) == Some(grant.offer_version)
+    }
+
+    /// Whether `grant`'s recipient still has the identity it was issued to and it is young enough.
+    fn paste_grant_live(&self, grant: &PasteGrant, now: Instant) -> bool {
+        let fresh = now.saturating_duration_since(grant.issued_at) <= PASTE_GRANT_LIFETIME;
+        fresh && self.paste_binding(grant.binding.pane_id).as_ref() == Some(&grant.binding)
+    }
+
+    /// The identity a paste grant for `pane_id` binds now: its PTY incarnation (which its VT
+    /// worker must agree with), owner and RIS epochs, published DECSET 5522 word and the policy
+    /// generation; `None` for a closed pane or one whose worker reads another PTY.
+    pub(in crate::app) fn paste_binding(&self, pane_id: u64) -> Option<PasteBinding> {
+        let pane = self.pane_by_id(pane_id)?;
+        let identity = &pane.read_identity;
+        let incarnation = pane.pty.as_ref().map_or(0, |pty| pty.incarnation());
+        if identity.incarnation() != incarnation {
+            // When: the worker's incarnation differs from the pane's PTY, the recipient moved on.
+            return None;
+        }
+        Some(PasteBinding {
+            pane_id,
+            incarnation,
+            owner_epoch: identity.owner_epoch(),
+            reset_epoch: identity.reset_epoch(),
+            paste_mode: pane.paste_events_mode(),
+            policy_generation: self.clip_state.staging.policy_generation(),
+        })
+    }
+
     /// The session-grant key `ticket` is looked up and remembered by; `None` without a credential.
     pub(in crate::app) fn grant_key(&self, ticket: &ConsentTicket) -> Option<GrantKey> {
         let (write, location, credential) = ticket.grant_scope()?;
         Some(GrantKey::new(ticket.binding(), write, location, credential))
     }
 
-    /// Drop every grant whose pane closed, or whose PTY, owner or RIS count moved since it was made.
-    fn purge_grants(&mut self) {
+    /// Drop every grant whose pane closed, or whose PTY, owner or RIS count moved since it was made,
+    /// and every paste grant no longer live at `now`.
+    fn purge_grants(&mut self, now: Instant) {
+        if !self.clip_state.reads.paste_grants.is_empty() {
+            // Each held paste grant is dropped once its recipient or its age ends it.
+            let mut paste_grants = std::mem::take(&mut self.clip_state.reads.paste_grants);
+            paste_grants.retain(|grant| self.paste_grant_live(grant, now));
+            self.clip_state.reads.paste_grants = paste_grants;
+        }
         if self.clip_state.reads.grants.is_empty() {
             // When: grants is_empty, there is nothing to purge.
             return;
@@ -281,7 +365,7 @@ impl super::App {
     /// turn waits for the next, then settle the reader, sweep tickets and the consent page,
     /// show the next page and start the next read.
     pub(in crate::app) fn pump_clipboard_reads_at(&mut self, now: Instant) {
-        self.purge_grants();
+        self.purge_grants(now);
         self.retry_read_replies(now);
         self.settle_reader(now);
         self.sweep_read_tickets(now);
@@ -622,8 +706,9 @@ impl super::App {
         let old = &self.config.terminal;
         if new_cfg.terminal.osc52 != old.osc52 || new_cfg.terminal.osc52_read != old.osc52_read {
             staging.bump_policy_generation();
-            // Any policy transition revokes every session grant.
+            // Any policy transition revokes every session grant and every paste grant.
             self.clip_state.reads.grants.clear();
+            self.clip_state.reads.paste_grants.clear();
             self.pump_clipboard_reads();
         }
     }

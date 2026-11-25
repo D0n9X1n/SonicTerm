@@ -254,6 +254,7 @@ pub(in crate::app) struct PaneVtHandles {
     keyboard_input: Arc<AtomicU64>,
     pointer_input: Arc<std::sync::atomic::AtomicU8>,
     pointer_shape: Arc<std::sync::atomic::AtomicU32>,
+    paste_events: Arc<AtomicU64>,
     sync_word: Arc<AtomicU64>,
     sync_deadline_word: Arc<AtomicU64>,
     sync_resets: Arc<AtomicU64>,
@@ -301,6 +302,7 @@ impl PaneVtHandles {
             keyboard_input: pane.keyboard_input.clone(),
             pointer_input: pane.pointer_input.clone(),
             pointer_shape: pane.pointer_shape.clone(),
+            paste_events: pane.paste_events.clone(),
             sync_word: pane.sync_word.clone(),
             sync_deadline_word: pane.sync_deadline_word.clone(),
             sync_resets: pane.sync_resets.clone(),
@@ -727,8 +729,8 @@ mod media_batch;
 
 // Lock order: parser -> echo slot; then, one at a time after the parser releases: clipboard,
 // inline_images -> inline_media_charge, command_events.
-// Ordering: cursor_visible, cursor_steady, keyboard_input, pointer_input, pointer_shape, bells, output_generation are Relaxed;
-// one writer, self-contained words.
+// Ordering: cursor_visible, cursor_steady, keyboard_input, pointer_input, pointer_shape, paste_events, bells,
+// output_generation: Relaxed, one writer each.
 #[allow(clippy::too_many_arguments)]
 fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
     handles: &PaneVtHandles,
@@ -795,6 +797,9 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             handles.keyboard_input.store(parser.keyboard_input_snapshot(), Ordering::Relaxed);
             handles.pointer_input.store(parser.pointer_input_snapshot(), Ordering::Relaxed);
             handles.pointer_shape.store(parser.pointer_shape_snapshot(), Ordering::Relaxed);
+            // Stored before this section's clipboard tickets are posted, so a read after DECRST
+            // 5522 or RIS never meets a grant bound to the mode it reset.
+            handles.paste_events.store(parser.paste_events_snapshot(), Ordering::Relaxed);
             let sync_state = parser.synchronized_output();
             publish_sync_output(handles, sync_state, &mut now);
             sync_latch.note_section(sync_state);

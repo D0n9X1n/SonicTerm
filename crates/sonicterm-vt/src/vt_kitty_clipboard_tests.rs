@@ -245,11 +245,14 @@ fn open_packet_counts_in_retained_amount() {
     assert_eq!(parser.retained_amount().bytes, idle);
 }
 
-/// Contract: 5522 is not advertised: DECRQM `?5522` answers 0, mode not recognised.
+/// Contract: paste events are advertised on the reply channel too: DECRQM `?5522` answers 2
+/// (reset) on a fresh parser and 1 once DECSET 5522 sets it.
 #[test]
-fn decrqm_5522_zero() {
+fn decrqm_5522_reports_on_the_reply_channel() {
     let (tx, rx) = crossbeam_channel::unbounded();
     let mut parser = Parser::new_with_reply(Grid::new(80, 24), tx);
     parser.advance(b"\x1b[?5522$p");
-    assert_eq!(rx.try_recv().expect("a reply"), b"\x1b[?5522;0$y");
+    assert_eq!(rx.try_recv().expect("a reply"), b"\x1b[?5522;2$y");
+    parser.advance(b"\x1b[?5522h\x1b[?5522$p");
+    assert_eq!(rx.try_recv().expect("a reply"), b"\x1b[?5522;1$y");
 }

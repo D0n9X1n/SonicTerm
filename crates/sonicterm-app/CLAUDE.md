@@ -165,6 +165,11 @@ cargo build -p sonicterm-app
   (`osc52_read_grants.rs`) are created only by the consent page's Always/Ban rows for a ticket
   whose program sent a nonempty `name` and `pw`, keyed by pane, PTY incarnation, owner and RIS
   epochs, operation, location and `pw`; the pump purges stale ones and a policy change clears all.
+  DECSET 5522 paste events (`misc_clipboard.rs`) choose recipients before any clipboard read: a
+  pane with the mode (`PaneState::paste_events_mode`, lock-free), not READONLY and not under
+  `osc52_read = "deny"` gets OK/listing/DONE with a one-time `pw` through `try_send_reply`; its
+  `PasteGrant` exists only after that admission, binds the recipient identity, the 5522 word and
+  the offer version (`ClipboardTextSource::offer_version`), and one named read consumes it.
   A reply dropped after its delivery retries leaves an OSC 5522 read one `EBUSY` packet. Native reads run one at a time on a disposable reader thread that keeps the ticket and
   its reply-budget lease until the native call returns. Replies go only to the source PTY through
   `PtyHandle::try_send_reply`, never the reply spool, a broadcast receiver or a log.

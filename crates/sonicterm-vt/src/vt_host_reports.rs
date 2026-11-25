@@ -80,6 +80,7 @@ impl Performer {
             2004 => Some(self.bracketed_paste),
             2026 => Some(self.synchronized_output),
             2031 => Some(self.color_scheme_updates),
+            5522 => Some(self.paste_events),
             9001 => Some(self.win32_input),
             _ => None,
         };

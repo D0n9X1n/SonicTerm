@@ -331,6 +331,16 @@ the paste separately for each pane that receives it.
 Pasted text is sent unchanged. A pane whose program has turned on bracketed
 paste gets the text inside bracketed-paste markers; other panes get plain text.
 
+A program can ask for paste events instead (mode 5522 of kitty's clipboard
+protocol). A paste then sends that pane a notice listing the clipboard's types,
+never its contents, and the program asks for what it wants. That one request
+needs no confirmation when it comes within 60 seconds, from the same pane,
+while the clipboard still holds what you pasted; otherwise it asks as any
+clipboard read does. With `osc52_read = "deny"` the pane gets the text as
+usual, and other panes receiving the same paste, such as broadcast receivers
+without the mode, get the text. See
+[Terminal IO and VT](Terminal-IO-and-VT#kitty-clipboard-protocol-osc-5522).
+
 On Windows and macOS, when the clipboard holds files copied in Explorer or
 Finder, a paste sends their paths as a drop of those files would: the same
 quoting and the same refusals described below. It never sends the files'

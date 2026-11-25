@@ -163,6 +163,138 @@ impl SessionGrants {
     }
 }
 
+/// How long a one-time paste grant may be used after its event was sent.
+pub(in crate::app) const PASTE_GRANT_LIFETIME: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
+/// A fresh one-time password: 16 bytes from the OS CSPRNG as Base64 text, so the `pw` field a
+/// program echoes decodes to UTF-8; `None` when the CSPRNG fails, and then no grant is issued.
+pub(in crate::app) fn one_time_password() -> Option<String> {
+    use base64::Engine as _;
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).ok()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// The recipient identity a one-time paste grant is bound to; a grant is usable only while the
+/// pane's live identity equals it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::app) struct PasteBinding {
+    pub(in crate::app) pane_id: u64,
+    pub(in crate::app) incarnation: u64,
+    pub(in crate::app) owner_epoch: u64,
+    pub(in crate::app) reset_epoch: u64,
+    /// The pane's published paste-events word: DECSET 5522 and its reset count.
+    pub(in crate::app) paste_mode: u64,
+    pub(in crate::app) policy_generation: u64,
+}
+
+/// One pane's one-time paste grant: a named read from the same recipient, carrying `password`,
+/// at `location`, while the clipboard still holds the offer `offer_version` names.
+pub(in crate::app) struct PasteGrant {
+    pub(in crate::app) binding: PasteBinding,
+    pub(in crate::app) location: KittyClipboardLocation,
+    /// The clipboard offer version read when the event was built.
+    pub(in crate::app) offer_version: u64,
+    password: String,
+    pub(in crate::app) issued_at: std::time::Instant,
+}
+
+impl PasteGrant {
+    /// A grant for `binding` at `location`, bound to `offer_version` and `password`.
+    pub(in crate::app) fn new(
+        binding: PasteBinding,
+        location: KittyClipboardLocation,
+        offer_version: u64,
+        password: String,
+        issued_at: std::time::Instant,
+    ) -> Self {
+        Self { binding, location, offer_version, password, issued_at }
+    }
+}
+
+impl PasteGrant {
+    /// Whether this grant answers a read from `pane_id` at `location` carrying `password`.
+    fn matches(&self, pane_id: u64, location: KittyClipboardLocation, password: &str) -> bool {
+        self.binding.pane_id == pane_id && self.location == location && self.password == password
+    }
+}
+
+impl std::fmt::Debug for PasteGrant {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The password authorizes one read, so only the pane and location are printed.
+        formatter
+            .debug_struct("PasteGrant")
+            .field("pane_id", &self.binding.pane_id)
+            .field("location", &self.location)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Every pane's one-time paste grant.
+#[derive(Debug, Default)]
+pub(in crate::app) struct PasteGrants {
+    entries: Vec<PasteGrant>,
+}
+
+impl PasteGrants {
+    /// Record `grant`, replacing its pane's earlier one: a pane holds the grant of its last paste.
+    pub(in crate::app) fn issue(&mut self, grant: PasteGrant) {
+        self.revoke(grant.binding.pane_id);
+        self.entries.push(grant);
+    }
+
+    /// Drop pane `pane_id`'s grant.
+    pub(in crate::app) fn revoke(&mut self, pane_id: u64) {
+        self.entries.retain(|grant| grant.binding.pane_id != pane_id);
+    }
+
+    /// Remove and return pane `pane_id`'s grant for `location` and `password`, so it is consumed
+    /// at most once whatever the caller then decides.
+    pub(in crate::app) fn take(
+        &mut self,
+        pane_id: u64,
+        location: KittyClipboardLocation,
+        password: &str,
+    ) -> Option<PasteGrant> {
+        let index =
+            self.entries.iter().position(|grant| grant.matches(pane_id, location, password))?;
+        Some(self.entries.remove(index))
+    }
+
+    /// [`Self::take`] for the password `credential` carries; only a credential with a nonempty
+    /// name exists, so a read without one never consumes a grant.
+    pub(in crate::app) fn take_for(
+        &mut self,
+        pane_id: u64,
+        location: KittyClipboardLocation,
+        credential: &GrantCredential,
+    ) -> Option<PasteGrant> {
+        self.take(pane_id, location, &credential.password)
+    }
+
+    /// Drop every grant, as a policy change does.
+    pub(in crate::app) fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Keep only the grants `live` accepts.
+    pub(in crate::app) fn retain(&mut self, live: impl FnMut(&PasteGrant) -> bool) {
+        self.entries.retain(live);
+    }
+
+    /// How many grants are held.
+    #[cfg(test)]
+    pub(in crate::app) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether no grant is held.
+    pub(in crate::app) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 #[cfg(test)]
 #[path = "osc52_read_grants_tests.rs"]
 mod osc52_read_grants_tests;

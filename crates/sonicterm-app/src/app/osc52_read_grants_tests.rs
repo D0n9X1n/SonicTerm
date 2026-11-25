@@ -90,3 +90,57 @@ fn sixteen_grants_per_pane_oldest_evicted() {
     grants.clear();
     assert!(grants.is_empty());
 }
+
+/// A paste binding for pane `pane_id` with every epoch at zero.
+fn paste_binding(pane_id: u64) -> PasteBinding {
+    PasteBinding {
+        pane_id,
+        incarnation: 0,
+        owner_epoch: 0,
+        reset_epoch: 0,
+        paste_mode: 1,
+        policy_generation: 0,
+    }
+}
+
+fn paste_grant(pane_id: u64, password: &str) -> PasteGrant {
+    let standard = KittyClipboardLocation::Standard;
+    PasteGrant::new(paste_binding(pane_id), standard, 7, password.into(), Instant::now())
+}
+
+/// Contract: a one-time password is fresh from the OS CSPRNG each time, carries 16 random bytes as
+/// Base64 text (so the `pw` field stays UTF-8), and a grant's `Debug` never prints it.
+#[test]
+fn one_time_password_is_fresh_and_hidden() {
+    use base64::Engine as _;
+    let first = one_time_password().expect("the OS CSPRNG answers");
+    let second = one_time_password().expect("the OS CSPRNG answers");
+    assert_ne!(first, second, "every paste gets its own password");
+    let decoded = base64::engine::general_purpose::STANDARD.decode(&first).expect("Base64 text");
+    assert_eq!(decoded.len(), 16);
+    let printed = format!("{:?}", paste_grant(1, &first));
+    assert!(!printed.contains(&first), "{printed}");
+}
+
+/// Contract: a pane holds one paste grant; a new one replaces it, a take matches the pane, the
+/// location and the password exactly and removes the grant, so a second take of the same
+/// password finds nothing; revoking drops only that pane's grant.
+#[test]
+fn paste_grants_one_per_pane_taken_once() {
+    let mut grants = PasteGrants::default();
+    let standard = KittyClipboardLocation::Standard;
+    grants.issue(paste_grant(1, "old"));
+    grants.issue(paste_grant(1, "new"));
+    grants.issue(paste_grant(2, "other"));
+    assert_eq!(grants.len(), 2, "a new paste replaced pane 1's grant");
+    assert!(grants.take(1, standard, "old").is_none(), "the replaced password is dead");
+    assert!(grants.take(2, standard, "new").is_none(), "another pane's grant never matches");
+    assert!(
+        grants.take(1, KittyClipboardLocation::Primary, "new").is_none(),
+        "nor another location"
+    );
+    assert_eq!(grants.take(1, standard, "new").map(|grant| grant.offer_version), Some(7));
+    assert!(grants.take(1, standard, "new").is_none(), "consumed once");
+    grants.revoke(2);
+    assert!(grants.is_empty());
+}

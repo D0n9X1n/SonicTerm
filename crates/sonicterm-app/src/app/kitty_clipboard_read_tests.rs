@@ -231,3 +231,35 @@ fn peak_working_set_within_21_mib_reservation() {
     assert!(3 * KITTY_READ_RESERVATION_BYTES <= budget);
     assert!(4 * KITTY_READ_RESERVATION_BYTES > budget);
 }
+
+/// Contract: a paste event is OK, one listing `DATA` packet and DONE, each with no `id` and the
+/// one-time password as Base64 in `pw`, ST-terminated; the listing is the space-joined types
+/// with a newline; `loc=primary` appears on OK only; an empty listing still sends its packet.
+#[test]
+fn paste_event_bytes_match_the_reference_layout() {
+    let types =
+        |names: &[&str]| TypeListing::Types(names.iter().map(|name| (*name).into()).collect());
+    let standard = KittyClipboardLocation::Standard;
+    let event = paste_event_reply(standard, Some("otp"), &types(&["text/plain", "image/png"]));
+    assert_eq!(
+        String::from_utf8(event).unwrap(),
+        "\x1b]5522;type=read:status=OK:pw=b3Rw\x1b\\\
+         \x1b]5522;type=read:status=DATA:mime=Lg==:pw=b3Rw;dGV4dC9wbGFpbiBpbWFnZS9wbmcK\x1b\\\
+         \x1b]5522;type=read:status=DONE:pw=b3Rw\x1b\\"
+    );
+    let primary = paste_event_reply(KittyClipboardLocation::Primary, Some("otp"), &types(&[]));
+    assert_eq!(
+        String::from_utf8(primary).unwrap(),
+        "\x1b]5522;type=read:status=OK:loc=primary:pw=b3Rw\x1b\\\
+         \x1b]5522;type=read:status=DATA:mime=Lg==:pw=b3Rw\x1b\\\
+         \x1b]5522;type=read:status=DONE:pw=b3Rw\x1b\\"
+    );
+    // Without a password (no CSPRNG), the event still lists the types and carries no `pw`.
+    let bare = paste_event_reply(standard, None, &TypeListing::Unsupported);
+    assert_eq!(
+        String::from_utf8(bare).unwrap(),
+        "\x1b]5522;type=read:status=OK\x1b\\\
+         \x1b]5522;type=read:status=DATA:mime=Lg==\x1b\\\
+         \x1b]5522;type=read:status=DONE\x1b\\"
+    );
+}

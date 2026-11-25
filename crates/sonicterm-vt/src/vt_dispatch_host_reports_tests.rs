@@ -188,18 +188,42 @@ fn cell_size_report_uses_the_host_cell_size() {
     }
 }
 
-/// Contract: DECSET 5522 (paste events) is stored per parser, cleared by DECRST and by RIS, and
-/// DECRQM still answers 0 for it, because a paste sends no event yet and a program that saw the
-/// mode advertised would wait for one.
+/// Contract: DECSET 5522 (paste events) is stored per parser and advertised: DECRQM answers 1
+/// while set and 2 while reset; DECRST and RIS reset it.
 #[test]
-fn paste_events_mode_stored_reset_and_not_advertised() {
+fn decrqm_reports_after_6c() {
     let mut parser = Parser::new(Grid::new(8, 2));
     assert!(!parser.paste_events_enabled(), "a fresh parser has the mode reset");
+    assert_eq!(reply_to(&mut parser, b"\x1b[?5522$p"), b"\x1b[?5522;2$y");
     parser.advance(b"\x1b[?5522h");
     assert!(parser.paste_events_enabled());
-    assert_eq!(reply_to(&mut parser, b"\x1b[?5522$p"), b"\x1b[?5522;0$y");
+    assert_eq!(reply_to(&mut parser, b"\x1b[?5522$p"), b"\x1b[?5522;1$y");
     parser.advance(b"\x1b[?5522l");
     assert!(!parser.paste_events_enabled(), "DECRST resets it");
+    assert_eq!(reply_to(&mut parser, b"\x1b[?5522$p"), b"\x1b[?5522;2$y");
     parser.advance(b"\x1b[?5522h\x1bc");
     assert!(!parser.paste_events_enabled(), "RIS resets it");
+}
+
+/// Contract: the lock-free paste-events snapshot carries the set bit and a count of every set to
+/// reset transition, so a host that sees one word after DECRST then DECSET in the same batch still
+/// knows a reset happened; a DECRST while reset and a RIS while reset count nothing.
+#[test]
+fn paste_events_snapshot_counts_each_reset() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    let fresh = parser.paste_events_snapshot();
+    assert_eq!(fresh & 1, 0, "reset at start");
+    parser.advance(b"\x1b[?5522h");
+    let set = parser.paste_events_snapshot();
+    assert_eq!(set, fresh | 1, "DECSET sets only the set bit");
+    parser.advance(b"\x1b[?5522l\x1b[?5522h");
+    let again = parser.paste_events_snapshot();
+    assert_eq!(again & 1, 1);
+    assert_ne!(again, set, "a reset then set in one batch still moves the word");
+    parser.advance(b"\x1bc");
+    let after_ris = parser.paste_events_snapshot();
+    assert_eq!(after_ris & 1, 0);
+    assert_ne!(after_ris >> 1, again >> 1, "RIS of a set mode counts a reset");
+    parser.advance(b"\x1b[?5522l\x1bc");
+    assert_eq!(parser.paste_events_snapshot(), after_ris, "no transition while reset");
 }

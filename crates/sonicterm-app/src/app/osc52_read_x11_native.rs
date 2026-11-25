@@ -87,6 +87,41 @@ pub(in crate::app) fn list_targets(location: ReadLocation) -> TypeListing {
     targets_with(&connection, screen, location).map_or(TypeListing::Failed, list_native_types)
 }
 
+/// The offer `location` holds now: the selection owner's window in the high 32 bits and its
+/// `TIMESTAMP` answer (when it took the selection) in the low 32, so a new owner or a new offer
+/// changes it. `None` with no X server, no owner, a protocol error, a missed 2 s selection wait
+/// or an owner that cannot answer `TIMESTAMP`, so no paste grant binds to it.
+pub(in crate::app) fn offer_version(location: ReadLocation) -> Option<u64> {
+    let (connection, screen) = RustConnection::connect(None).ok()?;
+    let (window, selection) = requestor(&connection, screen, location)?;
+    let owner = connection.get_selection_owner(selection).ok()?.reply().ok()?.owner;
+    if owner == x11rb::NONE {
+        // When: owner is NONE, nothing is offered, so there is no version.
+        return None;
+    }
+    let timestamp = atom(&connection, b"TIMESTAMP")?;
+    let property = atom(&connection, b"SONICTERM_OSC5522_TIMESTAMP")?;
+    connection
+        .convert_selection(window, selection, timestamp, property, x11rb::CURRENT_TIME)
+        .ok()?;
+    connection.flush().ok()?;
+    let notify = wait_for(&connection, Instant::now() + SELECTION_WAIT, |event| match event {
+        Event::SelectionNotify(notify) if notify.requestor == window => Some(notify.property),
+        _ => None,
+    })?;
+    if notify == x11rb::NONE {
+        // When: notify is NONE, the owner cannot answer TIMESTAMP.
+        return None;
+    }
+    let reply = connection
+        .get_property(true, window, property, xproto::AtomEnum::ANY, 0, 1)
+        .ok()?
+        .reply()
+        .ok()?;
+    let stamp = reply.value32()?.next()?;
+    Some((u64::from(owner) << 32) | u64::from(stamp))
+}
+
 /// Ask the owner for `TARGETS` within the selection wait and name at most
 /// [`MAX_NATIVE_TYPES_SCANNED`] of its atoms; `None` on a protocol error, a missed deadline or a
 /// reply that is not an atom list.

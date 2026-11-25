@@ -517,6 +517,32 @@ fn pane_vt_batch_publishes_pointer_modes_after_each_parse() {
     );
 }
 
+/// Contract: a VT batch publishes the DECSET 5522 word after it parses, so paste routing reads the
+/// mode without the parser lock, and a DECRST then DECSET inside one batch still moves the word.
+#[test]
+fn pane_vt_batch_publishes_paste_events_after_each_parse() {
+    let (pane, handles) = pane_and_worker_handles();
+    let run = |bytes: &[u8]| {
+        process_pane_vt_batch_with(
+            &handles,
+            bytes,
+            None,
+            &mut None,
+            &mut SyncLatch::default(),
+            |_| None,
+            |_| {},
+            Instant::now,
+            |_| {},
+        );
+    };
+    run(b"\x1b[?5522h");
+    let set = pane.paste_events_mode();
+    assert_eq!(set & 1, 1, "the set bit is published");
+    assert_eq!(set, handles.parser.lock().paste_events_snapshot());
+    run(b"\x1b[?5522l\x1b[?5522h");
+    assert_ne!(pane.paste_events_mode(), set, "the reset is visible though the mode is set again");
+}
+
 /// A pane attached to a parser that already negotiated mouse tracking starts with that
 /// state published, so the first pointer event never routes with default modes.
 #[test]

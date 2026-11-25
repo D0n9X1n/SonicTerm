@@ -782,6 +782,10 @@ pub(in crate::app) use win32::read_text as read_windows_text;
 #[cfg(target_os = "windows")]
 pub(in crate::app) use win32::list_formats as list_windows_formats;
 
+/// The Windows clipboard change counter, which versions a DECSET 5522 paste event's offer.
+#[cfg(target_os = "windows")]
+pub(in crate::app) use win32::sequence as clipboard_sequence;
+
 #[cfg(test)]
 #[path = "clipboard_worker_tests.rs"]
 mod clipboard_worker_tests;

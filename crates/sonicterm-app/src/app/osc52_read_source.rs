@@ -127,6 +127,12 @@ pub(in crate::app) trait ClipboardTextSource: Send + Sync {
     fn list_types(&self, _location: ReadLocation) -> TypeListing {
         TypeListing::Unsupported
     }
+
+    /// A version of the offer `location` holds now, which changes whenever the offer does; `None`
+    /// when the platform cannot say, so no one-time paste grant can be bound to it.
+    fn offer_version(&self, _location: ReadLocation) -> Option<u64> {
+        None
+    }
 }
 
 /// The selection a reply label reads: `c` and `s` the clipboard, `p` PRIMARY on Linux only.
@@ -239,6 +245,48 @@ impl ClipboardTextSource for NativeSource {
     fn list_types(&self, location: ReadLocation) -> TypeListing {
         native_list(location)
     }
+
+    fn offer_version(&self, location: ReadLocation) -> Option<u64> {
+        native_offer_version(location)
+    }
+}
+
+/// Windows: `GetClipboardSequenceNumber`, which every change to the clipboard advances; 0 means
+/// the session has no clipboard access, so there is no version. There is no PRIMARY.
+#[cfg(target_os = "windows")]
+fn native_offer_version(location: ReadLocation) -> Option<u64> {
+    match location {
+        ReadLocation::Clipboard => {
+            Some(super::clipboard_worker::clipboard_sequence()).filter(|sequence| *sequence != 0)
+        }
+        ReadLocation::Primary => None,
+    }
+    .map(u64::from)
+}
+
+/// macOS: the general pasteboard's `changeCount`, which every new offer advances; read without
+/// reading any content. There is no PRIMARY.
+#[cfg(target_os = "macos")]
+fn native_offer_version(location: ReadLocation) -> Option<u64> {
+    use objc2_app_kit::NSPasteboard;
+    if location == ReadLocation::Primary {
+        // When: location is Primary, macOS has no such selection.
+        return None;
+    }
+    let count = objc2::rc::autoreleasepool(|_| NSPasteboard::generalPasteboard().changeCount());
+    u64::try_from(count).ok()
+}
+
+/// Linux: the X11 selection owner and its `TIMESTAMP` answer, which a new offer changes.
+#[cfg(target_os = "linux")]
+fn native_offer_version(location: ReadLocation) -> Option<u64> {
+    super::osc52_read_x11_native::offer_version(location)
+}
+
+/// Other platforms cannot version an offer.
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn native_offer_version(_location: ReadLocation) -> Option<u64> {
+    None
 }
 
 /// Windows: the open clipboard's formats through `EnumClipboardFormats`, named without reading any
