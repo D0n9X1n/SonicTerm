@@ -231,6 +231,10 @@ pub(super) fn idle_trim_releases_only_the_texture(active: &ActiveEventLoop) -> R
     let frame_slot = |ledger: &sonicterm_gpu::graphics_ledger::GraphicsLedgerHandle| {
         ledger.snapshot().class(GraphicsClass::FrameTexture).live_bytes
     };
+    // The whole frame-texture tally, so a redundant same-size replacement shows in its counts.
+    let frame_tally = |ledger: &sonicterm_gpu::graphics_ledger::GraphicsLedgerHandle| {
+        ledger.snapshot().class(GraphicsClass::FrameTexture)
+    };
     let slot_before = frame_slot(&ledger);
 
     let released = renderer.trim_idle_frame_texture();
@@ -239,7 +243,9 @@ pub(super) fn idle_trim_releases_only_the_texture(active: &ActiveEventLoop) -> R
         released == texture_bytes,
         &format!("the idle trim releases {texture_bytes}: {released}"),
     )?;
+    let tally_trimmed = frame_tally(&ledger);
     check(renderer.trim_idle_frame_texture() == 0, "a second idle trim releases nothing")?;
+    check(frame_tally(&ledger) == tally_trimmed, "a second idle trim replaces nothing")?;
     check(slot_before - frame_slot(&ledger) == texture_bytes, "the frame slot falls once")?;
     let after = renderer.retained_amounts();
     check(after.row_glyph_cache == before.row_glyph_cache, "the row glyph cache stays")?;
@@ -293,9 +299,9 @@ pub(super) fn idle_trim_releases_only_the_texture(active: &ActiveEventLoop) -> R
     // A window idle-trimmed and then covered: the covered trim finds the texture already released,
     // so it counts only the present buffers, and still releases every other part.
     check(renderer.trim_idle_frame_texture() == texture_bytes, "the idle trim releases again")?;
-    let slot_idle = frame_slot(&ledger);
+    let tally_idle = frame_tally(&ledger);
     let covered = renderer.trim_for_occlusion();
-    check(frame_slot(&ledger) == slot_idle, "the covered trim replaces no texture")?;
+    check(frame_tally(&ledger) == tally_idle, "the covered trim replaces no texture")?;
     check(
         covered.gpu_released_requested_bytes < texture_bytes
             && covered.present_buffer_bytes_before > 0,
