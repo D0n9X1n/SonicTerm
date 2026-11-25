@@ -901,7 +901,13 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                             progress = Some(None);
                             command_started.take().map(|started| at.duration_since(started))
                         }
-                        CommandEvent::PromptStart | CommandEvent::PromptEnd => None,
+                        CommandEvent::PromptStart => {
+                            // A fresh prompt ends any command still timed, so a later D with no C
+                            // of its own never takes the previous command's duration.
+                            *command_started = None;
+                            None
+                        }
+                        CommandEvent::PromptEnd => None,
                     };
                     command_side_effects.push(super::PaneCommandEvent { event, at, duration });
                 }

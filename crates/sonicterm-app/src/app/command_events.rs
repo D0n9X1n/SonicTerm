@@ -170,8 +170,9 @@ pub fn poll_command_events_for_child_window(child: &mut WindowState, config: &Co
 /// Keep `queue`'s one command-text slot in step with `events`, in parse order. Only the section's
 /// last C holds text: its own primary-screen text from `section` (taken under the parser lock);
 /// an earlier C holds none. A D after a run of a second or more stamps the held text with its
-/// instant for the drain, and any other D drops an unstamped text. A section with an
-/// alternate-screen C or D holds no text and drops an unstamped one, whose owner is ambiguous.
+/// instant for the drain, and any other D drops an unstamped text; so does a fresh A, which ends
+/// the command that text belonged to. A section with an alternate-screen C or D holds no text and
+/// drops an unstamped one, whose owner is ambiguous.
 /// Only a run that long can pass the notification threshold, so short commands hold no text.
 pub(super) fn track_cmdline(
     queue: &mut CommandQueue,
@@ -204,8 +205,15 @@ pub(super) fn track_cmdline(
                     queue.cmdline = None;
                 }
             }
-            CommandEvent::PromptStart | CommandEvent::PromptEnd => {
-                // When: the event is a prompt mark, it neither starts nor ends a command.
+            CommandEvent::PromptStart => {
+                // A fresh A ends the command an unstamped text belonged to, which sent no D, so no
+                // later D may claim it; a stamped text already belongs to its D.
+                if matches!(queue.cmdline, Some((_, None))) {
+                    queue.cmdline = None;
+                }
+            }
+            CommandEvent::PromptEnd => {
+                // When: the event is PromptEnd, the prompt is drawn; it neither starts nor ends one.
             }
         }
     }

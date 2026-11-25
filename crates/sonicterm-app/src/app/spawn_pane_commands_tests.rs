@@ -346,6 +346,58 @@ fn authenticated_cmdline_reaches_a_long_commands_end() {
     assert!(handles.command_events.lock().cmdline.is_none(), "a short run holds no text");
 }
 
+/// A fresh A ends a command that never sent its D: a later D with no C of its own gets neither the
+/// abandoned command's duration nor its text, in one batch or across batches, while a stamped
+/// long command still drains paired with its own D after the next A.
+#[test]
+fn a_fresh_prompt_drops_the_abandoned_commands_timer_and_text() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let token = "0123456789abcdef0123456789abcdef";
+    handles.parser.lock().set_shell_token(Some(token.to_owned()));
+    let base = Instant::now();
+    let mut times = (0..).map(|secs| base + Duration::from_secs(secs * 5));
+    let mut started = None;
+    let mut batch = |text: String| {
+        process_pane_vt_batch_with(
+            &handles,
+            text.as_bytes(),
+            None,
+            &mut started,
+            &mut SyncLatch::default(),
+            |_| None,
+            |_| {},
+            || times.next().unwrap(),
+            |_| {},
+        );
+    };
+    let mark = |body: &str| format!("\x1b]133;{body};sonicterm_token={token}\x07");
+    let orphan_end = |handles: &PaneVtHandles| {
+        let drained = crate::app::command_events::drain_paired(&mut handles.command_events.lock());
+        drained
+            .into_iter()
+            .filter(|(event, _)| matches!(event.event, CommandEvent::CmdEnd(_)))
+            .map(|(event, text)| (event.duration, text.map(|text| text.as_str().to_owned())))
+            .collect::<Vec<_>>()
+    };
+    // C, then A with no D, then a bare D: in one batch.
+    batch([mark("C;cmdline_url=secret%20one"), mark("A"), mark("D;0")].concat());
+    assert_eq!(orphan_end(&handles), vec![(None, None)], "one batch: no duration, no text");
+    // The same across batches.
+    batch(mark("C;cmdline_url=secret%20two"));
+    assert!(handles.command_events.lock().cmdline.is_some(), "the running command holds its text");
+    batch(mark("A"));
+    // The A itself drops the text: nothing of an abandoned command is held past its end.
+    assert!(handles.command_events.lock().cmdline.is_none(), "a fresh A drops the held text");
+    batch(mark("D;0"));
+    assert_eq!(orphan_end(&handles), vec![(None, None)], "across batches: no duration, no text");
+    // A long command's stamped text survives the next A and drains with its own D.
+    batch(mark("C;cmdline_url=make%20test"));
+    batch([mark("D;0"), mark("A")].concat());
+    let ends = orphan_end(&handles);
+    assert_eq!(ends.len(), 1);
+    assert_eq!(ends[0].1.as_deref(), Some("make test"), "a stamped text stays paired");
+}
+
 /// Execution duration starts at C, not B, and B/D without execution has no duration.
 #[test]
 fn command_duration_excludes_prompt_editing_time() {
