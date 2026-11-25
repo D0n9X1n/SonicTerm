@@ -259,10 +259,18 @@ pub(in crate::app) type CommitGate<'gate> = &'gate dyn Fn() -> bool;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::app) enum Published {
     /// Every representation was set.
+    #[cfg_attr(
+        all(not(test), not(any(target_os = "macos", target_os = "windows"))),
+        expect(dead_code, reason = "no offer backend publishes on this platform yet")
+    )]
     Written,
     /// The clipboard could not be taken or refused a representation; it holds no partial offer.
     Failed,
     /// The gate refused at the commit point, so the clipboard was never changed.
+    #[cfg_attr(
+        all(not(test), not(any(target_os = "macos", target_os = "windows"))),
+        expect(dead_code, reason = "no offer backend publishes on this platform yet")
+    )]
     Unchanged,
 }
 
