@@ -99,7 +99,13 @@ fn counting_renderer(
     font_px: f32,
     size: PhysicalSize<u32>,
 ) -> Result<(Arc<Window>, GpuRenderer), String> {
-    renderer_starting_at(active, role, software, font_px, size, GlyphAtlasStart::Minimum)
+    let (window, renderer) =
+        renderer_starting_at(active, role, software, font_px, size, GlyphAtlasStart::Minimum)?;
+    check(
+        renderer.glyph_atlas_facts().dim == sonicterm_text::glyph_atlas::MIN_ATLAS_DIM,
+        &format!("{role}: the atlas starts at the 256 floor"),
+    )?;
+    Ok((window, renderer))
 }
 
 /// [`counting_renderer`] whose glyph atlas starts as `start` says: the 256 floor for `Minimum`,
@@ -153,10 +159,6 @@ fn renderer_starting_at(
     check(
         renderer.is_software_render_degraded() == software,
         &format!("{role}: the renderer presents through GDI={software}"),
-    )?;
-    check(
-        renderer.glyph_atlas_facts().dim == sonicterm_text::glyph_atlas::MIN_ATLAS_DIM,
-        &format!("{role}: the atlas starts at the 256 floor"),
     )?;
     renderer.set_tab_bar_visible(false);
     renderer.set_cursor_blink(false);

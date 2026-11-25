@@ -122,10 +122,10 @@ size as the CPU atlas, so instead of 16 MiB in each, a scale-1 window starts
 with 4 MiB and a scale-2 window with 1 MiB. Both starts are what the sizing
 rule in `sonicterm-text`'s `start_size_inputs` selects over CI measurements of
 the S9 and S12 working sets. At scale 1, where the perf scenarios run, the
-helper's largest working set fits 1024, so no scenario grows the atlas while it
-is measured. At scale 2 the real renderer's working set fits 512, and a window
-that draws more, such as many CJK or emoji glyphs, doubles on demand at the
-cost of one retried frame per doubling.
+helper's largest S9 and S12 working set fits 1024. At scale 2 the real
+renderer's working set fits 512, and a window that draws more, such as many CJK
+or emoji glyphs, doubles on demand; a frame that grows the atlas, once or more,
+is retried once.
 
 ### Windows LCD subpixel policy
 

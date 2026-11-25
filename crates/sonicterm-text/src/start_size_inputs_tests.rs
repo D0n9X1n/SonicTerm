@@ -266,9 +266,8 @@ fn each_start_constant_equals_the_rule_over_the_recorded_rows() {
 }
 
 /// The rule's result depends on the inputs that set each scale's largest deciding fit: dropping any
-/// one of them, with every row that measured it (the real renderer's rows are printed by two test
-/// sets), either loses a required input or lowers the ruled start, so the equality above stops
-/// holding. The test finds those inputs itself through [`decides_start`], so it covers whichever
+/// one of them, with every row that measured it (an input can be recorded more than once), either
+/// loses a required input or lowers the ruled start, so the equality above stops holding. The test finds those inputs itself through [`decides_start`], so it covers whichever
 /// rows decide, and a helper row that only bounds growth is not one of them.
 #[test]
 fn dropping_a_row_that_sets_the_largest_fit_breaks_the_equality() {

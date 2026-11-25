@@ -211,9 +211,9 @@ pub fn start_rule(inputs: &[RuleInput]) -> Result<StartVerdict, String> {
 /// Validate a normal renderer's start dimension `start` at `scale` against measured `rows`.
 ///
 /// The maximum is always valid: it saves nothing, so it needs no measurement, and its verdict says
-/// whether any recorded row would have chosen it anyway. A smaller start is valid only when
-/// `oracle_complete` is true, every [`required_inputs`] entry has a row at `scale`, and
-/// [`start_rule`] over the scale's rows selects exactly `start`.
+/// what the rule over the recorded rows would choose. A smaller start is valid only when
+/// `oracle_complete` is true, every [`required_inputs`] entry has a row at `scale`, and the rule
+/// over the scale's rows, split by [`decides_start`], selects exactly `start`.
 ///
 /// # Errors
 ///
@@ -224,12 +224,11 @@ pub fn validate_start_dim(
     rows: &[StartSizeInput],
     oracle_complete: bool,
 ) -> Result<StartVerdict, String> {
-    let inputs = rule_inputs(scale, rows);
     if start == ATLAS_DIM {
         // When: start is the maximum it claims no savings, so an empty or incomplete table is fine.
-        let verdict = match start_rule(&inputs) {
-            Ok(rule) => format!("maximum selected, no savings ({})", rule.verdict),
-            Err(_) => format!("no measured {scale}x input: maximum selected, no savings"),
+        let verdict = match split_rule(scale, rows) {
+            Ok(rule) => format!("maximum selected, no savings (the rule selects {})", rule.verdict),
+            Err(_) => format!("no deciding {scale}x input: maximum selected, no savings"),
         };
         return Ok(StartVerdict { dim: ATLAS_DIM, verdict });
     }
@@ -287,12 +286,12 @@ pub fn ruled_start(
 pub const PERF_SCALE: u32 = 1;
 
 /// Whether `row` decides its scale's start. At [`PERF_SCALE`] every row does. Elsewhere only the
-/// rows that measured what a renderer draws do; the helper's superset (`InputSource::Helper`) only
-/// bounds what the atlas must grow to, because growth there costs one retried frame that no
-/// measured scenario contains.
+/// rows that measured what a real renderer drew (`InputSource::RealRenderer`) do; the helper's
+/// superset only bounds what the atlas must grow to, because growth there costs one retried frame
+/// that no measured scenario contains.
 #[must_use]
 pub fn decides_start(row: &StartSizeInput) -> bool {
-    row.scale == PERF_SCALE || row.source != InputSource::Helper
+    row.scale == PERF_SCALE || row.source == InputSource::RealRenderer
 }
 
 /// A helper measurement's need at one scale and the atlas size that must hold it.

@@ -646,12 +646,12 @@ those rows selects exactly that size.
 
 The rule depends on where a growth would land. The perf scenarios run at scale
 1 (`PERF_SCALE`), so there every row sizes the start, including the working-set
-helper's superset, and a scenario never grows the atlas inside a measurement.
+helper's superset of S9 and S12.
 No perf scenario runs at scale 2, so there only the rows that measured a real
 renderer decide the start (`decides_start`). The helper rows still bound growth:
 each must fit within the maximum with no tofu, or the start is the maximum. A 2x
-window that draws more than its start holds doubles toward 2048, at the cost of
-one retried frame per doubling. The working-set step and its local fallback
+window that draws more than its start holds doubles toward 2048; a frame that
+grows the atlas, once or more, is retried once. The working-set step and its local fallback
 check a helper the same way (`helper_bound`): at scale 1 the start must hold its
 need, and at scale 2 it must fit the maximum.
 
@@ -659,8 +659,7 @@ A measurement that drew any required
 glyph as tofu (unresolved, resolved but not rasterized, or too large to place)
 selects 2048, so it
 can never justify a smaller start. Each `glyph_atlas_working_set` row reports
-that count as `incomplete_glyphs`; the helper's S9 measurement currently
-reports emoji that fail to rasterize, so it selects 2048. A raster failure may
+that count as `incomplete_glyphs`; every recorded helper row reports 0. A raster failure may
 be exempted only by an entry in `RASTER_EXCEPTIONS`, applied where each failure
 still names its face: the entry names the platform, raster role, face content
 and index, glyph id, style and strike, never a family or a file name, and
