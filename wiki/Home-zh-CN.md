@@ -25,6 +25,7 @@ SonicTerm 是面向 macOS、Windows 和 Linux 的原生 GPU 加速终端。
 - [从按键到像素](From-Keypress-to-Pixel-zh-CN) — 输入、子进程输出、网格、字形与像素
 - [运行时生命周期](Runtime-Lifecycle-zh-CN) — 启动、所有权变化、标签页转移与退出
 - [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN) — PTY、解析器协议、shell 集成与网格规则
+- [OSC 支持](OSC-Support-zh-CN) — WezTerm、Ghostty 或 kitty 实现的每种 OSC，以及 SonicTerm 的处理
 - [渲染模式](Rendering-Modes-zh-CN) — 适配器选择与帧节奏
 - [渲染与字体](Rendering-and-Fonts-zh-CN) — 字体、图集、GPU/CPU 绘制与损伤区域
 - [平台集成](Platform-Integration-zh-CN) — AppKit、Win32、X11 与 Wayland 边界
