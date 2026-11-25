@@ -9,7 +9,7 @@
 //! a failed step fails, and only a poll that begins before the deadline counts. [`settle_input`] and
 //! [`collect_input`] bound the child's input by time and bytes; a reply that overflows or never
 //! goes quiet is reported as such, never as a cut or half reply. Each reads its clock through a
-//! seam ([`Teardown::now`], [`InputSource`]), so the tests run them on a scripted virtual clock.
+//! seam ([`Teardown::now`], [`Unjobbed::now`], [`InputSource`]), so the tests run them on a scripted virtual clock.
 //!
 //! Quiet input reduces carry-over; it does not prove which case produced a reply. A reply delayed
 //! outside the child's queue for longer than [`SETTLE_QUIET`] can still be read by the next echo
@@ -331,13 +331,27 @@ pub(crate) trait Unjobbed {
     fn kill(&mut self) -> bool;
     /// Whether the host has exited and been reaped.
     fn exited(&mut self) -> bool;
+    /// The clock the reap wait reads; a test scripts it.
+    fn now(&mut self) -> Instant {
+        Instant::now()
+    }
+    /// Pause between two polls of the reap wait.
+    fn pause(&mut self, length: Duration) {
+        std::thread::sleep(length);
+    }
 }
 
 /// Kill and reap a host outside its job within `deadline`; return (killed, reaped), where reaped
 /// means it was seen exited on a poll that began before the deadline.
-pub(crate) fn abandon(host: &mut impl Unjobbed, deadline: Instant) -> (bool, bool) {
+pub(crate) fn abandon<H: Unjobbed + ?Sized>(host: &mut H, deadline: Instant) -> (bool, bool) {
     let killed = host.kill();
-    let reaped = wait_until(deadline, || host.exited());
+    let reaped = poll_until(
+        host,
+        deadline,
+        |host| host.now(),
+        |host, length| host.pause(length),
+        |host| host.exited(),
+    );
     (killed, reaped)
 }
 

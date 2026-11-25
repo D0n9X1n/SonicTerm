@@ -321,10 +321,26 @@ fn the_host_and_job_waits_share_one_deadline() {
     assert!(!reaped(100), "the job emptied only at the deadline the host wait used up");
 }
 
-/// A scripted host outside its job: whether the kill call and the reap succeed.
+/// A scripted host outside its job on a virtual clock: whether the kill call succeeds, and when
+/// on that clock the host is seen exited (`None`: never).
 struct FakeUnjobbed {
+    origin: Instant,
+    elapsed: Duration,
     kill_works: bool,
-    exits: bool,
+    exits_from: Option<Duration>,
+}
+
+impl FakeUnjobbed {
+    /// A host whose kill call answers `kill_works` and that exits at `exits_from`.
+    fn new(kill_works: bool, exits_from: Option<Duration>) -> Self {
+        Self { origin: Instant::now(), elapsed: Duration::ZERO, kill_works, exits_from }
+    }
+
+    /// The outcome of abandoning this host with `deadline_ms` of allowance.
+    fn abandoned_within(mut self, deadline_ms: u64) -> (bool, bool) {
+        let deadline = self.origin + millis(deadline_ms);
+        abandon(&mut self, deadline)
+    }
 }
 
 impl Unjobbed for FakeUnjobbed {
@@ -333,25 +349,27 @@ impl Unjobbed for FakeUnjobbed {
     }
 
     fn exited(&mut self) -> bool {
-        self.exits
+        self.exits_from.is_some_and(|from| self.elapsed >= from)
+    }
+
+    fn now(&mut self) -> Instant {
+        self.origin + self.elapsed
+    }
+
+    fn pause(&mut self, length: Duration) {
+        self.elapsed += length;
     }
 }
 
 /// A host that never joined its job reports a failed kill and a failed reap separately, so an
-/// escaped host is named rather than hidden behind the assignment error. The exiting host is seen
-/// on the first poll, so its deadline is only a bound; the failing one waits its whole deadline.
+/// escaped host is named rather than hidden behind the assignment error. Polls fall every 20 ms on
+/// the virtual clock: an exit seen at 40 ms is reaped within 60 ms, one only at 60 ms is not.
 #[test]
 fn an_unjobbed_host_reports_its_kill_and_reap() {
-    let generous = Instant::now() + Duration::from_secs(30);
-    assert_eq!(
-        abandon(&mut FakeUnjobbed { kill_works: true, exits: true }, generous),
-        (true, true)
-    );
-    let short = Instant::now() + millis(60);
-    assert_eq!(
-        abandon(&mut FakeUnjobbed { kill_works: false, exits: false }, short),
-        (false, false)
-    );
+    assert_eq!(FakeUnjobbed::new(true, Some(Duration::ZERO)).abandoned_within(60), (true, true));
+    assert_eq!(FakeUnjobbed::new(true, Some(millis(40))).abandoned_within(60), (true, true));
+    assert_eq!(FakeUnjobbed::new(true, Some(millis(60))).abandoned_within(60), (true, false));
+    assert_eq!(FakeUnjobbed::new(false, None).abandoned_within(60), (false, false));
 }
 
 /// Only an exact `go` line confirms the job: EOF, a read error, a missing newline, CRLF or
@@ -377,7 +395,8 @@ enum Event {
 /// A child's input scripted on a virtual clock: each event is due a set time after the read
 /// starts, and past the script the sender stays live and silent. A receive returns the next event
 /// due within its wait, else times out after the whole wait, and every wait is recorded, so the
-/// result and the branch taken never depend on how the test thread is scheduled.
+/// result and the branch taken never depend on how the test thread is scheduled. A due `Closed`
+/// stays at the front, so every later receive reports the disconnect again, as a channel does.
 struct ScriptedInput {
     origin: Instant,
     elapsed: Duration,
@@ -415,11 +434,15 @@ impl InputSource for ScriptedInput {
             self.elapsed += wait;
             return Err(RecvTimeoutError::Timeout);
         }
-        let (due, event) = self.script.pop_front().expect("an event is due");
-        self.elapsed = self.elapsed.max(due);
-        match event {
-            Event::Chunk(bytes) => Ok(bytes),
-            Event::Closed => Err(RecvTimeoutError::Disconnected),
+        let (due, _) = self.script.front().expect("an event is due");
+        self.elapsed = self.elapsed.max(*due);
+        if matches!(self.script.front(), Some((_, Event::Closed))) {
+            // When: the due event is Closed, it stays queued: a closed reader never reopens.
+            return Err(RecvTimeoutError::Disconnected);
+        }
+        match self.script.pop_front() {
+            Some((_, Event::Chunk(bytes))) => Ok(bytes),
+            _ => unreachable!("the front event is a due chunk"),
         }
     }
 }
@@ -459,15 +482,29 @@ fn a_trickle_that_never_quiets_stops_at_the_deadline() {
     assert_eq!(input.waits.last(), Some(&millis(50)), "the deadline cut the last window short");
 }
 
-/// A settle on a queue whose reader ended is settled: nothing more can arrive. This one reads the
-/// real channel, whose disconnect is seen at once.
+/// A settle on a queue whose reader ended is settled: nothing more can arrive. The reader's end
+/// stays reported, so a later settle and read on the same source see it again.
 #[test]
 fn a_closed_reader_is_settled() {
-    let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(1);
-    drop(sender);
-    assert!(settle_input_within(&receiver, Duration::from_secs(30), SETTLE_QUIET));
     let mut input = ScriptedInput::new(vec![(Duration::ZERO, Event::Closed)]);
     assert!(settle_input_from(&mut input, SETTLE_DEADLINE, SETTLE_QUIET));
+    assert!(settle_input_from(&mut input, SETTLE_DEADLINE, SETTLE_QUIET));
+    assert_eq!(collect_input_from(&mut input, READ_DEADLINE, READ_QUIET), Input::Bytes(Vec::new()));
+    assert_eq!(input.elapsed, Duration::ZERO, "no wait passed after the reader ended");
+}
+
+/// The real source forwards the channel: a queued chunk, an empty live queue's timeout and a
+/// dropped sender's disconnect each come back as the channel gives them. Every receive here has
+/// a zero wait, so none of it depends on the clock.
+#[test]
+fn the_channel_source_forwards_the_receiver() {
+    let (sender, receiver) = mpsc::sync_channel(2);
+    let mut source = ChannelInput(&receiver);
+    sender.send(b"chunk".to_vec()).expect("queue a chunk");
+    assert_eq!(source.recv(Duration::ZERO), Ok(b"chunk".to_vec()));
+    assert_eq!(source.recv(Duration::ZERO), Err(RecvTimeoutError::Timeout));
+    drop(sender);
+    assert_eq!(source.recv(Duration::ZERO), Err(RecvTimeoutError::Disconnected));
 }
 
 /// A reply up to MAX_READ_BYTES is kept whole; one byte more is an overflow, never a cut reply
@@ -535,25 +572,28 @@ fn a_reply_cut_by_the_deadline_is_unsettled() {
     assert!(expired.script.is_empty(), "both chunks arrived");
 }
 
-/// No reply at all within the deadline is an empty reply, which a row reads as a mismatch.
+/// No reply at all within the deadline is an empty reply, which a row reads as a mismatch: one
+/// receive waits the whole deadline and times out with nothing.
 #[test]
 fn no_reply_within_the_deadline_is_empty() {
-    let (_sender, receiver) = mpsc::sync_channel::<Vec<u8>>(1);
-    let reply = collect_input_within(&receiver, millis(40), millis(20));
-    assert_eq!(reply, Input::Bytes(Vec::new()));
+    let mut input = ScriptedInput::new(Vec::new());
+    assert_eq!(collect_input_from(&mut input, millis(40), millis(20)), Input::Bytes(Vec::new()));
+    assert_eq!(input.waits, vec![millis(40)]);
 }
 
 /// Input delayed past an intervening no-echo case but queued before the next echo case is
-/// discarded by that case's settle, so it never reads as the echo case's reply. This one reads the
-/// real channel; its order is fixed on one thread, and the long deadlines are only margin.
+/// discarded by that case's settle, so it never reads as the echo case's reply. On one live
+/// source: the earlier case's late reply is queued when the echo case settles, and the echo
+/// reply arrives after that settle and before the read ends.
 #[test]
 fn input_delayed_across_a_no_echo_case_is_settled_away() {
-    let (sender, receiver) = mpsc::sync_channel(4);
-    // The earlier case's late reply lands while a no-echo case runs; the echo case settles first.
-    sender.send(b"late".to_vec()).expect("queue the late reply");
-    assert!(settle_input_within(&receiver, Duration::from_secs(30), millis(30)));
-    sender.send(b"reply".to_vec()).expect("queue the echo reply");
-    let reply = collect_input_within(&receiver, Duration::from_secs(30), millis(30));
+    let mut input = ScriptedInput::new(vec![
+        (Duration::ZERO, Event::Chunk(b"late".to_vec())),
+        (SETTLE_QUIET + millis(100), Event::Chunk(b"reply".to_vec())),
+    ]);
+    assert!(settle_input_from(&mut input, SETTLE_DEADLINE, SETTLE_QUIET));
+    assert_eq!(input.elapsed, SETTLE_QUIET, "the settle ended a whole quiet window after late");
+    let reply = collect_input_from(&mut input, READ_DEADLINE, READ_QUIET);
     assert_eq!(reply, Input::Bytes(b"reply".to_vec()));
 }
 
