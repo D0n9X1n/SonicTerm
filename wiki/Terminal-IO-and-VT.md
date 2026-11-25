@@ -553,7 +553,8 @@ is still sent but issues no grant. The first OSC 5522 read from that pane at tha
 password and a nonempty `name` consumes the grant atomically on the event loop. It is approved
 without a page only while the recipient is unchanged and within 60 s; otherwise it takes normal
 consent. The approval keeps the grant's 60 s end and checks it against the clock where the read
-touches the clipboard or the PTY: the reader thread before each native content call and after
+touches the clipboard or the PTY: the reader thread before each clipboard source operation (a
+Windows read that is retrying to open the clipboard finishes that operation) and after
 its offer-version check, and the PTY writer, which checks it under its admission lock
 immediately before it queues the reply, retries included. A read whose
 grant ends first makes no further native call, its data is dropped, and it waits for an

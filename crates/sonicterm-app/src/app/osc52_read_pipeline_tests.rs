@@ -528,3 +528,36 @@ fn queue_pressure_single_ebusy_no_partial_ok() {
     assert_eq!(harness.budget_bytes(), 0, "the dropped reply released its lease");
     assert_eq!(harness.staging.ticket_slots_in_use(), 0);
 }
+
+/// A clipboard whose plain-text MIME read returns raw bytes that are not UTF-8, as a Windows block
+/// registered under `text/plain` does, while its text conversion returns something else.
+struct RawPlainSource;
+
+impl ClipboardTextSource for RawPlainSource {
+    fn read_text_bounded(&self, _location: ReadLocation, _max_bytes: usize) -> ReadOutcome {
+        ReadOutcome::Text("lossy".into())
+    }
+
+    fn read_plain_bytes(
+        &self,
+        _location: ReadLocation,
+        _max_bytes: usize,
+    ) -> crate::app::osc52_read_source::TypeRead {
+        crate::app::osc52_read_source::TypeRead::Bytes(vec![0xff, b'a'])
+    }
+}
+
+/// Contract: a `text/plain` OSC 5522 read through the reader thread uses the source's own plain-byte
+/// read, so a backend that returns a registered block's original bytes serves them unconverted; the
+/// read's clipboard wrapper forwards that call rather than falling back to the text conversion.
+#[test]
+fn kitty_plain_read_serves_the_backends_raw_bytes() {
+    let mut harness = harness(Osc52ReadPolicy::Allow, FakeSource::new("unused"));
+    harness.app.clip_state.reads.source = Arc::new(RawPlainSource);
+    kitty_read(&mut harness, &["text/plain"]);
+    harness.pump_until(|harness| harness.delivered_count() == 1);
+    let delivered = harness.take_delivered();
+    let reply = String::from_utf8(delivered[0].1.bytes().to_vec()).expect("an ASCII reply");
+    // [0xff, b'a'] is `/2E=`; the text conversion would have served `bG9zc3k=`.
+    assert!(reply.contains("mime=dGV4dC9wbGFpbg==;/2E="), "{reply:?}");
+}

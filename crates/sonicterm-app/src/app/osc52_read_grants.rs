@@ -352,6 +352,16 @@ impl ClipboardTextSource for GrantBoundSource<'_> {
         self.source.read_text_bounded(location, max_bytes)
     }
 
+    fn read_plain_bytes(&self, location: ReadLocation, max_bytes: usize) -> TypeRead {
+        if !self.live() {
+            // When: live is false, the grant ended: no native call is made.
+            return TypeRead::Failed;
+        }
+        // Forwarded, so a backend's own plain-byte read (a registered block's original bytes)
+        // is used rather than the trait's text conversion.
+        self.source.read_plain_bytes(location, max_bytes)
+    }
+
     fn list_types(&self, location: ReadLocation) -> TypeListing {
         if !self.live() {
             // When: live is false, the grant ended: no native call is made.

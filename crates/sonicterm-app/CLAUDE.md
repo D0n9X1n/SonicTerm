@@ -216,7 +216,8 @@ cargo build -p sonicterm-app
   the offer version (`ClipboardTextSource::offer_version`), and one named read consumes it into a
   `PasteApproval` its `ReadBinding` carries to delivery: revalidation checks the recipient and the
   grant's `expires_at` (its 60 s end); the reader thread reads through `GrantBoundSource`, which
-  checks `expires_at` against the clock before each native content call, and checks it again after
+  checks `expires_at` against the clock before each source operation (`read_plain_bytes`
+  included; a Windows read retrying `OpenClipboard` finishes that operation), and again after
   its offer-version read; `deliver_read_reply` revalidates at `now.max(Instant::now())`, retries
   included, and gives a paste-approved reply the grant's end as `SensitiveReply::valid_until`,
   which `try_admit_sensitive` checks under the admission lock immediately before queuing; an
