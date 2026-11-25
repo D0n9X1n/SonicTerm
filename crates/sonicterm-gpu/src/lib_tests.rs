@@ -187,14 +187,21 @@ fn only_the_shared_helper_creates_a_device_off_windows() {
 fn unshared_device_calls(text: &str, holds_shared: bool) -> Vec<usize> {
     use crate::source_scan::{block_span, code_only, line_number, token_matches};
     let code = code_only(text);
-    // Every function in masked code: its header offset, its name and its body span.
+    // Every named function with a body in masked code: its header offset, name and body span. A
+    // `fn` with no name (a function-pointer type) or whose declaration ends at `;` before any `{`
+    // (a bodyless trait method) owns no block, so it never lends one.
     let functions: Vec<(usize, &str, std::ops::Range<usize>)> = token_matches(&code, "fn")
         .into_iter()
         .filter_map(|header| {
             let after = code[header + 2..].trim_start();
             let name_end = after.find(|char: char| !char.is_alphanumeric() && char != '_')?;
-            let body = block_span(&code, header)?;
-            Some((header, &after[..name_end], body))
+            let name = &after[..name_end];
+            let opens = after[name_end..].trim_start().starts_with(['(', '<']);
+            if name.is_empty() || !opens || !has_body(&code[header..]) {
+                // When: the `fn` is not a named declaration with its own body, it owns no block.
+                return None;
+            }
+            Some((header, name, block_span(&code, header)?))
         })
         .collect();
     let mut lines = Vec::new();
@@ -213,6 +220,23 @@ fn unshared_device_calls(text: &str, holds_shared: bool) -> Vec<usize> {
         }
     }
     lines
+}
+
+/// Whether the declaration starting at `declaration` (masked code) has a body: its first `{` or
+/// `;` outside parentheses and brackets is a `{`. A `;` inside `[u8; 4]` or a parameter list is
+/// part of a type, not the declaration's end.
+fn has_body(declaration: &str) -> bool {
+    let mut depth = 0_usize;
+    for byte in declaration.bytes() {
+        match byte {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b'{' if depth == 0 => return true,
+            b';' if depth == 0 => return false,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Whether the function at `header` carries `#[cfg(target_os = "windows")]` among its own live
@@ -235,8 +259,9 @@ fn windows_only(text: &str, code: &str, header: usize) -> bool {
 }
 
 /// The scan reports a Linux-reachable call, a negated cfg, a cfg borrowed from an earlier item, a
-/// call after a closed nested Windows-only helper, a commented-out cfg, and a `shared_device`
-/// outside its file; it accepts a Windows-only function, the shared helper in its own file, and
+/// call after a closed nested Windows-only helper, a commented-out cfg, a `shared_device` outside
+/// its file, a cfg on a function-pointer parameter and a bodyless Windows-only declaration; it
+/// accepts a Windows-only function, the shared helper in its own file, and
 /// the call's text inside a string or a comment.
 #[test]
 fn the_device_scan_reads_each_calls_own_cfg() {
@@ -263,6 +288,12 @@ fn the_device_scan_reads_each_calls_own_cfg() {
     assert_eq!(scan(shared).len(), 1, "a `shared_device` in another file is not the initializer");
     let quoted = "fn scan() {\n    let text = \".request_device(\"; // .request_device(\n}\n";
     assert!(scan(quoted).is_empty());
+    let pointer = "fn linux(\n    #[cfg(target_os = \"windows\")]\n    callback: fn(),\n) {\n    \
+                   adapter.request_device(&descriptor);\n}\n";
+    assert_eq!(scan(pointer).len(), 1, "a function-pointer type is no function");
+    let bodyless = "trait Warp {\n    #[cfg(target_os = \"windows\")]\n    fn warp();\n}\n\
+                    static INIT: Lazy = Lazy::new(|| {\n    adapter.request_device(&descriptor);\n});\n";
+    assert_eq!(scan(bodyless).len(), 1, "a bodyless declaration lends no block");
 }
 
 #[test]
