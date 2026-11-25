@@ -312,7 +312,7 @@ fn native_custom_clipboard_round_trips_and_empties_while_writer_is_parked() {
     }
     let station = PrivateStation::enter();
     let (ready, published) = mpsc::channel();
-    let (release, parked) = mpsc::channel();
+    let (release, parked) = mpsc::channel::<()>();
     let writer = std::thread::spawn(move || {
         let mime = "application/x-sonicterm-owner";
         let payload = vec![0xa5; 32];
