@@ -463,7 +463,10 @@ policy generation. The commit checks the clock and the opening generation again,
 that expires or whose policy changes while its commit is parsed answers `EBUSY` or `EPERM`, and
 the posted write keeps that opening generation through its commit point. A `wdata` or `walias`
 packet is checked against both deadlines before it refreshes the idle time, so one that arrives
-after either ends the write `EBUSY` instead of reviving it. After planning, the commit checks the
+after either ends the write `EBUSY` instead of reviving it. Every packet is checked and stamped
+with one admission clock, the later of its section's time and the clock, so a packet delayed by
+earlier work in its section keeps its whole idle window, and an overflowing or invalid packet
+that meets an expired write also answers `EBUSY`. After planning, the commit checks the
 absolute deadline again, counting the time planning took, so a planned write is never handed
 off past it. RIS and pane retirement release it silently.
 

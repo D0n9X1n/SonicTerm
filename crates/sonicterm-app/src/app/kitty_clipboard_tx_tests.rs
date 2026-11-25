@@ -310,7 +310,8 @@ fn silent_child_idle_and_absolute_deadlines_ebusy() {
     assert!(rig.tx.deadline().is_none());
     // A write kept busy (a packet every 25 s, the last 25 s before its absolute deadline) still
     // ends at that deadline.
-    let start = Instant::now();
+    // A future instant, which the admission clock keeps, so the deadlines below are exact.
+    let start = Instant::now() + Duration::from_secs(1);
     rig.send_at("type=write:id=j", start);
     keep_busy(&mut rig, start, 23);
     let absolute = start + KITTY_WRITE_ABSOLUTE_TIMEOUT;
@@ -345,8 +346,9 @@ fn replies_of(steps: &[KittyStep]) -> Vec<String> {
 #[test]
 fn late_data_never_revives_an_expired_write() {
     let mut rig = rig();
-    let stale = Instant::now().checked_sub(Duration::from_secs(31)).expect("a past instant");
-    rig.send_at("type=write:id=l", stale);
+    rig.send("type=write:id=l");
+    // Its last packet was 31 s ago, so the idle deadline passed.
+    rig.tx.age_open(Duration::from_secs(31));
     let steps = rig.send(&format!("type=wdata:mime={};{}", b64("text/plain"), b64("x")));
     assert_eq!(replies_of(&steps), [status("EBUSY", "l")], "the late data ends the write");
     let steps = rig.send("type=wdata");
@@ -374,18 +376,66 @@ fn stalled_planner_crossing_the_absolute_deadline_posts_nothing() {
     assert_eq!(rig.staging.reserved_bytes(), 0);
 }
 
+/// Contract: an accepted packet records the admission clock it was checked against, not its
+/// section's older stamp, so a packet delayed by earlier work in its section still gets its whole
+/// idle window: a commit 6 s after it posts. A write opened under an old stamp is timed the same
+/// way.
+#[test]
+fn accepted_packet_records_its_admission_time() {
+    let stamped = || Instant::now().checked_sub(Duration::from_secs(25)).expect("a past instant");
+    let data = format!("type=wdata:mime={};{}", b64("text/plain"), b64("x"));
+    {
+        let mut rig = rig();
+        rig.send("type=write:id=t");
+        assert!(replies_of(&rig.send_at(&data, stamped())).is_empty(), "the packet is in time");
+        let steps = rig.send_at("type=wdata", Instant::now() + Duration::from_secs(6));
+        assert!(steps.iter().any(|step| matches!(step, KittyStep::Post(_))), "data: {steps:?}");
+    }
+    let mut rig = rig();
+    rig.send_at("type=write:id=o", stamped());
+    let steps = rig.send_at("type=wdata", Instant::now() + Duration::from_secs(6));
+    assert!(steps.iter().any(|step| matches!(step, KittyStep::Post(_))), "open: {steps:?}");
+}
+
+/// Contract: an error packet meeting an expired write answers `EBUSY`, as a data packet would,
+/// rather than `EFBIG` or `EINVAL`: the write's deadlines are checked before the error is. A late
+/// `walias` ends it the same way.
+#[test]
+fn late_error_packet_on_an_expired_write_answers_ebusy() {
+    let errors = [
+        ("overflow", KittyClipboardRequest::Overflow(KittyClipboardOperation::Wdata)),
+        ("invalid", KittyClipboardRequest::InvalidValue(KittyClipboardOperation::Walias)),
+    ];
+    for (label, request) in errors {
+        let mut rig = rig();
+        rig.send("type=write:id=e");
+        rig.tx.age_open(Duration::from_secs(31));
+        let inbox = rig.parser.kitty_clipboard_inbox().clone();
+        let KittyStep::Reply(bytes) = rig.tx.handle(&inbox, 9, request, false, 0, Instant::now())
+        else {
+            panic!("{label}: expected a reply");
+        };
+        assert_eq!(String::from_utf8(bytes).unwrap(), status("EBUSY", "e"), "{label}");
+    }
+    let mut rig = rig();
+    rig.send("type=write:id=e");
+    rig.tx.age_open(Duration::from_secs(31));
+    let alias = format!("type=walias:mime={};{}", b64("text/plain"), b64("text/x-alias"));
+    assert_eq!(rig.reply(&alias), status("EBUSY", "e"), "walias");
+}
+
 /// Contract: a commit reads the clock itself. A write whose section was stamped before its idle
 /// deadline but is committed after it answers `EBUSY` and posts nothing, so one timestamp for a
 /// whole section cannot carry a write past its deadline.
 #[test]
 fn commit_checks_the_deadline_against_the_clock() {
     let mut rig = rig();
-    // The section is stamped 29.2 s ago: its data still lands inside the 30 s idle deadline.
-    let stale = Instant::now().checked_sub(Duration::from_millis(29_200)).expect("a past instant");
-    rig.send_at("type=write:id=c", stale);
-    let steps = rig.send_at(&format!("type=wdata:mime={};{}", b64("text/plain"), b64("x")), stale);
-    assert!(replies_of(&steps).is_empty(), "the data is still in time");
-    // The commit, under the same section stamp, is parsed after the deadline passed.
+    rig.send("type=write:id=c");
+    rig.data("text/plain", &b64("x"));
+    // Its last packet is 29.2 s old, so the write is still in time for 0.8 s.
+    rig.tx.age_open(Duration::from_millis(29_200));
+    // The commit's section is stamped now, in time; it is parsed after the deadline passed.
+    let stale = Instant::now();
     std::thread::sleep(Duration::from_millis(1_000));
     let steps = rig.send_at("type=wdata", stale);
     assert!(!steps.iter().any(|step| matches!(step, KittyStep::Post(_))), "nothing is posted");

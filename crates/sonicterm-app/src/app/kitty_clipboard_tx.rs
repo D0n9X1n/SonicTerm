@@ -479,6 +479,15 @@ impl KittyClipboardTx {
         self.open = None;
     }
 
+    /// Make the open write `age` older, as if every packet so far had arrived that much earlier.
+    #[cfg(test)]
+    pub(in crate::app) fn age_open(&mut self, age: Duration) {
+        if let Some(open) = self.open.as_mut() {
+            open.opened_at = open.opened_at.checked_sub(age).expect("a past instant");
+            open.last_packet = open.last_packet.checked_sub(age).expect("a past instant");
+        }
+    }
+
     /// When the open write expires: 30 s after its last packet, 10 min after it opened.
     pub(in crate::app) fn deadline(&self) -> Option<Instant> {
         self.open.as_ref().map(|open| {
@@ -548,11 +557,13 @@ impl KittyClipboardTx {
             KittyClipboardRequest::Packet { metadata, payload } => (metadata, payload),
             KittyClipboardRequest::Overflow(operation) => {
                 // When: the request is Overflow, an open write ends `EFBIG` for wdata/walias.
-                return self.fail_open(operation, KittyClipboardStatus::Efbig, bel);
+                let status = self.error_status(KittyClipboardStatus::Efbig, now);
+                return self.fail_open(operation, status, bel);
             }
             KittyClipboardRequest::InvalidValue(operation) => {
                 // When: the request is InvalidValue, an open write ends `EINVAL` for wdata/walias.
-                return self.fail_open(operation, KittyClipboardStatus::Einval, bel);
+                let status = self.error_status(KittyClipboardStatus::Einval, now);
+                return self.fail_open(operation, status, bel);
             }
         };
         // A packet with a payload has one chunk in the inbox under `stream`; it leaves the inbox
@@ -629,6 +640,17 @@ impl KittyClipboardTx {
         }
     }
 
+    /// The status an error packet ends the open write with: `EBUSY` when the write already expired
+    /// by the admission clock (the later of `now` and the clock), since a write's deadlines are
+    /// checked before any error in its packet, else `status`.
+    fn error_status(&self, status: KittyClipboardStatus, now: Instant) -> KittyClipboardStatus {
+        if self.deadline().is_some_and(|deadline| now.max(Instant::now()) >= deadline) {
+            // When: the admission clock reaches the open write's deadline, it expired: `EBUSY`.
+            return KittyClipboardStatus::Ebusy;
+        }
+        status
+    }
+
     /// Finish an open write with `status` for a `wdata`/`walias` packet; anything else is dropped.
     fn fail_open(
         &mut self,
@@ -656,6 +678,8 @@ impl KittyClipboardTx {
     fn begin(&mut self, metadata: &KittyClipboardMetadata, bel: bool, now: Instant) -> KittyStep {
         self.open = None;
         let reply = KittyReply::of(metadata, bel);
+        // The admission clock times the new write from when it is actually admitted.
+        let admitted = now.max(Instant::now());
         // Sampled before the policy, so a reload racing the open leaves a generation that moves.
         let policy_generation = self.staging.policy_generation();
         if self.staging.write_policy() == Osc52Policy::Deny {
@@ -670,8 +694,8 @@ impl KittyClipboardTx {
             current: None,
             group: Base64Group::default(),
             lease: self.staging.lease(),
-            opened_at: now,
-            last_packet: now,
+            opened_at: admitted,
+            last_packet: admitted,
             policy_generation,
         });
         KittyStep::Silent
@@ -690,13 +714,16 @@ impl KittyClipboardTx {
         };
         let deadline = (open.last_packet + KITTY_WRITE_IDLE_TIMEOUT)
             .min(open.opened_at + KITTY_WRITE_ABSOLUTE_TIMEOUT);
-        if now.max(Instant::now()) >= deadline {
-            // When: the clock reaches deadline before this packet, the write already expired, so
+        // One admission clock both checks the packet and stamps it, so a packet delayed by earlier
+        // work in its section still gets its whole idle window.
+        let admitted = now.max(Instant::now());
+        if admitted >= deadline {
+            // When: admitted reaches deadline before this packet, the write already expired, so
             // the packet ends it `EBUSY` instead of refreshing its idle time.
             let (operation, status) = (KittyClipboardOperation::Wdata, KittyClipboardStatus::Ebusy);
             return self.fail_open(operation, status, bel);
         }
-        open.last_packet = now;
+        open.last_packet = admitted;
         match change(open) {
             Ok(()) => KittyStep::Silent,
             Err(status) => self.fail_open(KittyClipboardOperation::Wdata, status, bel),

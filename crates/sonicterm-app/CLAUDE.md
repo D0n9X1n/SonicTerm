@@ -174,7 +174,9 @@ cargo build -p sonicterm-app
   `KittyReply` is answered on the source PTY when it settles. The worker's `select!` also wakes on
   the staging's policy wakeup and the write's 30 s idle / 10 min absolute deadline. A `wdata` or
   `walias` packet (`KittyClipboardTx::step`) checks both deadlines before it refreshes
-  `last_packet`, and a commit rechecks the absolute deadline after planning, adding the time it
+  `last_packet`, `begin` and `step` check and stamp with one admission clock
+  (`now.max(Instant::now())`), and an overflow or invalid-value packet on an expired write answers
+  `EBUSY` (`error_status`), and a commit rechecks the absolute deadline after planning, adding the time it
   took. Each ready
   chunk first settles the intake (`PaneVtHandles::take_ready_output`): an OSC 52 stream or OSC 5522
   write past its deadline, or whose recorded policy generation moved, ends before the chunk is
