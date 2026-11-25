@@ -643,9 +643,9 @@ the chrome title and run tables, keeping the palette; and a promoted image atlas
 when no media is visible. A glyph atlas that grew past the start for the
 window's current scale shrinks back to that start, on the CPU and, under the GPU
 presenter, its texture: every tile is dropped, and the next frame rasterizes
-only what it shows. On macOS the old pixels' whole pages are marked reusable
-(`MADV_FREE_REUSABLE`) before they are freed, because the allocator otherwise
-keeps a freed large block's pages dirty and they stay in the footprint as
+only what it shows. On macOS an atlas buffer of 1 MiB or more is an anonymous
+memory mapping that is unmapped when the atlas grows or shrinks, because the
+system allocator keeps a freed large block's pages in the footprint as
 "Malloc Large (empty)". The atlas is kept while an atlas retry or a growth's timing
 is still pending, and is never grown toward the start. The trim keeps a pending
 atlas retry and its eviction state, the Windows software frame and the preedit
@@ -653,12 +653,22 @@ composition. A device that refuses the work changes nothing. The next frame
 is a full first frame, and everything regrows on its normal path; returning to
 view clears the trim mark.
 
+A window that stays visible but in the background, such as a stacked or tiled
+terminal window that is never fully covered, gives back only its retained frame
+texture. The same retention pass releases it when the window is visible, not
+frontmost and not a warm spare, has nothing deferred, in flight or pending, and
+has presented nothing, and gained or lost no focus, for 60 s. The texture goes
+down to 1×1 and the next frame is a full frame that rebuilds it; the row caches,
+atlases, drawables and preedit composition stay. The software presenter's
+texture is already 1×1, so there it releases nothing. A window that is later
+covered still gets the covered-window trim.
+
 Renderer parts are reports, not ledger entries, so the trim lowers
 `renderer_total_bytes` in the same pass's snapshot and never a pane charge.
 Each renderer entry also reports `renderer_trimmed` and
 `renderer_gpu_released_requested_bytes`:
-the frame texture and present buffers the trim gave back, as request sizes, not
-residency, and outside the total.
+the frame texture, present buffers and installed glyph texture bytes a shrink
+removed, as request sizes, not residency, and outside the total.
 
 While a window is visible, the present buffers shrink too: at the end of each
 600-draw window, empty draws included, if their capacity exceeds four times that window's peak use

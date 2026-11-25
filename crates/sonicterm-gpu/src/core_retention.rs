@@ -12,9 +12,10 @@ pub struct TrimReport {
     /// Bytes both present buffers requested before the trim.
     pub present_buffer_bytes_before: u64,
     /// Requested device bytes the trim gave back: the frame texture minus its 1x1 replacement,
-    /// plus each present buffer minus its initial-size replacement, plus a shrunk glyph texture.
+    /// plus each present buffer minus its initial-size replacement, plus the glyph upload's
+    /// installed bytes a shrink removed.
     pub gpu_released_requested_bytes: u64,
-    /// The glyph atlas side before and after a shrink; `None` when the atlas was kept.
+    /// The CPU glyph atlas side before and after a shrink; `None` when the atlas was kept.
     pub glyph_atlas_shrunk: Option<(u32, u32)>,
 }
 
@@ -222,24 +223,7 @@ impl GpuRenderer {
         };
         let frame_texture_before = self.frame_texture_extent();
         let present_buffer_bytes_before = self.present_pipeline.present_buffer_bytes();
-        let mut released_bytes = 0_u64;
-        if !self.uses_windows_software_presenter() {
-            // The GPU presenter's texture is surface-sized; the software presenter's is already 1x1.
-            let (frame_texture, frame_view) = build_frame_texture(
-                &self.device,
-                false,
-                1,
-                1,
-                self.config.format,
-                self.retained_frame_readback,
-            );
-            self.frame_texture = frame_texture;
-            self.frame_view = frame_view;
-            self.frame_texture_trimmed = true;
-            self.record_frame_texture_request();
-            released_bytes += frame_texture_payload_bytes(frame_texture_before)
-                .saturating_sub(frame_texture_payload_bytes((1, 1)));
-        }
+        let mut released_bytes = self.release_frame_texture();
         released_bytes += self.present_pipeline.reset_to_initial(&self.device);
         self.row_glyph_cache.release_all();
         self.line_quad_cache.release_all();
@@ -251,14 +235,11 @@ impl GpuRenderer {
         self.chrome_caches.release_runs();
         self.release_image_atlas_for_trim();
         self.last_frame_key = None;
+        // The installed glyph upload is read before and after, so a rebuild the device refused
+        // (the CPU atlas shrank, the old texture stayed) reports nothing; GDI's 1x1 reports zero.
+        let glyph_upload_before = self.glyph_upload.payload_bytes();
         let glyph_atlas_shrunk = self.shrink_glyph_atlas_to_start();
-        // A shrunk GPU-presented atlas gave back its texture's request; GDI's upload stays 1x1.
-        if let Some((before, after)) =
-            glyph_atlas_shrunk.filter(|_| !self.uses_windows_software_presenter())
-        {
-            released_bytes += atlas_payload_bytes(before, before)
-                .saturating_sub(atlas_payload_bytes(after, after));
-        }
+        released_bytes += glyph_upload_before.saturating_sub(self.glyph_upload.payload_bytes());
         tracing::debug!(
             target: "memory",
             renderer_role = self.render_timing_label,
@@ -279,6 +260,62 @@ impl GpuRenderer {
             gpu_released_requested_bytes: released_bytes,
             glyph_atlas_shrunk,
         }
+    }
+}
+
+impl GpuRenderer {
+    /// Replace the retained frame texture with a 1x1 placeholder and return the requested bytes
+    /// given back. Idempotent: a texture already trimmed, or the software presenter's 1x1 one, is
+    /// left alone and returns 0, as is any call on a device that refuses work. The ledger records
+    /// the replacement once, and the next present rebuilds the surface-sized texture first.
+    fn release_frame_texture(&mut self) -> u64 {
+        if self.frame_texture_trimmed || self.uses_windows_software_presenter() {
+            // When: frame_texture_trimmed is set or the software presenter owns a 1x1 texture.
+            return 0;
+        }
+        let Some(_scope) = self.device_errors.enter_gpu_work("frame_texture.release") else {
+            // When: enter_gpu_work refuses, the stopped device keeps the texture untouched.
+            return 0;
+        };
+        let before = self.frame_texture_extent();
+        let (frame_texture, frame_view) = build_frame_texture(
+            &self.device,
+            false,
+            1,
+            1,
+            self.config.format,
+            self.retained_frame_readback,
+        );
+        self.frame_texture = frame_texture;
+        self.frame_view = frame_view;
+        self.frame_texture_trimmed = true;
+        self.record_frame_texture_request();
+        frame_texture_payload_bytes(before).saturating_sub(frame_texture_payload_bytes((1, 1)))
+    }
+
+    /// Give back an idle background window's retained frame texture, keeping its row caches,
+    /// atlases, drawables and preedit composition; returns the requested bytes released, 0 when the
+    /// texture was already released or the device refused the work. The frame key is cleared, so
+    /// the next frame is a full frame that rebuilds the texture before drawing into it.
+    pub fn trim_idle_frame_texture(&mut self) -> u64 {
+        let Some(_scope) = self.device_errors.enter_gpu_work("idle_trim") else {
+            // When: enter_gpu_work refuses, the stopped device keeps the texture untouched.
+            return 0;
+        };
+        let released = self.release_frame_texture();
+        // A released texture means the next frame must draw in full.
+        if released > 0 {
+            self.last_frame_key = None;
+            tracing::debug!(
+                target: "memory",
+                renderer_role = self.render_timing_label,
+                window_id = ?self.window.id(),
+                gpu_released_requested_bytes = released,
+                reason = "idle_trim",
+                "idle background window trimmed"
+            );
+        }
+        released
     }
 }
 

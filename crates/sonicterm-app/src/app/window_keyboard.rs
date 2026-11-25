@@ -353,6 +353,9 @@ impl App {
             if let Some(renderer) = window.renderer.as_mut() {
                 renderer.set_window_focused(focused);
             }
+            // A focus edge restarts the idle background trim's wait, so a window just left behind
+            // is not trimmed and redrawn at once.
+            window.redraw.focus_changed_at = Some((self.dispatch_clock)());
             if window.test_renderer_focus_marker.is_some() {
                 window.test_renderer_focus_marker = Some(focused);
             }
