@@ -228,18 +228,23 @@ closes the owner. No pane carries this class.
 
 OSC 52, OSC 1337 `Copy=:` and OSC 5522 writes reserve every buffer before allocating it from one
 process-wide clipboard staging budget of `max(128 MiB, 2 × clipboard_write_limit_bytes)` at
-startup: the decoded bytes, the U+FFFD expansion of a non-UTF-8 payload, and one native copy
-per destination (`CF_UNICODETEXT` on Windows, the UTF-8 length elsewhere; a `cp` write on Linux
+startup: the decoded bytes, the Windows U+FFFD expansion of a non-UTF-8 payload, and one native copy
+per destination (`CF_UNICODETEXT` on Windows, the UTF-8 length elsewhere; an arboard `cp` write on Linux
 reserves two, because CLIPBOARD and PRIMARY keep separate copies). An OSC 5522 commit of several types
 reserves, before its job is posted, every kept buffer plus one native copy of each type: on
 Windows the `CF_UNICODETEXT` block (two bytes per UTF-8 byte and a terminator), the CF_HTML block
 with its header and wrapper (and the transient header string), `PNG` and custom blocks at their
 size, and a `CF_HDROP` list at up to four bytes per URI byte (its UTF-16 paths and their decoded
-strings); on macOS each type's `NSData` or URL string at its size. A commit the budget cannot
+strings); on macOS each type's `NSData` or URL string at its size. X11 reserves the
+atom and buffer-index tables, the format-32 property buffer and eight INCR cursors before staging.
+Text targets and aliases share the staged bytes; INCR sends slices rather than allocating chunk
+buffers. The owner keeps the lease after publication. Losing a selection stops admission there;
+the lease is released after the last selection is lost and admitted readers finish or time out
+(five seconds per chunk), or when the still-owned offer expires after one hour. A commit the budget cannot
 cover answers `EBUSY`. Each retention pass charges what
 live leases hold, as `ClipboardStaging`, to the tracking-only process owner, with one item per
-posted program write (at most 8), so a large write never trips a pane backstop. A lease is
-released when the native clipboard call returns; on Linux and Windows that call runs on the
+posted program write (at most 8), so a large write never trips a pane backstop. Apart from the X11 owner, a lease is
+released or split when the native clipboard call returns; on Linux and Windows that call runs on the
 clipboard worker, so the lease moves into the worker's job. On Linux each selection keeps its own
 share covering arboard's copy, charged until SonicTerm's next write to that selection, or a user
 copy to it, replaces it: a CLIPBOARD-only write releases only CLIPBOARD's share. When one

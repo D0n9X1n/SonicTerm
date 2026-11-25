@@ -197,9 +197,15 @@ impl ClipboardSink for FakeClipboard {
         written
     }
 
-    fn publish_offer(&mut self, _offer: &NativeOffer, gate: CommitGate<'_>) -> Published {
+    fn publish_offer(
+        &mut self,
+        _offer: NativeOffer,
+        _lease: ClipLease,
+        _targets: ClipTargets,
+        binding: WriteBinding,
+    ) -> Published {
         let mut state = self.state();
-        if !gate() {
+        if !binding.may_commit() {
             return Published::Unchanged;
         }
         state.offers += 1;
@@ -689,4 +695,24 @@ fn partial_failure_keeps_the_share_of_the_selection_that_took_it() {
     settle(&mut app);
     let expected = aaaa + native_clipboard_bytes("bb");
     assert_eq!(staging.reserved_bytes(), expected, "the larger CLIPBOARD share and PRIMARY's");
+}
+
+/// Replacing arboard with an owner-backed offer releases only the confirmed selection's arboard
+/// share. Failure must keep both shares; the offer's own lease belongs to the selection owner.
+#[test]
+fn x11_confirmed_offer_retires_only_replaced_arboard_share() {
+    let fake = FakeClipboard::holding("old");
+    fake.state().retains = true;
+    let mut app = app_with_worker("old", &fake, None);
+    let staging = app.clip_state.staging.clone();
+    let both = ClipTargets { clipboard: true, primary: true };
+    let _ = app.submit_program_clipboard(1, job_to(&staging, "both", both), false);
+    settle(&mut app);
+    let copy_bytes = native_clipboard_bytes("both");
+    for (fail, shares) in [(true, 2), (false, 1)] {
+        fake.state().refuse_offer = fail;
+        let _ = app.submit_program_clipboard(1, offer_job(&staging), false);
+        settle(&mut app);
+        assert_eq!(staging.reserved_bytes(), shares * copy_bytes);
+    }
 }

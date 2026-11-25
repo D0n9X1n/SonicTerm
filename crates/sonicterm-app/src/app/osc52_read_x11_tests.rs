@@ -271,3 +271,40 @@ fn offer_version_needs_one_owner_and_a_well_formed_timestamp() {
     assert_eq!(version_of(&[5, 5], stamp(&[1, 0, 0, 0, 2, 0, 0, 0])), None, "two items");
     assert_eq!(version_of(&[5, 5], stamp(&[])), None, "no item");
 }
+
+/// Only the exact requested atom yields bytes, direct or INCR. A lower bound over the cap
+/// refuses before deleting the announcement, and a different type is never served as that MIME.
+#[test]
+fn x11_read_custom_mime_bounded() {
+    use crate::app::osc52_read_source::TypeRead;
+    let raw = |bytes: &[u8]| reply(PropertyKind::Requested, 8, 0, bytes);
+    let read = |replies| {
+        let mut port = FakeOwner::answering(replies, Polled::NewValue);
+        let result = read_mime(&mut port, 29, 2);
+        (result, port.log)
+    };
+    assert_eq!(read(vec![raw(&[0xff])]).0, Some(TypeRead::Bytes(vec![0xff])));
+    assert_eq!(
+        read(vec![announcement(2), raw(&[0xff]), raw(&[0]), raw(&[])]).0,
+        Some(TypeRead::Bytes(vec![0xff, 0]))
+    );
+    assert_eq!(read(vec![raw(&[1, 2, 3])]).0, Some(TypeRead::TooLarge));
+    let (over, calls) = read(vec![announcement(3)]);
+    assert_eq!(over, Some(TypeRead::TooLarge));
+    assert!(!calls.iter().any(|call| call == "delete"));
+    assert_eq!(read(vec![reply(PropertyKind::Other, 8, 0, &[0])]).0, Some(TypeRead::Failed));
+}
+
+/// Case-sensitive X atoms round trip verbatim, including RFC restricted-name punctuation. Native
+/// type names from other OSes are not aliases on X11; only its text spellings are normalized.
+#[test]
+fn x11_listing_keeps_exact_mime_atoms() {
+    let names = ["TARGETS", "X/Case_1!", "TEXT", "public.html", "X/Case_1!", "text/plain"];
+    assert_eq!(
+        list_mime_atoms(names.map(str::to_owned)),
+        super::super::osc52_read_source::TypeListing::Types(vec![
+            "X/Case_1!".into(),
+            "text/plain".into()
+        ])
+    );
+}

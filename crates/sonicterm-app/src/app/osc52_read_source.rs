@@ -43,7 +43,10 @@ impl std::fmt::Debug for ReadOutcome {
 
 /// What one bounded read of a non-text representation found. `Debug` prints only the length.
 #[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(not(any(test, target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(
+    not(any(test, target_os = "macos", target_os = "windows", target_os = "linux")),
+    allow(dead_code)
+)]
 pub(in crate::app) enum TypeRead {
     /// The representation's bytes, at most the cap.
     Bytes(Vec<u8>),
@@ -51,8 +54,11 @@ pub(in crate::app) enum TypeRead {
     Absent,
     /// The representation is larger than the cap; nothing past the measurement was copied.
     TooLarge,
+    /// No native backend is available for the session.
+    #[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
+    Unsupported,
     /// The native read failed.
-    #[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+    #[cfg_attr(not(any(test, target_os = "windows", target_os = "linux")), allow(dead_code))]
     Failed,
 }
 
@@ -61,6 +67,7 @@ impl std::fmt::Debug for TypeRead {
         match self {
             Self::Bytes(bytes) => write!(formatter, "Bytes({} bytes)", bytes.len()),
             Self::Absent => formatter.write_str("Absent"),
+            Self::Unsupported => formatter.write_str("Unsupported"),
             Self::TooLarge => formatter.write_str("TooLarge"),
             Self::Failed => formatter.write_str("Failed"),
         }
@@ -84,11 +91,13 @@ pub(in crate::app) enum TypeListing {
 pub(in crate::app) const MAX_NATIVE_TYPES_SCANNED: usize = 64;
 
 /// MIME names one listing keeps at most, as the listing reply carries.
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 const MAX_LISTED_TYPES: usize = 64;
 
 /// The MIME name a native clipboard type stands for: the platform's text, HTML, file and image
 /// types map to theirs, a MIME-shaped name passes without its parameters, and private, dynamic and
 /// protocol types map to `None`, so they are never listed.
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 fn native_type_mime(name: &str) -> Option<String> {
     let mapped = match name {
         "public.utf8-plain-text"
@@ -125,6 +134,7 @@ fn native_type_mime(name: &str) -> Option<String> {
 /// The listing `names`, the owner's native type names in its order, makes: at most
 /// [`MAX_NATIVE_TYPES_SCANNED`] are inspected and at most 64 distinct MIME names kept. Only names
 /// are read, never content.
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 pub(in crate::app) fn list_native_types(names: impl IntoIterator<Item = String>) -> TypeListing {
     let mut listed: Vec<String> = Vec::new();
     for name in names.into_iter().take(MAX_NATIVE_TYPES_SCANNED) {
@@ -387,10 +397,15 @@ fn native_read_type(location: ReadLocation, mime: &str, max_bytes: usize) -> Typ
     super::kitty_clipboard_offer::read_general_type(mime, max_bytes)
 }
 
+/// X11 reads the exact existing atom; unknown MIME names allocate no server atoms.
+#[cfg(target_os = "linux")]
+fn native_read_type(location: ReadLocation, mime: &str, max_bytes: usize) -> TypeRead {
+    super::osc52_read_x11_native::read_type(location, mime, max_bytes)
+}
+
 /// Other platforms read text only.
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn native_read_type(_location: ReadLocation, _mime: &str, _max_bytes: usize) -> TypeRead {
-    // shortcut: X11 non-text reads arrive with the X11 offer backend; until then they are absent.
     TypeRead::Absent
 }
 

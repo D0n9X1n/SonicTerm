@@ -13,7 +13,7 @@ use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
 use super::osc52_read_source::{
-    list_native_types, ReadLocation, ReadOutcome, TypeListing, MAX_NATIVE_TYPES_SCANNED,
+    ReadLocation, ReadOutcome, TypeListing, TypeRead, MAX_NATIVE_TYPES_SCANNED,
 };
 use super::osc52_read_x11::{
     fetch_length_units, offer_version_with, read_selection, wait_for_notify, ConvertTarget, Polled,
@@ -39,6 +39,7 @@ struct NativePort {
     window: Window,
     selection: Atom,
     property: Atom,
+    requested: Option<Atom>,
     utf8: Atom,
     text_plain: Atom,
     incr: Atom,
@@ -110,6 +111,7 @@ impl NativePort {
             window,
             selection,
             property,
+            requested: None,
             utf8,
             text_plain,
             incr,
@@ -176,6 +178,10 @@ impl SelectionPort for NativePort {
         let target = match target {
             ConvertTarget::Text => self.utf8,
             ConvertTarget::Timestamp => self.timestamp,
+            ConvertTarget::Mime(atom) => {
+                self.requested = Some(atom);
+                atom
+            }
         };
         self.convert_to(target)
     }
@@ -213,6 +219,7 @@ impl SelectionPort for NativePort {
             .reply()
             .ok()?;
         let kind = match reply.type_ {
+            kind if Some(kind) == self.requested => PropertyKind::Requested,
             kind if kind == self.utf8 || kind == self.text_plain => PropertyKind::Utf8,
             kind if kind == Atom::from(xproto::AtomEnum::STRING) => PropertyKind::Latin1,
             kind if kind == self.incr => PropertyKind::Incr,
@@ -254,7 +261,9 @@ pub(in crate::app) fn read(location: ReadLocation, max_bytes: usize) -> ReadOutc
 /// atoms only, never content. No X server reads as unsupported; any protocol error fails.
 pub(in crate::app) fn list_targets(location: ReadLocation) -> TypeListing {
     match NativePort::open(location, b"SONICTERM_OSC5522_TARGETS") {
-        Ok(mut port) => port.targets().map_or(TypeListing::Failed, list_native_types),
+        Ok(mut port) => {
+            port.targets().map_or(TypeListing::Failed, super::osc52_read_x11::list_mime_atoms)
+        }
         Err(OpenError::NoServer) => TypeListing::Unsupported,
         Err(OpenError::Protocol) => TypeListing::Failed,
     }
@@ -265,4 +274,38 @@ pub(in crate::app) fn list_targets(location: ReadLocation) -> TypeListing {
 pub(in crate::app) fn offer_version(location: ReadLocation) -> Option<u64> {
     let mut port = NativePort::open(location, b"SONICTERM_OSC5522_TIMESTAMP").ok()?;
     offer_version_with(&mut port)
+}
+
+/// Read the bytes under an existing MIME atom. A read must never create a permanent atom.
+pub(in crate::app) fn read_type(location: ReadLocation, mime: &str, max_bytes: usize) -> TypeRead {
+    if !super::kitty_clipboard_offer::valid_mime(mime) {
+        // When: valid_mime rejects mime, never request that atom from an external owner.
+        return TypeRead::Absent;
+    }
+    let mut port = match NativePort::open(location, b"SONICTERM_OSC5522_READ") {
+        Ok(port) => port,
+        Err(OpenError::NoServer) => {
+            // When: NoServer, a native-only Wayland session has no backend for this read.
+            return TypeRead::Unsupported;
+        }
+        Err(OpenError::Protocol) => {
+            // When: Protocol setup failed on an X server, this is a native I/O failure.
+            return TypeRead::Failed;
+        }
+    };
+    let Some(atom) = port
+        .connection
+        .intern_atom(true, mime.as_bytes())
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| reply.atom)
+    else {
+        // When: intern_atom failed, the server could not resolve the requested MIME.
+        return TypeRead::Failed;
+    };
+    if atom == x11rb::NONE {
+        // When: atom is NONE, the name does not exist; lookup must not create it.
+        return TypeRead::Absent;
+    }
+    super::osc52_read_x11::read_mime(&mut port, atom, max_bytes).unwrap_or(TypeRead::Failed)
 }

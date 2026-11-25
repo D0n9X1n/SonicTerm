@@ -3,7 +3,7 @@
 //!
 //! A commit first plans its offer without touching the clipboard: every staged name and alias is
 //! mapped to a [`NativeFormat`], and a name that is not a valid MIME name, has no native mapping,
-//! or that the platform cannot hold is omitted. [`publish_offer`] then stages every native buffer
+//! or that the platform cannot hold is omitted. The backend then stages every native buffer
 //! before it publishes them in one operation, so a failure in any representation leaves the
 //! previous clipboard untouched and never reports success.
 
@@ -42,7 +42,7 @@ pub(in crate::app) fn native_format(name: &str) -> Option<NativeFormat> {
 }
 
 /// Whether `name` is an RFC 6838 `type/subtype` name of restricted-name characters.
-fn valid_mime(name: &str) -> bool {
+pub(in crate::app) fn valid_mime(name: &str) -> bool {
     /// A restricted name: an alphanumeric first, then alphanumerics and `!#$&-^_.+`, 127 at most.
     fn restricted(part: &str) -> bool {
         let mut bytes = part.bytes();
@@ -113,11 +113,12 @@ impl NativeOffer {
             .representations()
             .map(|(format, bytes)| native_copy_bytes(format, bytes.len()))
             .sum();
+        #[cfg(target_os = "linux")]
+        let copies = copies + x11::owner_workspace(self);
         kept + names + copies
     }
 
-    /// A text-only offer of raw `bytes`, published as they are: the macOS pasteboard holds text
-    /// that is not valid UTF-8 byte for byte this way.
+    /// A text-only offer that preserves arbitrary bytes on the macOS pasteboard or X11 selection.
     pub(in crate::app) fn raw_text(bytes: Vec<u8>) -> Self {
         Self { entries: vec![bytes], representations: vec![(NativeFormat::Text, 0)], omitted: 0 }
     }
@@ -135,6 +136,19 @@ impl NativeOffer {
             None => Vec::new(),
         }
     }
+}
+
+/// Reserve the decoded bytes and native copy before building even the raw offer's two vectors.
+pub(in crate::app) fn raw_text_reservation(bytes: &Vec<u8>) -> usize {
+    #[cfg(target_os = "linux")]
+    let tables = x11::raw_tables(5);
+    #[cfg(not(target_os = "linux"))]
+    let tables = 0;
+    bytes.capacity()
+        + bytes.len()
+        + tables
+        + size_of::<Vec<u8>>()
+        + size_of::<(NativeFormat, usize)>()
 }
 
 /// What a commit's representations plan to do to the clipboard.
@@ -238,9 +252,8 @@ fn format_name_bytes(format: &NativeFormat) -> usize {
     }
 }
 
-/// Whether this platform's clipboard can hold `format` with `bytes`: text everywhere; on macOS and
-/// Windows also HTML, PNG, `text/uri-list` in the layouts each takes, and custom MIME names. It may
-/// run on any thread.
+/// Whether this platform can publish `format` and `bytes`, including display availability,
+/// platform layout restrictions and permanent-name caps. May run on any thread.
 pub(in crate::app) fn platform_holds(format: &NativeFormat, bytes: &[u8]) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -250,7 +263,12 @@ pub(in crate::app) fn platform_holds(format: &NativeFormat, bytes: &[u8]) -> boo
     {
         windows_formats::holds(format, bytes)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        let _ = bytes;
+        x11::holds(format)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = bytes;
         *format == NativeFormat::Text
@@ -265,23 +283,16 @@ pub(in crate::app) type CommitGate<'gate> = &'gate dyn Fn() -> bool;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::app) enum Published {
     /// Every representation was set.
-    #[cfg_attr(
-        all(not(test), not(any(target_os = "macos", target_os = "windows"))),
-        expect(dead_code, reason = "no offer backend publishes on this platform yet")
-    )]
     Written,
     /// The clipboard could not be taken or refused a representation; it holds no partial offer.
     Failed,
     /// The gate refused at the commit point, so the clipboard was never changed.
-    #[cfg_attr(
-        all(not(test), not(any(target_os = "macos", target_os = "windows"))),
-        expect(dead_code, reason = "no offer backend publishes on this platform yet")
-    )]
     Unchanged,
 }
 
 /// Publish `offer` to the system clipboard in one operation, `gate` checked immediately before it
 /// changes: on the event-loop thread on macOS, on the clipboard worker on Windows.
+#[cfg(not(target_os = "linux"))]
 pub(in crate::app) fn publish_native(offer: &NativeOffer, gate: CommitGate<'_>) -> Published {
     #[cfg(target_os = "macos")]
     {
@@ -356,10 +367,10 @@ pub(in crate::app) fn read_windows_type(
 }
 
 /// Where only text is held no offer is planned; one that arrives fails closed, untouched.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 struct TextOnly;
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 impl OfferBackend for TextOnly {
     fn stage(&mut self, _format: &NativeFormat, _bytes: &[u8]) -> bool {
         false
@@ -373,6 +384,7 @@ impl OfferBackend for TextOnly {
 }
 
 /// The native calls one publish makes; tests substitute a fake.
+#[cfg(any(test, not(target_os = "linux")))]
 pub(in crate::app) trait OfferBackend {
     /// Allocate and fill the native buffer for `format`; false when it cannot be staged.
     fn stage(&mut self, format: &NativeFormat, bytes: &[u8]) -> bool;
@@ -385,6 +397,7 @@ pub(in crate::app) trait OfferBackend {
 
 /// Stage every representation of `offer`, then publish them at once behind `gate`. A staging
 /// failure discards the rest and leaves the clipboard untouched.
+#[cfg(any(test, not(target_os = "linux")))]
 pub(in crate::app) fn publish_offer(
     backend: &mut dyn OfferBackend,
     offer: &NativeOffer,
@@ -415,3 +428,10 @@ mod win32;
 #[cfg(test)]
 #[path = "kitty_clipboard_offer_tests.rs"]
 mod kitty_clipboard_offer_tests;
+
+#[cfg(any(test, target_os = "linux"))]
+#[path = "kitty_clipboard_offer_x11.rs"]
+mod x11;
+
+#[cfg(target_os = "linux")]
+pub(in crate::app) use x11::SelectionServer;

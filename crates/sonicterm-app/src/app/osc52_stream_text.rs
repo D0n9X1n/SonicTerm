@@ -73,36 +73,47 @@ pub(super) fn into_text(
 }
 
 impl ClipboardJob {
-    /// A program's text write of decoded `bytes`: on macOS, text for the standard clipboard that
-    /// is not valid UTF-8 is a raw text offer, published byte for byte; anything else becomes
-    /// text, invalid sequences replaced by U+FFFD. The program slot is taken last.
+    /// Build a program text job, preserving invalid UTF-8 as a raw offer on X11 and macOS.
+    /// The program slot is taken after reserving the job's buffers.
     pub(in crate::app) fn program_text(
         staging: &Arc<ClipboardStaging>,
         bytes: Vec<u8>,
-        mut lease: ClipLease,
+        lease: ClipLease,
         targets: ClipTargets,
         kitty: Option<crate::app::kitty_clipboard_tx::KittyReply>,
     ) -> Result<ClipboardJob, Osc52Refusal> {
-        let raw = cfg!(target_os = "macos")
-            && targets.clipboard
-            && !targets.primary
-            && std::str::from_utf8(&bytes).is_err();
-        let (text, offer) = if raw {
-            // When: raw, the bytes and their one native copy are reserved, then kept as they are.
-            if !lease.grow_to(bytes.capacity() + bytes.len()) {
-                // When: lease cannot grow over the bytes and their native copy, the write is busy.
-                return Err(Osc52Refusal::Busy);
-            }
-            let offer = crate::app::kitty_clipboard_offer::NativeOffer::raw_text(bytes);
-            (String::new(), Some(offer))
-        } else {
-            // When: raw is false, the bytes become UTF-8 text for the text path.
-            let (text, grown) = into_text(bytes, lease, targets)?;
-            lease = grown;
-            (text, None)
-        };
-        let slot = staging.take_program_slot().ok_or(Osc52Refusal::Busy)?;
-        let binding = WriteBinding::unbound(staging);
-        Ok(ClipboardJob { text, targets, lease, _slot: slot, kitty, offer, binding })
+        program_text_for(staging, bytes, lease, targets, kitty, cfg!(target_os = "linux"))
     }
+}
+
+/// The X11 byte-preserving owner accepts either selection; the macOS pasteboard accepts only
+/// the standard clipboard. Valid text stays on the ordinary text path on both platforms.
+pub(super) fn program_text_for(
+    staging: &Arc<ClipboardStaging>,
+    bytes: Vec<u8>,
+    mut lease: ClipLease,
+    targets: ClipTargets,
+    kitty: Option<crate::app::kitty_clipboard_tx::KittyReply>,
+    x11: bool,
+) -> Result<ClipboardJob, Osc52Refusal> {
+    let raw = (x11 || (cfg!(target_os = "macos") && targets.clipboard && !targets.primary))
+        && std::str::from_utf8(&bytes).is_err();
+    let (text, offer) = if raw {
+        // When: raw, the bytes and their one native copy are reserved, then kept as they are.
+        let total = crate::app::kitty_clipboard_offer::raw_text_reservation(&bytes);
+        if !lease.grow_to(total) {
+            // When: lease cannot grow over the bytes and their native copy, the write is busy.
+            return Err(Osc52Refusal::Busy);
+        }
+        let offer = crate::app::kitty_clipboard_offer::NativeOffer::raw_text(bytes);
+        (String::new(), Some(offer))
+    } else {
+        // When: raw is false, the bytes become UTF-8 text for the text path.
+        let (text, grown) = into_text(bytes, lease, targets)?;
+        lease = grown;
+        (text, None)
+    };
+    let slot = staging.take_program_slot().ok_or(Osc52Refusal::Busy)?;
+    let binding = WriteBinding::unbound(staging);
+    Ok(ClipboardJob { text, targets, lease, _slot: slot, kitty, offer, binding })
 }

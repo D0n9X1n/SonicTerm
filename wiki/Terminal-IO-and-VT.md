@@ -305,7 +305,7 @@ window enters READONLY. A dropped write changes nothing and answers nothing. On 
 the event loop posts the write to one clipboard worker thread, which checks that binding
 immediately before the native call (on Windows inside the same clipboard acquisition, after
 reading the value it replaces and before `EmptyClipboard`); that call is the commit point, and
-the write's lease is released when it returns. Program writes and user copies share the worker's queue and run
+an X11 selection owner keeps its lease while it serves the offer. Program writes and user copies share the worker's queue and run
 strictly in the order the event loop handled them, so a later user copy always wins. OSC 52
 and OSC 5522 writes from one pane are posted in the order they arrived on the wire, so the last
 write a program sent is the one left on the clipboard. The event
@@ -325,14 +325,13 @@ refuse the large selections users copy.
 | unknown letter | ignored; a kinds field with no known letter is dropped |
 | `52;c` (no data), `52;c;` | clears the clipboard |
 | Base64 padding | optional, but padding that is present must complete the last group (`aG=` is refused); any other byte discards the write |
-| non-UTF-8 payload | kept byte for byte on the macOS clipboard; elsewhere, and in PRIMARY, invalid sequences become U+FFFD |
+| non-UTF-8 payload | kept byte for byte on macOS and X11 (including PRIMARY); Windows replaces invalid sequences with U+FFFD |
 | `?` (any kinds) | read: under `osc52_read = "allow"` answered with the clipboard's text as `ESC ] 52 ; <label> ; <b64> ESC \`; see below for `ask`, `deny` and the bounds |
 | `1337;Copy=:<b64>` | `c` write; an empty or `?` value writes nothing |
 | `1337;Copy=;<b64>` | not supported |
 
 Intentional differences from the reference terminals: `p` is dropped where there is no
-PRIMARY (kitty); non-UTF-8 payloads become U+FFFD except on the macOS clipboard, which keeps
-them (Ghostty and kitty keep raw bytes, WezTerm rejects them); the limit defaults to 64 MiB and is at most 512 MiB, held in memory and never
+PRIMARY (kitty); only Windows replaces invalid UTF-8 bytes with U+FFFD (Ghostty and kitty keep raw bytes, WezTerm rejects them); the limit defaults to 64 MiB and is at most 512 MiB, held in memory and never
 on disk (kitty: 512 MB with disk spill); Windows reasserts only writes of at most 512 KiB of
 UTF-16; WezTerm's `Copy=;` spelling is not supported (WezTerm parses it but never acts on it).
 OSC 5522 is described [below](#kitty-clipboard-protocol-osc-5522).
@@ -426,7 +425,7 @@ mapped to a native format (see [Platform Integration](Platform-Integration)): `t
 custom type. A name that is not a MIME name, or that the platform cannot hold, is omitted, as
 Ghostty does. Each format is kept once and its first name wins, so an alias that names
 `text/plain` for another type still yields text. A commit with nothing staged clears the
-clipboard. When every name is omitted, or for `loc=primary` off Linux (PRIMARY holds text only),
+clipboard. When every name is omitted, or for `loc=primary` off Linux,
 it answers `ENOSYS`. Text alone takes the text path below. Any other kept type forms one offer
 with the rest: its buffers and one native copy of each are reserved from the staging budget
 before it is posted (`EBUSY` when they do not fit), every native buffer is staged before the
@@ -442,6 +441,13 @@ sent only while the PTY and command that sent the write still own the pane; afte
 command change, or once the pane closed, nothing is sent, because another program would read it
 as input. A write dropped at its commit point because its binding changed answers nothing.
 Omitted representations are released at the commit.
+
+On X11 the same MIME mappings apply to CLIPBOARD and PRIMARY: each non-text type uses its own
+atom, and five text targets share the original bytes. The process admits 256 data atom names.
+`TARGETS` lists the offer and `TIMESTAMP` identifies it for paste events. `INCR` serves at most
+eight requestors per offer, up to 256 KiB per chunk and five seconds per chunk. Losing ownership
+stops new requests but not admitted transfers; without ownership loss the offer expires after one
+hour. Native-only Wayland has no clipboard backend; XWayland uses the X11 path.
 
 An open write ends `EBUSY` 30 s after its last packet or 10 min after it opened, and `EPERM`
 when the policy becomes `deny` or `osc52`/`osc52_read` changes at all after it opened (a quick
@@ -478,7 +484,7 @@ admitted, never a partial `OK` sequence.
 
 The listing names types without reading any content: `EnumClipboardFormats` on Windows, the
 general pasteboard's `types` on macOS and the owner's `TARGETS` on X11 (within the 2 s selection
-wait). At most 64 native names are inspected; platform text, HTML, RTF, file and image types map
+wait). At most 64 native names are inspected; X11 preserves valid MIME atom names exactly and maps text aliases to `text/plain`. On other systems platform text, HTML, RTF, file and image types map
 to their MIME names, MIME-shaped names pass without parameters (so a Windows format registered
 under a MIME name lists as that name), and on macOS a type whose uniform type has a preferred MIME
 name lists as that name, so a dynamic type SonicTerm published lists as its MIME name. Private

@@ -119,8 +119,14 @@ pub(in crate::app) trait ClipboardSink {
         false
     }
 
-    /// Publish every representation of `offer` in one native operation behind `gate`.
-    fn publish_offer(&mut self, _offer: &NativeOffer, _gate: CommitGate<'_>) -> Published {
+    /// Publish the whole offer to its targets only while the binding permits it; the owner takes the lease.
+    fn publish_offer(
+        &mut self,
+        _offer: NativeOffer,
+        _lease: ClipLease,
+        _targets: ClipTargets,
+        _binding: WriteBinding,
+    ) -> Published {
         Published::Failed
     }
 
@@ -213,9 +219,19 @@ fn commit_program(
     let gate = || binding.may_commit();
     if let Some(offer) = offer {
         // When: the job carries an offer, every representation is published in one native call
-        // behind the gate, never reasserted; the lease ends when the call returns.
-        committed.outcome = match sink.publish_offer(&offer, &gate) {
-            Published::Written => ClipWriteOutcome::Written,
+        // behind the gate. On X11 the owner takes the lease for the lifetime of the offer.
+        let mut marker = lease.split_off(0);
+        committed.outcome = match sink.publish_offer(offer, lease, targets, binding) {
+            Published::Written => {
+                if sink.retains_copies() {
+                    // The X11 owner holds the payload lease. Zero-byte taken shares retire only
+                    // the previous arboard copies of the selections it replaced.
+                    let result = WriteResult::each(targets, TargetOutcome::Taken);
+                    committed.retained =
+                        RetainedShares::split(&mut marker, 0, result.clipboard, result.primary);
+                }
+                ClipWriteOutcome::Written
+            }
             Published::Failed => ClipWriteOutcome::Failed,
             Published::Unchanged => {
                 // When: Unchanged, the gate refused at the commit point; nothing is answered.
@@ -697,22 +713,26 @@ impl super::App {
                 if written { ClipWriteOutcome::Written } else { ClipWriteOutcome::Failed };
             return Committed::settled(job, outcome);
         }
-        if !cfg!(target_os = "macos") {
-            // When: target_os is not macOS, an offer publishes only on the clipboard worker, so
+        #[cfg(not(target_os = "macos"))]
+        {
+            // Off macOS, an offer publishes only on the clipboard worker, so
             // without one it fails rather than block the event loop on the clipboard.
-            return Committed::settled(job, ClipWriteOutcome::Failed);
+            Committed::settled(job, ClipWriteOutcome::Failed)
         }
-        // The event loop is the commit point here: nothing runs between the gate and the publish.
-        let gate = || job.binding.may_commit();
-        let outcome = match super::kitty_clipboard_offer::publish_native(offer, &gate) {
-            Published::Written => ClipWriteOutcome::Written,
-            Published::Failed => ClipWriteOutcome::Failed,
-            Published::Unchanged => {
-                // When: Unchanged, the gate refused at the commit point; nothing is answered.
-                return Committed::stale(job);
-            }
-        };
-        Committed::settled(job, outcome)
+        #[cfg(target_os = "macos")]
+        {
+            // The event loop is the commit point here: nothing runs between the gate and the publish.
+            let gate = || job.binding.may_commit();
+            let outcome = match super::kitty_clipboard_offer::publish_native(offer, &gate) {
+                Published::Written => ClipWriteOutcome::Written,
+                Published::Failed => ClipWriteOutcome::Failed,
+                Published::Unchanged => {
+                    // When: Unchanged, the gate refused at the commit point; nothing is answered.
+                    return Committed::stale(job);
+                }
+            };
+            Committed::settled(job, outcome)
+        }
     }
 
     /// Keep each selection's retained share of a committed write and return its outcome.
@@ -844,6 +864,8 @@ impl ClipboardSink for InlineSink<'_> {
 struct NativeSink {
     #[cfg(not(target_os = "windows"))]
     clipboard: Option<arboard::Clipboard>,
+    #[cfg(target_os = "linux")]
+    owner: super::kitty_clipboard_offer::SelectionServer,
 }
 
 impl ClipboardSink for NativeSink {
@@ -889,8 +911,22 @@ impl ClipboardSink for NativeSink {
         published == Published::Written
     }
 
-    fn publish_offer(&mut self, offer: &NativeOffer, gate: CommitGate<'_>) -> Published {
-        super::kitty_clipboard_offer::publish_native(offer, gate)
+    fn publish_offer(
+        &mut self,
+        offer: NativeOffer,
+        lease: ClipLease,
+        targets: ClipTargets,
+        binding: WriteBinding,
+    ) -> Published {
+        #[cfg(target_os = "linux")]
+        {
+            self.owner.publish(offer, lease, targets, binding)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _retained = (lease, targets);
+            super::kitty_clipboard_offer::publish_native(&offer, &|| binding.may_commit())
+        }
     }
 }
 

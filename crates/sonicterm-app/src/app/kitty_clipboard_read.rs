@@ -290,6 +290,7 @@ fn read_one(
     match source.read_type_bounded(location, mime, KITTY_READ_TYPE_CAP_BYTES) {
         TypeRead::Bytes(bytes) => Ok(Some(bytes)),
         TypeRead::Absent | TypeRead::TooLarge => Ok(None),
+        TypeRead::Unsupported => Err(KittyClipboardStatus::Enosys),
         TypeRead::Failed => Err(KittyClipboardStatus::Eio),
     }
 }

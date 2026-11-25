@@ -340,6 +340,8 @@ impl PaneVtHandles {
         self,
         staging: Arc<super::osc52_stream::ClipboardStaging>,
     ) -> Self {
+        // The in-memory fixture accepts representations without a native display.
+        self.kitty_clipboard.borrow_mut().set_holds(|_, _| true);
         self.kitty_clipboard.borrow_mut().replace_staging(staging.clone());
         self.clipboard.borrow_mut().replace_staging(staging);
         self

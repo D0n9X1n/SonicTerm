@@ -5,7 +5,9 @@
 
 use std::time::{Duration, Instant};
 
-use super::osc52_read_source::{bounded_latin1, bounded_utf8, ReadOutcome};
+use super::osc52_read_source::{
+    bounded_latin1, bounded_utf8, ReadOutcome, TypeListing, TypeRead, MAX_NATIVE_TYPES_SCANNED,
+};
 
 /// How long the selection owner may take to answer `ConvertSelection`.
 pub(in crate::app) const SELECTION_WAIT: Duration = Duration::from_secs(2);
@@ -25,6 +27,8 @@ pub(in crate::app) enum PropertyKind {
     Latin1,
     /// `INCR`: the value arrives in chunks.
     Incr,
+    /// The exact atom requested by a non-text MIME read.
+    Requested,
     /// Anything else.
     Other,
 }
@@ -61,7 +65,7 @@ fn decode(kind: PropertyKind, value: Vec<u8>, max_bytes: usize) -> ReadOutcome {
     match kind {
         PropertyKind::Utf8 => bounded_utf8(value, max_bytes),
         PropertyKind::Latin1 => bounded_latin1(&value, max_bytes),
-        PropertyKind::Incr | PropertyKind::Other => ReadOutcome::Failed,
+        PropertyKind::Incr | PropertyKind::Requested | PropertyKind::Other => ReadOutcome::Failed,
     }
 }
 
@@ -162,6 +166,8 @@ pub(in crate::app) enum Polled {
 pub(in crate::app) enum ConvertTarget {
     /// The text, as `UTF8_STRING`.
     Text,
+    /// The existing atom named by a MIME read.
+    Mime(u32),
     /// When the owner took the selection, as `TIMESTAMP`.
     Timestamp,
 }
@@ -268,6 +274,96 @@ pub(in crate::app) fn read_selection(
             port.delete();
             return Some(outcome);
         }
+    }
+}
+
+/// List only valid MIME atoms, preserving the case needed to request them back from X11.
+pub(in crate::app) fn list_mime_atoms(names: impl IntoIterator<Item = String>) -> TypeListing {
+    let mut listed = Vec::new();
+    for name in names.into_iter().take(MAX_NATIVE_TYPES_SCANNED) {
+        let mime = match name.as_str() {
+            "UTF8_STRING" | "TEXT" | "STRING" | "text/plain;charset=utf-8" => "text/plain".into(),
+            _ if super::kitty_clipboard_offer::valid_mime(&name) => name,
+            _ => {
+                // When: name is neither text nor a valid MIME, it is not a listed representation.
+                continue;
+            }
+        };
+        if !listed.contains(&mime) {
+            listed.push(mime);
+        }
+    }
+    TypeListing::Types(listed)
+}
+
+/// Fetch an existing MIME atom under the text reader's size and time limits, without character
+/// conversion. An INCR announcement is never acknowledged before its size passes the cap.
+pub(in crate::app) fn read_mime(
+    port: &mut dyn SelectionPort,
+    atom: u32,
+    max_bytes: usize,
+) -> Option<TypeRead> {
+    if !port.convert(ConvertTarget::Mime(atom)) {
+        // When: convert failed, no answer can arrive.
+        return None;
+    }
+    let deadline = port.now() + SELECTION_WAIT;
+    if !wait_for_notify(port, deadline)? {
+        // When: wait_for_notify reports refusal, the selection lacks this type.
+        return Some(TypeRead::Absent);
+    }
+    let first = port.fetch(false, max_bytes)?;
+    if first.kind != PropertyKind::Incr {
+        // When: first is not INCR, the bounded property is the entire representation.
+        port.delete();
+        return Some(mime_bytes(first, max_bytes));
+    }
+    let Ok(size) = <[u8; 4]>::try_from(first.value.as_slice()) else {
+        // When: size is not one word, this is not an INCR announcement.
+        return None;
+    };
+    if first.format != 32 || first.bytes_after != 0 {
+        // When: format or bytes_after rules out a single INCR word, leave it unacknowledged.
+        return None;
+    }
+    if u32::from_ne_bytes(size) as usize > max_bytes {
+        // When: size exceeds max_bytes, leave the announcement unacknowledged.
+        return Some(TypeRead::TooLarge);
+    }
+    port.delete();
+    let end = port.now() + INCR_TOTAL_WAIT;
+    let mut bytes = Vec::new();
+    loop {
+        let deadline = end.min(port.now() + CHUNK_WAIT);
+        wait_for_event(port, deadline, |event| (event == Polled::NewValue).then_some(()))?;
+        let left = max_bytes - bytes.len();
+        match mime_bytes(port.fetch(true, left)?, left) {
+            TypeRead::Bytes(chunk) if chunk.is_empty() => {
+                // When: chunk is empty, the requestor has the complete representation.
+                return Some(TypeRead::Bytes(bytes));
+            }
+            TypeRead::Bytes(chunk) => {
+                bytes.reserve_exact(chunk.len());
+                bytes.extend_from_slice(&chunk);
+            }
+            refusal => {
+                // When: refusal rejects a chunk, discard the prefix and report its outcome.
+                return Some(refusal);
+            }
+        }
+    }
+}
+
+fn mime_bytes(reply: PropertyReply, room: usize) -> TypeRead {
+    if reply.kind != PropertyKind::Requested || reply.format != 8 {
+        // If kind or format differs, the bytes do not represent the requested MIME.
+        TypeRead::Failed
+    } else if reply.bytes_after != 0 || reply.value.len() > room {
+        // When: bytes_after or value length indicates truncation, omit rather than serve a prefix.
+        TypeRead::TooLarge
+    } else {
+        // When: reply fits room with no bytes_after, move the validated property value.
+        TypeRead::Bytes(reply.value)
     }
 }
 

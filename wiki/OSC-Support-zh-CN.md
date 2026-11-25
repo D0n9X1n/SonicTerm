@@ -35,7 +35,7 @@ SonicTerm 不支持的序列会被读到结束符后丢弃，其内容不会打�
 | `9 ; 4 ; state [; percent]` | 进度（Dock、任务栏、启动器） | W G K | 60 秒没有更新，或到达 100 % 后 5 秒，自动清除。 |
 | `52 ; kinds ; base64` / `?` | 写入或读取剪贴板 | W G K（W：仅写入） | Linux 上 `p` 指 primary 选区。不带数据或数据为空的 `52;c` 清空剪贴板。写入遵循 `osc52`，读取遵循 `osc52_read`（默认 `ask`，会打开确认页）。 |
 | `1337 ; Copy=:base64` | 写入剪贴板（iTerm2） | G | 与 OSC 52 写入使用同一策略；值为空或 `?` 时不写入。 |
-| `5522 ; …` | kitty 剪贴板协议 | G K | `write`、`wdata`、`walias` 与 `read`，类型列表（`.`）与会话授权。各平台写入、读取与列出哪些 MIME 类型，见[终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)。 |
+| `5522 ; …` | kitty 剪贴板协议 | G K | `write`、`wdata`、`walias` 与 `read`，类型列表（`.`）与会话授权。D-6d：省略无法映射或超出名称上限的类型；只有 Windows 替换无效 UTF-8，PNG 使用注册格式而不转换为 DIB。X11 程序提供一小时后过期；Wayland 需要 XWayland。各平台写入、读取与列出的 MIME 类型见[终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)。 |
 | `133 ; A/B/C/D/L/N/P/I` | Shell 提示符标记 | W G K | 点击提示符会移动光标：提示符设置了 `click_events` 时发送 SGR 按下事件，否则按 `[terminal] click_to_move` 发送方向键（`special_key=1` 时发送 kitty 的按键），备用屏幕上不移动。`redraw=0` 关闭行数缩小时保留光标行的处理，Windows 上不做该处理。启用长命令通知时，`C;cmdline_url=` 为其提供命令。 |
 | `9 ; 12` | 提示符开始（ConEmu） | G | |
 | `1337 ; File=…` | 内联图片 | W | |

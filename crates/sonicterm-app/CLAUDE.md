@@ -146,7 +146,7 @@ cargo build -p sonicterm-app
   over the `Win32Clipboard` seam), elsewhere immediately before the native call. A stale binding
   drops the write with no status, and an OSC 5522 status goes out only while the PTY and command
   that asked still own the pane (`write_status_owed`). The lease moves into the job and is
-  released when the native call returns; on Linux each selection keeps its own retained share
+  released or transferred when the native call returns; on Linux each arboard selection keeps its own retained share
   (`osc52_stream_retained.rs`). The event loop writes a user copy itself only when nothing is in
   flight and it is at most 512 KiB. macOS has no worker and refuses program writes over 512 KiB.
   Clipboard reads and `osc52 = "ask"` writes need a consent ticket (`osc52_read_ticket.rs`), taken
@@ -165,7 +165,10 @@ cargo build -p sonicterm-app
   (`kitty_clipboard_offer_macos.rs`), one `OpenClipboard` session on the clipboard worker on
   Windows (`kitty_clipboard_offer_windows.rs` over the `Win32Clipboard` seam,
   `kitty_clipboard_offer_win32.rs`), which empties the clipboard again when any
-  `SetClipboardData` fails; `DONE` only when all published, `EIO` otherwise; the job's
+  `SetClipboardData` fails. X11 publishes program MIME and raw text through its selection-owner
+  thread (`kitty_clipboard_offer_x11_native.rs`): reserve tables first, check the binding before
+  `SetSelectionOwner`, confirm with `GetSelectionOwner`, and keep the lease through admitted INCRs
+  after `SelectionClear`. User copies remain on arboard. `DONE` only when all published, `EIO` otherwise; the job's
   `KittyReply` is answered on the source PTY when it settles. The worker's `select!` also wakes on
   the staging's policy wakeup and the write's 30 s idle / 10 min absolute deadline. Each ready
   chunk first settles the intake (`PaneVtHandles::take_ready_output`): an OSC 52 stream or OSC 5522

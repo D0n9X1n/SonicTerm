@@ -143,6 +143,8 @@ fn kitty_write_as(harness: &mut Harness, text: &str, extra: &str) {
     use sonicterm_vt::vt::CaptureStagingPool;
     let identity = harness.app.pane_by_id(harness.pane).expect("a live pane").read_identity.clone();
     let mut tx = KittyClipboardTx::new(harness.staging.clone(), identity);
+    // The consent fixture writes to its injected clipboard even on a headless host.
+    tx.set_holds(|_, _| true);
     tx.bind_pane(harness.pane);
     let mut parser =
         Parser::new_with_staging_pool(Grid::new(80, 24), None, CaptureStagingPool::new());

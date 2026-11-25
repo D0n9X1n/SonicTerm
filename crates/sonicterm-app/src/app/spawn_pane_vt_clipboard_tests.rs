@@ -23,6 +23,8 @@ fn clipboard_worker() -> (PaneState, PaneVtHandles, Arc<ClipboardStaging>) {
     staging.set_write_policy(Osc52Policy::Allow);
     handles.clipboard.borrow_mut().replace_staging(staging.clone());
     handles.kitty_clipboard.borrow_mut().replace_staging(staging.clone());
+    // The test receives writes in memory; no platform display is required.
+    handles.kitty_clipboard.borrow_mut().set_holds(|_, _| true);
     (pane, handles, staging)
 }
 

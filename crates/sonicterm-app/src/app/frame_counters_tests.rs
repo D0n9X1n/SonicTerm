@@ -333,6 +333,8 @@ pub(super) const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/osc52_read_ticket.rs", "0", 2),
     // The admitted custom clipboard format names, checked at an OSC 5522 commit's preflight.
     ("app/kitty_clipboard_offer_windows.rs", "0", 1),
+    // X11 preflight serializes permanent atom-name admissions across panes, not parser access.
+    ("app/kitty_clipboard_offer_x11.rs", "admitted_names", 1),
     ("app/fg_probe.rs", "map", 9),
     ("app/fg_probe.rs", "proxy", 1),
     ("app/fg_probe.rs", "worker", 3),

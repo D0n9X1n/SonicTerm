@@ -369,3 +369,25 @@ fn typed_read_failure_eio() {
     let reply = reply_text(&source, &request("type=read:id=f", "text/plain image/png"));
     assert_eq!(reply, packet("EIO:id=f"));
 }
+
+/// A non-text read on a native-only Wayland session fails as unsupported even when the client
+/// did not ask for a listing; it is neither a missing type nor an X11 protocol failure.
+#[test]
+fn unsupported_mime_read_without_listing_answers_enosys() {
+    struct NoDisplay;
+    impl ClipboardTextSource for NoDisplay {
+        fn list_types(&self, _: ReadLocation) -> TypeListing {
+            panic!("not a listing")
+        }
+        fn read_text_bounded(&self, _: ReadLocation, _: usize) -> ReadOutcome {
+            panic!("not text")
+        }
+        fn read_type_bounded(&self, _: ReadLocation, _: &str, _: usize) -> TypeRead {
+            TypeRead::Unsupported
+        }
+    }
+    assert_eq!(
+        build_read_reply(&NoDisplay, &request("type=read", "image/png")),
+        packet("ENOSYS").into_bytes()
+    );
+}

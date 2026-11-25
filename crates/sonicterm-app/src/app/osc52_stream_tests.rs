@@ -136,17 +136,16 @@ fn incomplete_explicit_padding_discards() {
     assert_eq!(staging.reserved_bytes(), 0);
 }
 
-/// Non-UTF-8 bytes become U+FFFD off macOS, and the lease covers the expanded text and its native
-/// buffer before the `String` is built; on macOS the same write is a raw text offer of the exact
-/// bytes, its buffer and one native copy reserved.
+/// Windows reserves and writes the replacement-character expansion; macOS and Linux reserve a
+/// raw offer carrying the exact bytes instead.
 #[test]
 fn non_utf8_replaced_and_expansion_reserved() {
     let staging = staging(1 << 20, 1 << 20);
     let raw = b"a\xffb\xfe";
     let mut results = run(&staging, &osc52("c", &encode(raw)));
     let taken = results.remove(0).expect("a write").take().expect("untaken");
-    if cfg!(target_os = "macos") {
-        // macOS publishes text that is not UTF-8 byte for byte, as a text-only offer.
+    if cfg!(any(target_os = "macos", target_os = "linux")) {
+        // macOS and X11 publish text that is not UTF-8 byte for byte, as a text-only offer.
         let offer = taken.offer.as_ref().expect("a raw text offer");
         assert_eq!(offer.text(), Some(&raw[..]));
         assert!(taken.text.is_empty());
@@ -511,4 +510,19 @@ fn lossy_text_is_built_in_its_reserved_buffer() {
     assert_eq!(text.capacity(), expanded, "built at its exact length");
     assert!(peak <= input_bytes + expanded, "peak {peak} past input plus text");
     assert!(lease.bytes() >= text.capacity());
+}
+
+/// X11 selection owners receive invalid text without conversion, including PRIMARY alone or
+/// together with CLIPBOARD; the destination flags remain attached to the same offer.
+#[test]
+fn x11_program_text_routes_both_selections_byte_exact() {
+    let staging = staging(1 << 20, 64);
+    for clipboard in [false, true] {
+        let targets = ClipTargets { clipboard, primary: true };
+        let job =
+            text::program_text_for(&staging, vec![0xff], staging.lease(), targets, None, true)
+                .unwrap();
+        assert_eq!(job.offer.as_ref().and_then(|offer| offer.text()), Some(&[0xff][..]));
+        assert_eq!(job.targets, targets);
+    }
 }
