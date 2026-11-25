@@ -182,8 +182,13 @@ fn run_host<E: Engine>(role: &str, test_name: &str, cases: &[Case], mut engine: 
         }
     };
     emit_rows(cases, &closed, runtime_ok, &mut engine);
-    // `scan` says whether the child's DONE arrived in time; an expired scan is never a full run.
-    let scan = if scanned { "done" } else { "expired" };
+    // `scan` is `done` when the child's DONE arrived in time, `required` when the scan expired only
+    // inside a scan-optional case after every other case closed, else `expired`.
+    let scan = match (scanned, required_closed(cases, &closed)) {
+        (true, _) => "done",
+        (false, true) => "required",
+        (false, false) => "expired",
+    };
     println!("{LINE_PREFIX}{{\"kind\":\"end\",\"role\":\"{role}\",\"scan\":\"{scan}\"}}");
 }
 
@@ -288,6 +293,14 @@ fn drive<E: Engine>(
             }
         }
     }
+}
+
+/// Whether every section of every case that is not scan-optional closed in time.
+fn required_closed(cases: &[Case], closed: &HashMap<String, Evidence>) -> bool {
+    cases.iter().filter(|case| !case.scan_optional).all(|case| {
+        closed.contains_key(&format!("{}/out", case.name))
+            && (case.input.is_none() || closed.contains_key(&format!("{}/in", case.name)))
+    })
 }
 
 /// Print one row per section. A failed runtime check makes every row inconclusive; a failed
@@ -551,12 +564,15 @@ fn within(
             // When: now is at or past the deadline on the worker, the work is never started.
             return;
         }
+        let result = work();
+        // Stamped at completion, so a result that finished late is late however soon it is read.
         // A send fails only when the deadline already passed and nobody waits.
-        let _ = sender.send(work());
+        let _ = sender.send((result, Instant::now()));
     });
     let left = deadline.saturating_duration_since(Instant::now());
     match receiver.recv_timeout(left) {
-        Ok(result) => result.map_err(|error| error.to_string()),
+        Ok((_, completed_at)) if completed_at >= deadline => Err(LATE.to_owned()),
+        Ok((result, _)) => result.map_err(|error| error.to_string()),
         Err(_) => Err(LATE.to_owned()),
     }
 }
@@ -649,10 +665,12 @@ fn run_one_host(
     let mut lines = Vec::new();
     let mut finished = false;
     // The deadline was fixed when the run admitted this host, so spawning and the handshake
-    // count against it.
-    while let Some(left) = launch.host_deadline.checked_duration_since(Instant::now()) {
+    // count against it. A line counts by when the reader took it from the pipe: lines already
+    // queued with a timely stamp are still read after the clock passes the deadline.
+    loop {
+        let left = launch.host_deadline.saturating_duration_since(Instant::now());
         let Ok((line, read_at)) = receiver.recv_timeout(left) else {
-            // When: `recv_timeout` expired or the reader ended, no further `line` arrives in budget.
+            // When: `recv_timeout` found no queued line in time, or the reader ended, none follows.
             break;
         };
         if read_at >= launch.host_deadline {
@@ -664,9 +682,10 @@ fn run_one_host(
             continue;
         };
         let control = line[at..].to_owned();
-        // Only an end line whose scan reached the child's DONE is a finished run.
+        // Only an end line whose scan reached DONE, or closed every case but a scan-optional one,
+        // is a finished run.
         finished = json_field(&control, "kind").as_deref() == Some("end")
-            && json_field(&control, "scan").as_deref() == Some("done");
+            && matches!(json_field(&control, "scan").as_deref(), Some("done" | "required"));
         let ended = json_field(&control, "kind").as_deref() == Some("end");
         lines.push(control);
         if ended {

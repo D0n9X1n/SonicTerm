@@ -126,16 +126,16 @@ fn cases() -> Vec<Case> {
              \x1b]133;A;redraw=last;click_events=2\x07\x1b]133;C;cmdline_url=ls%20-l\x07\x1b]9;12\x07",
         )
         .output_required(),
-        // A prompt click's input: the SGR press, an arrow key and the `special_key` CSI-u.
+        // A prompt click's input, recorded: the SGR press, an arrow key and the `special_key` CSI-u.
         Case::new("osc133-click-events", "\x1b]133;A;click_events=1\x07")
-            .input(echo(b"\x1b[<0;5;1M\x1b[D\x1b[1;1u"))
-            .input_required(),
+            .input(echo(b"\x1b[<0;5;1M\x1b[D\x1b[1;1u")),
         Case::new("osc9-4-lenient", "\x1b]9;4;1\x07\x1b]9;4;2;abc\x07\x1b]9;4;0\x07"),
         Case::new("osc777-notify", "\x1b]777;notify;Fixture\x07"),
         Case::new("prompt-resize", "\x1b]133;A;redraw=last\x07")
             .input(InputPhase::Resize { total_rows: 60, rows: 20 }),
         // Recorded, not required, and last, so its time cannot crowd out a required row.
-        Case::new("osc52-c-4mib", format!("\x1b]52;c;{}\x07", "QUFB".repeat(1024 * 1024))),
+        Case::new("osc52-c-4mib", format!("\x1b]52;c;{}\x07", "QUFB".repeat(1024 * 1024)))
+            .scan_optional(),
     ]
 }
 

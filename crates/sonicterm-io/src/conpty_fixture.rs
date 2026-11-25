@@ -63,6 +63,9 @@ pub struct Case {
     pub output_required: bool,
     /// Whether the `/in` row must be `exact` on the packaged runtime.
     pub input_required: bool,
+    /// Whether the scan may expire inside this case: only a recorded case placed last, so a slow
+    /// runner cannot fail a run whose other cases all closed.
+    pub scan_optional: bool,
 }
 
 impl Case {
@@ -76,6 +79,7 @@ impl Case {
             input: None,
             output_required: false,
             input_required: false,
+            scan_optional: false,
         }
     }
 
@@ -88,6 +92,12 @@ impl Case {
     /// Require the `/in` row to be `exact` on the packaged runtime.
     pub fn input_required(mut self) -> Self {
         self.input_required = true;
+        self
+    }
+
+    /// Let the scan expire inside this recorded, last case without failing the run.
+    pub fn scan_optional(mut self) -> Self {
+        self.scan_optional = true;
         self
     }
 

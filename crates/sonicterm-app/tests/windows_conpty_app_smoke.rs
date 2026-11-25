@@ -183,7 +183,8 @@ fn cases() -> Vec<Case> {
         Case::new(QUERY_REPLIES[3].0, QUERY_REPLIES[3].1).input(reply()).input_required(),
         Case::new(QUERY_REPLIES[4].0, QUERY_REPLIES[4].1).input(reply()).input_required(),
         Case::new(QUERY_REPLIES[5].0, QUERY_REPLIES[5].1).input(reply()).input_required(),
-        Case::new(QUERY_REPLIES[6].0, QUERY_REPLIES[6].1).input(reply()).input_required(),
+        // Recorded: kitty's OSC 21 selection key, the only terminal with it.
+        Case::new(QUERY_REPLIES[6].0, QUERY_REPLIES[6].1).input(reply()),
         Case::new(OSC52_READ_CASE, "\x1b]52;cp;?\x07").input(reply()).input_required(),
         Case::new(KITTY_WRITE_CASE, KITTY_WRITE).input(reply()).input_required(),
         Case::new(KITTY_READ_CASE, "\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\")

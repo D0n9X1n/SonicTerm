@@ -81,7 +81,8 @@ sequence is covered by the unit tests, and the forms below are the samples, not 
 | `1337 ; Copy=:`, `1337 ; SetUserVar`, `1337 ; CurrentDir` | output | unchanged | unchanged |
 | OSC 9;9 (quoted), OSC 7 (`localhost` with backslashes, another host, `kitty-shell-cwd://`), 9;4, 777 | output | unchanged | dropped |
 | OSC 133 marks with options and 9;12 | output | unchanged | unchanged |
-| OSC 133 `click_events=1` and the arrow keys a click sends | output and input | unchanged | unchanged |
+| OSC 133 `click_events=1` | output | unchanged | unchanged |
+| The SGR press, arrow key and `special_key` CSI-u a prompt click sends | input | recorded, not yet sampled | recorded, not yet sampled |
 | DECSET 1005, 1006, 1015, 1016 | output | unchanged | dropped |
 | A 1005, 1015 and 1016 mouse report | input | unchanged | unchanged |
 | DECRQM 5522 | output | unchanged | dropped |
