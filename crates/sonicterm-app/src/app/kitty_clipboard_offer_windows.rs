@@ -366,6 +366,8 @@ pub(super) trait Win32Clipboard {
     fn free(&mut self, block: Self::Block);
     /// Open the clipboard on this thread, retrying while another process holds it.
     fn open(&mut self) -> bool;
+    /// Open for mutation with the clipboard worker's own window, never with a null owner.
+    fn open_owned(&mut self) -> bool;
     /// Empty the open clipboard, taking ownership of it.
     fn empty(&mut self) -> bool;
     /// Hand `block` to the open clipboard as `format`; the block comes back when it is refused.
@@ -486,8 +488,8 @@ impl<C: Win32Clipboard> WindowsOffer<C> {
     /// other process can change the clipboard between them and the replacement; a refusal closes
     /// it untouched.
     fn commit(&mut self, check: &mut dyn FnMut(&mut C) -> bool) -> Published {
-        if !self.clipboard.open() {
-            // When: open gives up, another process held the clipboard: nothing changed.
+        if !self.clipboard.open_owned() {
+            // When: open_owned fails, no mutation is possible and the previous clipboard stays intact.
             self.discard();
             return Published::Failed;
         }

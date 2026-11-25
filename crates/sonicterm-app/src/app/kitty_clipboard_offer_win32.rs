@@ -4,9 +4,12 @@
 
 use std::time::Duration;
 
-use windows::core::HSTRING;
+use windows::core::{w, HSTRING};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DestroyWindow, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
+};
 use windows::Win32::{
-    Foundation::{GlobalFree, HANDLE, HGLOBAL},
+    Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND},
     System::{
         DataExchange::{
             CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
@@ -31,12 +34,52 @@ const OPEN_ATTEMPTS: usize = 10;
 /// The pause between open attempts.
 const OPEN_RETRY: Duration = Duration::from_millis(10);
 
-/// Open the clipboard with no owner window in at most [`OPEN_ATTEMPTS`] tries.
-fn open_clipboard() -> bool {
+/// A hidden message-only window owned by the same thread that opens the clipboard for mutation.
+struct OwnerWindow(HWND);
+
+impl OwnerWindow {
+    fn create() -> Option<Self> {
+        // SAFETY: STATIC is a system window class. HWND_MESSAGE selects a message-only parent; there are no borrowed creation parameters.
+        unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!(""),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                None,
+                None,
+            )
+        }
+        .ok()
+        .map(Self)
+    }
+}
+
+// Lifecycle: OwnerWindow calls DestroyWindow on its worker thread when the thread-local slot drops.
+impl Drop for OwnerWindow {
+    fn drop(&mut self) {
+        let _ =
+            // SAFETY: this thread created the owned HWND, which remains live until this drop.
+            unsafe { DestroyWindow(self.0) };
+    }
+}
+
+thread_local! {
+    static OWNER_WINDOW: std::cell::OnceCell<OwnerWindow> = const { std::cell::OnceCell::new() };
+}
+
+/// Open the clipboard with the worker's window for writes, or no window for reads.
+fn open_clipboard(owner: Option<HWND>) -> bool {
     for _ in 0..OPEN_ATTEMPTS {
         let opened =
-            // SAFETY: OpenClipboard with no owner window only claims the clipboard for this thread.
-            unsafe { OpenClipboard(None) }.is_ok();
+            // SAFETY: owner is absent for a read or is the live window of this worker for a mutation.
+            unsafe { OpenClipboard(owner) }.is_ok();
         if opened {
             // When: opened, the caller closes the clipboard on this thread.
             return true;
@@ -88,7 +131,21 @@ impl Win32Clipboard for Win32 {
     }
 
     fn open(&mut self) -> bool {
-        open_clipboard()
+        open_clipboard(None)
+    }
+
+    fn open_owned(&mut self) -> bool {
+        OWNER_WINDOW.with(|slot| {
+            if slot.get().is_none() {
+                // When: slot has no window, the worker creates it at its first mutation.
+                let Some(window) = OwnerWindow::create() else {
+                    // When: create fails, refuse before opening or emptying the clipboard.
+                    return false;
+                };
+                let _ = slot.set(window);
+            }
+            open_clipboard(Some(slot.get().expect("created owner window").0))
+        })
     }
 
     fn empty(&mut self) -> bool {
@@ -210,7 +267,7 @@ pub(super) fn read_type(mime: &str, max_bytes: usize) -> TypeRead {
         // When: mime is no MIME name or names text, the typed read holds nothing for it.
         return TypeRead::Absent;
     };
-    if !open_clipboard() {
+    if !open_clipboard(None) {
         // When: open_clipboard gives up, another process held the clipboard throughout.
         return TypeRead::Failed;
     }

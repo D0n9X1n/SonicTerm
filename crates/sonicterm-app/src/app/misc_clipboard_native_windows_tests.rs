@@ -296,3 +296,44 @@ fn global_size_refuses_before_lock() {
     assert_eq!(read_windows_text(1024), ReadOutcome::TooLarge);
     assert_eq!(read_windows_text(8192), ReadOutcome::Text(text));
 }
+
+/// The real writer must own the clipboard after EmptyClipboard and retain the same window across
+/// jobs. Run on a disposable worker thread in the private station, never on the user's clipboard.
+#[test]
+fn native_custom_clipboard_writer_owns_window_and_round_trips() {
+    use crate::app::kitty_clipboard_offer::{
+        plan, publish_native, read_windows_type, OfferPlan, Published,
+    };
+    use crate::app::osc52_read_source::TypeRead;
+    use windows::Win32::System::DataExchange::GetClipboardOwner;
+    if isolated() {
+        return;
+    }
+    let station = PrivateStation::enter();
+    std::thread::spawn(|| {
+        let mime = "application/x-sonicterm-owner";
+        let payload = vec![0xa5; 32];
+        let OfferPlan::Offer(offer) = plan(vec![(mime.into(), payload.clone())], &[], &|_, _| true)
+        else {
+            panic!("valid offer")
+        };
+        let mut previous = None;
+        for _ in 0..2 {
+            assert_eq!(publish_native(&offer, &|| true), Published::Written);
+            let window =
+                // SAFETY: GetClipboardOwner only queries the private station's clipboard owner.
+                unsafe {GetClipboardOwner()}.expect("non-null clipboard owner");
+            if let Some(previous) = previous {
+                assert_eq!(window, previous);
+            }
+            previous = Some(window);
+            let TypeRead::Bytes(data) = read_windows_type(mime, 128) else {
+                panic!("registered bytes")
+            };
+            assert!(data.starts_with(&payload));
+        }
+    })
+    .join()
+    .unwrap();
+    station.leave();
+}

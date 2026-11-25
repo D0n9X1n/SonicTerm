@@ -11,6 +11,7 @@ struct FakeWin32 {
     next_block: u64,
     clipboard: Vec<(u32, Vec<u8>)>,
     opens: usize,
+    owned_opens: usize,
     empties: usize,
     closes: usize,
     is_open: bool,
@@ -73,6 +74,11 @@ impl Win32Clipboard for FakeWin32 {
         self.is_open = true;
         self.log.borrow_mut().push("open");
         true
+    }
+
+    fn open_owned(&mut self) -> bool {
+        self.owned_opens += 1;
+        self.open()
     }
 
     fn empty(&mut self) -> bool {
@@ -582,4 +588,20 @@ fn uri_batch_windows_read_refuses_before_allocating() {
     }
     packed.extend([0, 0]);
     assert_eq!(hdrop_uri_list(&packed, 1 << 20), TypeRead::TooLarge);
+}
+
+/// Only reads may use the ownerless open. Every mutation, including a clear, must request an
+/// owner-backed acquisition before it may empty the clipboard.
+#[test]
+fn windows_mutations_use_worker_owned_acquisition() {
+    let mut backend = WindowsOffer::new(previous());
+    let _ = read_text_with(&mut backend.clipboard, 1024);
+    assert_eq!(backend.clipboard.owned_opens, 0);
+    assert_eq!(backend.write_text("", None, &|| true).0, Published::Written);
+    assert_eq!(backend.clipboard.owned_opens, 1);
+    assert_eq!(
+        publish_offer(&mut backend, &offer(&[("application/x-own", b"data")]), &|| true),
+        Published::Written
+    );
+    assert_eq!(backend.clipboard.owned_opens, 2);
 }
