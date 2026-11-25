@@ -315,9 +315,10 @@ impl Clone for KittyClipboardTx {
     }
 }
 
-/// One request a parser section raised, with the command boundaries passed before it; `None` is a
-/// RIS, which releases the open write silently.
-pub(in crate::app) type KittySectionRequest = Option<(u64, KittyClipboardRequest, bool, u64)>;
+/// One request a parser section raised, with the command boundaries passed before it and its
+/// position on the wire; `None` is a RIS, which releases the open write silently.
+pub(in crate::app) type KittySectionRequest =
+    Option<(u64, KittyClipboardRequest, bool, u64, usize)>;
 
 impl KittyClipboardTx {
     /// A transaction with no write open, reserving from `staging` and binding tickets to `identity`.
@@ -386,17 +387,18 @@ impl KittyClipboardTx {
         self.open.take().map(|open| open.reply.status(status))
     }
 
-    /// Run one section's requests in order, each at the command epoch of its position.
+    /// Run one section's requests in order, each at the command epoch of its position; every step
+    /// carries its request's wire position.
     pub(in crate::app) fn run(
         &mut self,
         inbox: Option<&ClipboardInbox>,
         requests: Vec<KittySectionRequest>,
         now: Instant,
-    ) -> Vec<KittyStep> {
+    ) -> Vec<(usize, KittyStep)> {
         let base_epoch = self.identity.command_epoch();
         let mut steps = Vec::new();
         for request in requests {
-            let Some((stream, request, bel, passed)) = request else {
+            let Some((stream, request, bel, passed, position)) = request else {
                 // When: the section passed a RIS here, the open write ends without a reply and
                 // every session grant bound before the reset is revoked.
                 self.release();
@@ -407,7 +409,8 @@ impl KittyClipboardTx {
                 // When: no inbox was taken, the section raised no packet to read from it.
                 continue;
             };
-            steps.push(self.handle(inbox, stream, request, bel, base_epoch + passed, now));
+            let step = self.handle(inbox, stream, request, bel, base_epoch + passed, now);
+            steps.push((position, step));
         }
         steps
     }

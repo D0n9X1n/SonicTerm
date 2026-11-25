@@ -866,6 +866,8 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         let mut notices = ProgramNotices::default();
         // Command boundaries passed so far in this section; each clipboard request records it.
         let mut boundaries = 0u64;
+        // Each clipboard request's place on the wire, across OSC 52 and OSC 5522.
+        let mut wire_position = 0usize;
         // A batch that rings any number of times is one bell, so a ringing loop marks its tab once.
         if events.iter().any(|event| matches!(event, VtEvent::Bell)) {
             handles.bells.fetch_add(1, Ordering::Relaxed);
@@ -877,10 +879,12 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 }
                 VtEvent::CursorStyle(style) => handles.publish_cursor_style(style),
                 VtEvent::ClipboardStream { stream, phase } => {
-                    clipboard_requests.push((stream, phase, boundaries));
+                    clipboard_requests.push((stream, phase, boundaries, wire_position));
+                    wire_position += 1;
                 }
                 VtEvent::KittyClipboard { stream, request, bel } => {
-                    kitty_requests.push(Some((stream, request, bel, boundaries)));
+                    kitty_requests.push(Some((stream, request, bel, boundaries, wire_position)));
+                    wire_position += 1;
                 }
                 VtEvent::Command(event) => {
                     boundaries += u64::from(event != CommandEvent::PromptEnd);
@@ -929,19 +933,21 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             emit_event(notice.into_event(handles.pane_id));
         }
 
-        // Writes post in order, then the section's command epoch, then its read tickets; refusals
-        // only count toward one summary, and busy reads come back as empty replies.
-        // OSC 5522 packets run first, at their positions' epochs; their tickets post after it.
-        let (kitty_status, kitty_tickets) =
-            handles.run_kitty_section(kitty_inbox.as_deref(), kitty_requests, &mut emit_event);
+        // Writes of both protocols post in wire order, then the section's command epoch, then its
+        // read tickets; refusals only count toward one summary, and busy reads come back as empty
+        // replies. OSC 5522 packets run first, at their positions' epochs; their writes are merged
+        // into the OSC 52 ones by position, and their tickets post after the epoch.
+        let kitty = handles.run_kitty_section(kitty_inbox.as_deref(), kitty_requests);
         let read_replies = handles.clipboard.borrow_mut().run_section(
             clipboard_inbox.as_deref(),
             clipboard_open,
             clipboard_requests,
             boundaries,
+            kitty.writes,
             &mut emit_event,
         );
-        handles.post_kitty_tickets(kitty_tickets, &mut emit_event);
+        handles.post_kitty_tickets(kitty.tickets, &mut emit_event);
+        let kitty_status = kitty.status;
 
         let (kitty_replies, cursor_moves) =
             media_batch::apply_batch_media(handles, media_events, &mut decode_media);

@@ -306,7 +306,9 @@ the event loop posts the write to one clipboard worker thread, which checks that
 immediately before the native call (on Windows inside the same clipboard acquisition, after
 reading the value it replaces and before `EmptyClipboard`); that call is the commit point, and
 the write's lease is released when it returns. Program writes and user copies share the worker's queue and run
-strictly in the order the event loop handled them, so a later user copy always wins. The event
+strictly in the order the event loop handled them, so a later user copy always wins. OSC 52
+and OSC 5522 writes from one pane are posted in the order they arrived on the wire, so the last
+write a program sent is the one left on the clipboard. The event
 loop writes a user copy itself only when nothing is queued and the copy is at most 512 KiB; at
 most 4 user copies wait on the worker, and one more is refused with the copy-failure notice and
 keeps its selection; a refused copy-mode copy returns to copy mode with its selection while

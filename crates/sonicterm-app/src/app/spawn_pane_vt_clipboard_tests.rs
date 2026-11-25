@@ -99,3 +99,46 @@ fn deny_then_allow_cancels_an_open_stream_and_write() {
     assert!(!written, "the OSC 5522 write never commits");
     assert!(replies.contains("status=EPERM"), "{replies:?}");
 }
+
+/// The text of every clipboard write `bytes` posts as one ready chunk, in posting order.
+fn posted_texts(handles: &PaneVtHandles, bytes: &[u8]) -> Vec<String> {
+    let mut texts = Vec::new();
+    let mut send_reply = |_: Vec<u8>| {};
+    handles.take_ready_output(Instant::now(), &mut send_reply, |send_reply| {
+        process_pane_vt_batch_with(
+            handles,
+            bytes,
+            None,
+            &mut None,
+            &mut SyncLatch::default(),
+            |_| None,
+            |event| {
+                if let UserEvent::ClipboardWrite { job, .. } = event {
+                    // Each test job is taken once, here, to read what it would write.
+                    let job = job.take().expect("an untaken job");
+                    texts.push(job.text.clone());
+                }
+            },
+            Instant::now,
+            send_reply,
+        );
+    });
+    texts
+}
+
+/// Contract: OSC 52 and OSC 5522 writes in one chunk post in the order they arrived, both ways
+/// round, so the last write on the wire is the one left on the clipboard.
+#[test]
+fn osc52_and_osc5522_writes_post_in_wire_order() {
+    // "osc52" is b3NjNTI=; the 5522 write carries "hi".
+    let osc52 = b"\x1b]52;c;b3NjNTI=\x07".as_slice();
+    let kitty = [OPEN_WRITE, COMMIT].concat();
+
+    let (_pane, handles, _staging) = clipboard_worker();
+    let texts = posted_texts(&handles, &[osc52, kitty.as_slice()].concat());
+    assert_eq!(texts, ["osc52", "hi"], "OSC 52 first on the wire posts first");
+
+    let (_pane, handles, _staging) = clipboard_worker();
+    let texts = posted_texts(&handles, &[kitty.as_slice(), osc52].concat());
+    assert_eq!(texts, ["hi", "osc52"], "OSC 5522 first on the wire posts first");
+}

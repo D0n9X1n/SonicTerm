@@ -715,22 +715,33 @@ impl Osc52Intake {
     }
 
     /// Run one parser section's clipboard events, each tagged with the command boundaries the
-    /// section passed before it: post every write in order, publish the section's command epoch,
-    /// then post its read tickets and its refusal summary. Returns the section's empty read replies.
+    /// section passed before it and its position on the wire: post every write, with
+    /// `other_writes` (the section's OSC 5522 writes, by position) merged in wire order, publish
+    /// the section's command epoch, then post its read tickets and its refusal summary. Returns
+    /// the section's empty read replies.
     pub(in crate::app) fn run_section(
         &mut self,
         inbox: Option<&ClipboardInbox>,
         parser_open: Option<u64>,
-        requests: Vec<(u64, ClipboardPhase, u64)>,
+        requests: Vec<(u64, ClipboardPhase, u64, usize)>,
         boundaries: u64,
+        other_writes: Vec<(usize, ClipboardJobHandle)>,
         mut emit: impl FnMut(UserEvent),
     ) -> Vec<u8> {
         let base_epoch = self.identity.command_epoch();
         let mut attempts = ClipAttempts::default();
+        let mut other_writes = other_writes.into_iter().peekable();
+        let pane_id = self.pane_id;
+        // Posts every other write that came before `position` on the wire.
+        let mut post_before = |position: usize, emit: &mut dyn FnMut(UserEvent)| {
+            while let Some((_, job)) = other_writes.next_if(|(other, _)| *other < position) {
+                emit(UserEvent::ClipboardWrite { pane_id, job });
+            }
+        };
         if inbox.is_some() || parser_open.is_some() {
             // When: inbox or parser_open is set, this section touched a clipboard stream.
             let at = Instant::now();
-            for (stream, phase, passed) in requests {
+            for (stream, phase, passed, position) in requests {
                 let Some(inbox) = inbox else {
                     // When: no inbox was taken, the section raised no clipboard event.
                     break;
@@ -748,7 +759,9 @@ impl Osc52Intake {
                         attempts.accepted = attempts.accepted.saturating_add(1);
                         attempts.latest = None;
                         if let Accepted::Write(job) = accepted {
-                            // A write is posted now; a ticket is posted below, after the epoch.
+                            // A write is posted now, after every write before it on the wire; a
+                            // ticket is posted below, after the epoch.
+                            post_before(position, &mut emit);
                             emit(UserEvent::ClipboardWrite { pane_id: self.pane_id, job });
                         }
                     }
@@ -763,6 +776,8 @@ impl Osc52Intake {
             // When: neither inbox nor parser_open is set, a stream the parser reset is released.
             self.release_open();
         }
+        // The section's remaining writes follow every OSC 52 write, before its epoch.
+        post_before(usize::MAX, &mut emit);
         if boundaries > 0 {
             // Published before the tickets: one from before a boundary already mismatches.
             self.identity.set_command_epoch(base_epoch + boundaries);
