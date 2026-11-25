@@ -151,7 +151,11 @@ cargo build -p sonicterm-app
   `osc52_read_pipeline.rs` revalidates it before the native read and before every delivery
   attempt. OSC 5522 writes (`kitty_clipboard_tx.rs`) keep one open transaction per pane in the VT
   worker, reserved from the same `ClipboardStaging` before every buffer grows; a commit resolves
-  aliases over every staged type, then routes the text like an OSC 52 write, and the job's
+  aliases over every staged type and plans a native offer (`kitty_clipboard_offer.rs`): names the
+  platform cannot hold are omitted (all omitted is `ENOSYS`), text alone routes like an OSC 52
+  write, and text beside other types (macOS only) reserves its native copies, then stages every
+  buffer before one `clearContents`/`writeObjects` on the event loop, `DONE` only when all
+  published, `EIO` otherwise; the job's
   `KittyReply` is answered on the source PTY when it settles. The worker's `select!` also wakes on
   the staging's policy wakeup and the write's 30 s idle / 10 min absolute deadline. An `ask` ticket is approved only by Apply on its own palette confirm session
   (`osc52_read_consent.rs`), opened in the source window while it is frontmost and the palette is

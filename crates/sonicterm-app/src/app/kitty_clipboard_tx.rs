@@ -4,8 +4,9 @@
 //! valid packet's encoded payload in its kitty inbox. [`KittyClipboardTx`] keeps the pane's one
 //! open write: each MIME representation is decoded into a buffer reserved from
 //! [`ClipboardStaging`] before it is allocated, aliases are kept in order, and a commit resolves
-//! the aliases over every staged representation before it chooses the text the clipboard worker
-//! writes. Representations SonicTerm cannot hold yet are released at the commit.
+//! the aliases over every staged representation and plans the native offer
+//! (`kitty_clipboard_offer`): a type the platform cannot hold is omitted and released, text alone
+//! is written as before, and text beside other types is published with them in one operation.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +19,7 @@ use sonicterm_vt::vt::{
     MAX_KITTY_CLIPBOARD_MIME_BYTES,
 };
 
+use super::kitty_clipboard_offer::{plan, platform_holds, NativeFormat, NativeOffer, OfferPlan};
 use super::kitty_clipboard_read::parse_read_request;
 use super::osc52_read_grants::GrantCredential;
 use super::osc52_read_ticket::{
@@ -281,29 +283,14 @@ pub(in crate::app) fn is_text(mime: &str) -> bool {
     mime == "text/plain" || mime.starts_with("text/plain;")
 }
 
-/// Apply `aliases` in order over `entries` and take the first text representation's bytes;
-/// `Some(empty)` when nothing was staged (a clear), `None` when nothing staged is text.
-fn take_text(mut entries: Vec<Entry>, aliases: &[(String, String)]) -> Option<Vec<u8>> {
-    if entries.is_empty() {
-        // When: entries is empty, the write staged nothing and the commit clears the clipboard.
-        return Some(Vec::new());
+/// Size `lease` to exactly `total`, growing only when the budget covers it; false when it cannot.
+fn size_lease(lease: &mut ClipLease, total: usize) -> bool {
+    if total <= lease.bytes() {
+        // When: total fits in what the lease holds, the surplus is released.
+        lease.shrink_to(total);
+        return true;
     }
-    // Names map to entry indices, so resolving aliases copies no data.
-    let mut names: Vec<(&str, usize)> =
-        entries.iter().enumerate().map(|(index, entry)| (entry.mime.as_str(), index)).collect();
-    for (alias, target) in aliases {
-        let Some(index) = names.iter().find(|(name, _)| name == target).map(|(_, index)| *index)
-        else {
-            // When: the alias's target has no representation, the alias is dropped.
-            continue;
-        };
-        match names.iter_mut().find(|(name, _)| name == alias) {
-            Some(existing) => existing.1 = index,
-            None => names.push((alias.as_str(), index)),
-        }
-    }
-    let index = names.iter().find(|(name, _)| is_text(name)).map(|(_, index)| *index)?;
-    Some(entries.swap_remove(index).data)
+    lease.grow_to(total)
 }
 
 /// One pane's OSC 5522 write transaction, driven by its VT worker outside the parser lock.
@@ -312,6 +299,8 @@ pub(in crate::app) struct KittyClipboardTx {
     identity: Arc<ReadIdentity>,
     pane_id: u64,
     open: Option<OpenWrite>,
+    /// Which native formats a commit may publish; the platform's, unless a test narrows it.
+    holds: fn(&NativeFormat) -> bool,
 }
 
 impl Clone for KittyClipboardTx {
@@ -331,7 +320,13 @@ pub(in crate::app) type KittySectionRequest = Option<(u64, KittyClipboardRequest
 impl KittyClipboardTx {
     /// A transaction with no write open, reserving from `staging` and binding tickets to `identity`.
     pub(in crate::app) fn new(staging: Arc<ClipboardStaging>, identity: Arc<ReadIdentity>) -> Self {
-        Self { staging, identity, pane_id: 0, open: None }
+        Self { staging, identity, pane_id: 0, open: None, holds: platform_holds }
+    }
+
+    /// Publish only the formats `holds` accepts, instead of the platform's.
+    #[cfg(test)]
+    pub(in crate::app) fn set_holds(&mut self, holds: fn(&NativeFormat) -> bool) {
+        self.holds = holds;
     }
 
     /// Name `pane_id` in the tickets this transaction admits.
@@ -567,27 +562,56 @@ impl KittyClipboardTx {
             // When: finish_current fails, the last stream ended mid-group and the write is `EINVAL`.
             return KittyStep::Reply(open.reply.status(KittyClipboardStatus::Einval));
         }
-        let OpenWrite { reply, entries, aliases, lease, .. } = open;
+        let OpenWrite { reply, entries, aliases, mut lease, .. } = open;
         let primary = reply.location == KittyClipboardLocation::Primary;
-        let Some(text) =
-            take_text(entries, &aliases).filter(|_| !primary || cfg!(target_os = "linux"))
-        else {
-            // When: take_text finds no text, or primary is set off Linux, the commit is `ENOSYS`.
+        // PRIMARY holds text only, and exists only on Linux.
+        let text_only: fn(&NativeFormat) -> bool = |format| *format == NativeFormat::Text;
+        let holds = if primary { text_only } else { self.holds };
+        if primary && !cfg!(target_os = "linux") {
+            // When: primary is set off Linux, there is no PRIMARY and the commit is `ENOSYS`.
             return KittyStep::Reply(reply.status(KittyClipboardStatus::Enosys));
+        }
+        let entries = entries.into_iter().map(|entry| (entry.mime, entry.data)).collect();
+        let offer = match plan(entries, &aliases, &holds) {
+            OfferPlan::Offer(offer) => Some(offer),
+            OfferPlan::Clear => None,
+            OfferPlan::Unavailable => {
+                // When: plan is Unavailable, every name was omitted and the commit is `ENOSYS`.
+                return KittyStep::Reply(reply.status(KittyClipboardStatus::Enosys));
+            }
         };
+        if let Some(omitted) = offer.as_ref().map(NativeOffer::omitted).filter(|count| *count > 0) {
+            tracing::debug!(omitted, "OSC 5522 write omits types this clipboard cannot hold");
+        }
         if self.staging.write_policy() == Osc52Policy::Deny {
             // When: write_policy is Deny at the commit, the write is refused `EPERM`.
             return KittyStep::Reply(reply.status(KittyClipboardStatus::Eperm));
         }
         let targets = ClipTargets { clipboard: !primary, primary };
-        let job = match ClipboardJob::kitty(&self.staging, text, lease, targets, reply.clone()) {
+        let job = match offer {
+            Some(offer) if !offer.is_text_only() => {
+                // When: offer holds more than text, its buffers and native copies are reserved
+                // before it is posted, so a publish never allocates past the budget.
+                if !size_lease(&mut lease, offer.reserved_bytes()) {
+                    // When: size_lease cannot cover offer.reserved_bytes, the write is busy.
+                    return KittyStep::Reply(reply.status(KittyClipboardStatus::Ebusy));
+                }
+                ClipboardJob::kitty_offer(&self.staging, offer, lease, targets, reply.clone())
+            }
+            offer => {
+                // Text alone, or a clear, takes the text path as before.
+                let text = offer.map(NativeOffer::into_text).unwrap_or_default();
+                ClipboardJob::kitty(&self.staging, text, lease, targets, reply.clone())
+            }
+        };
+        let job = match job {
             Ok(job) => job,
             Err(Osc52Refusal::Busy) => {
                 // When: the refusal is Busy, the budget or the program slots are full.
                 return KittyStep::Reply(reply.status(KittyClipboardStatus::Ebusy));
             }
             Err(_) => {
-                // When: any other refusal is returned, the text could not be staged.
+                // When: job is any other refusal, its text could not be staged.
                 return KittyStep::Reply(reply.status(KittyClipboardStatus::Eio));
             }
         };

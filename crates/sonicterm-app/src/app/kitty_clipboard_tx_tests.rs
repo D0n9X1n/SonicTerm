@@ -14,7 +14,9 @@ struct Rig {
 fn rig_with(budget_bytes: usize, limit_bytes: usize, policy: Osc52Policy) -> Rig {
     let staging = ClipboardStaging::with_budget(budget_bytes, limit_bytes);
     staging.set_write_policy(policy);
-    let tx = KittyClipboardTx::new(staging.clone(), Arc::default());
+    let mut tx = KittyClipboardTx::new(staging.clone(), Arc::default());
+    // Text only, so every platform answers these tests alike; the offer tests widen it.
+    tx.set_holds(text_only);
     let parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, CaptureStagingPool::new());
     Rig { parser, tx, staging }
 }
@@ -477,4 +479,123 @@ fn worker_loss_answers_eio_on_source_pane() {
     }
     assert_eq!(*delivered.lock().unwrap(), vec![(9, status("EIO", "lost").into_bytes())]);
     assert_eq!(rig.staging.reserved_bytes(), 0, "the lost job's lease was released");
+}
+
+/// A clipboard that holds text only.
+fn text_only(format: &NativeFormat) -> bool {
+    *format == NativeFormat::Text
+}
+
+/// A clipboard that holds text and HTML.
+fn text_and_html(format: &NativeFormat) -> bool {
+    matches!(format, NativeFormat::Text | NativeFormat::Html)
+}
+
+/// The job `body` posted.
+fn posted_job(rig: &mut Rig, body: &str) -> ClipboardJob {
+    match rig.send(body).pop() {
+        Some(KittyStep::Post(job)) => job,
+        other => panic!("expected a posted write for {body:?}, got {other:?}"),
+    }
+}
+
+/// Contract: where the clipboard holds HTML, a commit of HTML beside text posts one job carrying
+/// both representations in the commit's order, and the type it cannot hold is omitted.
+#[test]
+fn html_beside_text_posts_one_offer() {
+    let mut rig = rig();
+    rig.tx.set_holds(text_and_html);
+    rig.send("type=write:id=m");
+    rig.data("text/html", &b64("<b>x</b>"));
+    rig.data("image/png", &b64("png"));
+    rig.data("text/plain", &b64("x"));
+    let job = posted_job(&mut rig, "type=wdata");
+    let offer = job.offer.as_ref().expect("a multi-representation offer");
+    let kept: Vec<_> =
+        offer.representations().map(|(format, bytes)| (format.clone(), bytes)).collect();
+    assert_eq!(kept, [(NativeFormat::Html, &b"<b>x</b>"[..]), (NativeFormat::Text, &b"x"[..])]);
+    assert_eq!(offer.omitted(), 1, "image/png is omitted");
+    assert!(job.lease.bytes() >= offer.reserved_bytes(), "the native copies are reserved");
+}
+
+/// Contract: the X11 text atoms name text, so a write of `UTF8_STRING` alone is written as text.
+#[test]
+fn utf8_string_alias_is_text() {
+    let mut rig = rig();
+    rig.send("type=write");
+    rig.data("UTF8_STRING", &b64("atom"));
+    assert_eq!(rig.posted("type=wdata"), "atom");
+}
+
+/// Contract: an offer's native copies are reserved before it is posted: when the budget cannot
+/// cover them the commit answers `EBUSY` and releases everything, while the same bytes as text
+/// alone still fit.
+#[test]
+fn native_copies_reserved_or_ebusy() {
+    let payload = "y".repeat(64);
+    for (holds, posts) in [(text_and_html as fn(&NativeFormat) -> bool, false), (text_only, true)] {
+        let mut rig = rig_with(160, 1 << 16, Osc52Policy::Allow);
+        rig.tx.set_holds(holds);
+        rig.send("type=write:id=b");
+        rig.data("text/plain", &b64(&payload));
+        rig.data("text/html", &b64(&payload));
+        match rig.send("type=wdata").pop() {
+            Some(KittyStep::Post(job)) => assert!(posts, "{}", job.text.len()),
+            Some(KittyStep::Reply(bytes)) => {
+                assert!(!posts);
+                assert_eq!(String::from_utf8(bytes).unwrap(), status("EBUSY", "b"));
+                assert_eq!(rig.staging.reserved_bytes(), 0, "nothing stays reserved");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}
+
+/// Contract: the per-commit limit is on the sum of every type, so two types each under the limit
+/// answer `EFBIG` together.
+#[test]
+fn aggregate_limit_efbig() {
+    let mut rig = rig_with(1 << 20, 8, Osc52Policy::Allow);
+    rig.tx.set_holds(text_and_html);
+    rig.send("type=write:id=g");
+    rig.data("text/plain", &b64("12345"));
+    let reply = rig.reply(&format!("type=wdata:mime={};{}", b64("text/html"), b64("12345")));
+    assert_eq!(reply, status("EFBIG", "g"));
+    assert_eq!(rig.staging.reserved_bytes(), 0);
+}
+
+/// Contract: an offer job routed through the event loop answers `DONE` only when the publish took
+/// every representation and `EIO` when it failed, on its source pane; the test seam takes the
+/// offer's text so no system clipboard is touched.
+#[test]
+fn offer_job_answers_done_or_eio_never_partial() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    for (fail, outcome, reply) in [
+        (false, super::super::event_loop::ClipWriteOutcome::Written, "DONE"),
+        (true, super::super::event_loop::ClipWriteOutcome::Failed, "EIO"),
+    ] {
+        let mut rig = rig();
+        rig.tx.set_holds(text_and_html);
+        rig.send("type=write:id=o");
+        rig.data("text/plain", &b64("both"));
+        rig.data("text/html", &b64("<i>both</i>"));
+        let job = posted_job(&mut rig, "type=wdata");
+        assert!(job.offer.is_some(), "an offer job");
+        let mut app =
+            super::super::App::new(Theme::default(), Config::default(), Keymap::default());
+        app.config.terminal.osc52 = Osc52Policy::Allow;
+        app.testing.test_clipboard_text = Some(String::new());
+        app.testing.test_clipboard_write_failure = fail;
+        let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = delivered.clone();
+        app.clip_state.reads.port = Some(Box::new(move |pane_id, reply| {
+            sink.lock().unwrap().push((pane_id, reply.bytes().to_vec()));
+            Ok(())
+        }));
+        assert_eq!(app.submit_program_clipboard(9, job, false), Some(outcome));
+        assert_eq!(*delivered.lock().unwrap(), vec![(9, status(reply, "o").into_bytes())]);
+        let expected = if fail { "" } else { "both" };
+        assert_eq!(app.testing.test_clipboard_text.as_deref(), Some(expected));
+        assert_eq!(rig.staging.reserved_bytes(), 0, "the lease ends with the publish");
+    }
 }

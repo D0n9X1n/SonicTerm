@@ -1,0 +1,277 @@
+//! OSC 5522 representations on the native clipboard: which MIME names a platform can hold, and
+//! one atomic publish of every representation a commit kept.
+//!
+//! A commit first plans its offer without touching the clipboard: every staged name and alias is
+//! mapped to a [`NativeFormat`], and a name that is not a valid MIME name, has no native mapping,
+//! or that the platform cannot hold is omitted. [`publish_offer`] then stages every native buffer
+//! before it publishes them in one operation, so a failure in any representation leaves the
+//! previous clipboard untouched and never reports success.
+
+/// A native clipboard representation an OSC 5522 MIME name maps to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::app) enum NativeFormat {
+    /// `text/plain` and its aliases.
+    Text,
+    /// `text/html`.
+    Html,
+    /// `image/png`.
+    Png,
+    /// `text/uri-list`.
+    UriList,
+    /// Any other valid MIME name, held under that name where the platform allows it.
+    Custom(String),
+}
+
+/// Most bytes of a MIME name (RFC 6838 restricts each part to 127 characters).
+const MAX_MIME_NAME_BYTES: usize = 255;
+
+/// The native format `name` maps to; `None` when it is not a valid MIME name or text alias.
+pub(in crate::app) fn native_format(name: &str) -> Option<NativeFormat> {
+    // The X11 text atoms are not MIME names, but programs offer text under them.
+    if matches!(name, "UTF8_STRING" | "TEXT" | "STRING") || super::kitty_clipboard_tx::is_text(name)
+    {
+        // When: name is plain text or a text alias, it is the one text representation.
+        return Some(NativeFormat::Text);
+    }
+    match name {
+        "text/html" => Some(NativeFormat::Html),
+        "image/png" => Some(NativeFormat::Png),
+        "text/uri-list" => Some(NativeFormat::UriList),
+        _ => valid_mime(name).then(|| NativeFormat::Custom(name.to_owned())),
+    }
+}
+
+/// Whether `name` is an RFC 6838 `type/subtype` name of restricted-name characters.
+fn valid_mime(name: &str) -> bool {
+    /// A restricted name: an alphanumeric first, then alphanumerics and `!#$&-^_.+`, 127 at most.
+    fn restricted(part: &str) -> bool {
+        let mut bytes = part.bytes();
+        bytes.next().is_some_and(|first| first.is_ascii_alphanumeric())
+            && part.len() <= 127
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || b"!#$&-^_.+".contains(&byte))
+    }
+    name.len() <= MAX_MIME_NAME_BYTES
+        && name
+            .split_once('/')
+            .is_some_and(|(kind, subtype)| restricted(kind) && restricted(subtype))
+}
+
+/// Every representation a commit kept, over the staged buffers they share.
+pub(in crate::app) struct NativeOffer {
+    /// The staged buffers still referenced; an alias shares its target's buffer.
+    entries: Vec<Vec<u8>>,
+    /// Each kept format, in the commit's order, with the index of its buffer.
+    representations: Vec<(NativeFormat, usize)>,
+    /// Names that were invalid, unmapped or not holdable here.
+    omitted: usize,
+}
+
+impl std::fmt::Debug for NativeOffer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Only formats and lengths are printed, so an offer can be logged without its data.
+        let kept: Vec<_> =
+            self.representations().map(|(format, bytes)| (format, bytes.len())).collect();
+        formatter
+            .debug_struct("NativeOffer")
+            .field("representations", &kept)
+            .field("omitted", &self.omitted)
+            .finish()
+    }
+}
+
+impl NativeOffer {
+    /// How many names were omitted.
+    pub(in crate::app) fn omitted(&self) -> usize {
+        self.omitted
+    }
+
+    /// The text representation's bytes, if one was kept.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(in crate::app) fn text(&self) -> Option<&[u8]> {
+        self.representations()
+            .find(|(format, _)| **format == NativeFormat::Text)
+            .map(|(_, bytes)| bytes)
+    }
+
+    /// Every kept format with its bytes, in the commit's order.
+    pub(in crate::app) fn representations(&self) -> impl Iterator<Item = (&NativeFormat, &[u8])> {
+        self.representations.iter().map(|(format, index)| (format, self.entries[*index].as_slice()))
+    }
+
+    /// The bytes every representation publishes, counting a shared buffer once per format.
+    pub(in crate::app) fn byte_len(&self) -> usize {
+        self.representations().map(|(_, bytes)| bytes.len()).sum()
+    }
+
+    /// The staging this offer needs: its kept buffers plus one native copy per representation.
+    pub(in crate::app) fn reserved_bytes(&self) -> usize {
+        let kept: usize = self.entries.iter().map(Vec::capacity).sum();
+        let names: usize =
+            self.representations.iter().map(|(format, _)| format_name_bytes(format)).sum();
+        kept + names + self.byte_len()
+    }
+
+    /// Whether text is the only representation, which the text path writes as before.
+    pub(in crate::app) fn is_text_only(&self) -> bool {
+        matches!(self.representations.as_slice(), [(NativeFormat::Text, _)])
+    }
+
+    /// The text representation's buffer; empty when none was kept.
+    pub(in crate::app) fn into_text(mut self) -> Vec<u8> {
+        let index = self.representations.iter().find(|(format, _)| *format == NativeFormat::Text);
+        match index.map(|(_, index)| *index) {
+            Some(index) => self.entries.swap_remove(index),
+            None => Vec::new(),
+        }
+    }
+}
+
+/// What a commit's representations plan to do to the clipboard.
+#[derive(Debug)]
+pub(in crate::app) enum OfferPlan {
+    /// Nothing was staged: the clipboard is cleared.
+    Clear,
+    /// Every name was omitted: the platform can hold none of them.
+    Unavailable,
+    /// At least one representation is published.
+    Offer(NativeOffer),
+}
+
+/// Plan the offer `entries` (name and decoded bytes, in staging order) and `aliases` (`(alias,
+/// target)` in arrival order) give, keeping each format the platform `holds` once, first first.
+pub(in crate::app) fn plan(
+    entries: Vec<(String, Vec<u8>)>,
+    aliases: &[(String, String)],
+    holds: &dyn Fn(&NativeFormat) -> bool,
+) -> OfferPlan {
+    if entries.is_empty() {
+        // When: entries is empty, the write staged nothing and the commit clears the clipboard.
+        return OfferPlan::Clear;
+    }
+    // Names map to entry indices, so resolving aliases copies no data.
+    let mut names: Vec<(&str, usize)> =
+        entries.iter().enumerate().map(|(index, (name, _))| (name.as_str(), index)).collect();
+    for (alias, target) in aliases {
+        let Some(index) = names.iter().find(|(name, _)| name == target).map(|(_, index)| *index)
+        else {
+            // When: the alias's target has no representation, the alias is dropped.
+            continue;
+        };
+        match names.iter_mut().find(|(name, _)| name == alias) {
+            Some(existing) => existing.1 = index,
+            None => names.push((alias.as_str(), index)),
+        }
+    }
+    let mut omitted = 0;
+    let mut representations: Vec<(NativeFormat, usize)> = Vec::new();
+    for (name, index) in names {
+        let Some(format) = native_format(name).filter(|format| holds(format)) else {
+            // When: native_format gives no format holds accepts, the name is omitted.
+            omitted += 1;
+            continue;
+        };
+        if !representations.iter().any(|(kept, _)| *kept == format) {
+            // The first name of a format keeps it; a later name for the same format adds nothing.
+            representations.push((format, index));
+        }
+    }
+    if representations.is_empty() {
+        // When: representations is empty, every name was omitted and nothing can be published.
+        return OfferPlan::Unavailable;
+    }
+    // Buffers no kept format references are dropped here, so they leave the reservation.
+    let mut kept = Vec::new();
+    let mut remap = vec![None; entries.len()];
+    for (index, (_, bytes)) in entries.into_iter().enumerate() {
+        if representations.iter().any(|(_, used)| *used == index) {
+            remap[index] = Some(kept.len());
+            kept.push(bytes);
+        }
+    }
+    for (_, index) in &mut representations {
+        *index = remap[*index].expect("a kept representation's buffer is kept");
+    }
+    OfferPlan::Offer(NativeOffer { entries: kept, representations, omitted })
+}
+
+/// The bytes a format's native name takes beside its buffer.
+fn format_name_bytes(format: &NativeFormat) -> usize {
+    match format {
+        NativeFormat::Custom(name) => name.len(),
+        _ => 0,
+    }
+}
+
+/// Whether this platform's clipboard can hold `format`: text everywhere; on macOS also HTML,
+/// PNG and any MIME name with a uniform type. It may run on any thread.
+pub(in crate::app) fn platform_holds(format: &NativeFormat) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::holds(format)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        *format == NativeFormat::Text
+    }
+}
+
+/// Publish `offer` to the system clipboard in one operation on the event-loop thread; true only
+/// when it took every representation.
+pub(in crate::app) fn publish_native(offer: &NativeOffer) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        objc2::rc::autoreleasepool(|_| publish_offer(&mut macos::Pasteboard::general(), offer))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        publish_offer(&mut TextOnly, offer)
+    }
+}
+
+/// Where only text is held no offer is planned; one that arrives fails closed, untouched.
+#[cfg(not(target_os = "macos"))]
+struct TextOnly;
+
+#[cfg(not(target_os = "macos"))]
+impl OfferBackend for TextOnly {
+    fn stage(&mut self, _format: &NativeFormat, _bytes: &[u8]) -> bool {
+        false
+    }
+
+    fn publish(&mut self) -> bool {
+        false
+    }
+
+    fn discard(&mut self) {}
+}
+
+/// The native calls one publish makes; tests substitute a fake.
+pub(in crate::app) trait OfferBackend {
+    /// Allocate and fill the native buffer for `format`; false when it cannot be staged.
+    fn stage(&mut self, format: &NativeFormat, bytes: &[u8]) -> bool;
+    /// Replace the clipboard with every staged buffer in one operation; true when it took them all.
+    fn publish(&mut self) -> bool;
+    /// Free every staged buffer without touching the clipboard.
+    fn discard(&mut self);
+}
+
+/// Stage every representation of `offer`, then publish them at once: true only when every one was
+/// published. A staging failure discards the rest and leaves the clipboard untouched.
+pub(in crate::app) fn publish_offer(backend: &mut dyn OfferBackend, offer: &NativeOffer) -> bool {
+    for (format, bytes) in offer.representations() {
+        if !backend.stage(format, bytes) {
+            // When: backend.stage fails, nothing was published, so the previous clipboard stays.
+            backend.discard();
+            return false;
+        }
+    }
+    backend.publish()
+}
+
+#[cfg(target_os = "macos")]
+#[path = "kitty_clipboard_offer_macos.rs"]
+mod macos;
+
+#[cfg(test)]
+#[path = "kitty_clipboard_offer_tests.rs"]
+mod kitty_clipboard_offer_tests;

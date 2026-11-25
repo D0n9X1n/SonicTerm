@@ -54,6 +54,33 @@ const DECRQM_5522: &str = "\x1b[?5522h\x1b[?5522$p";
 /// The exact reply to [`DECRQM_5522`]: mode 5522 is set (`1`).
 const DECRQM_5522_REPLY: &[u8] = b"\x1b[?5522;1$y";
 
+/// An OSC 5522 write of `text/html`, `image/png`, a custom MIME type and `text/plain`; Windows
+/// holds text only, so the other types are omitted and the write is `DONE`.
+const KITTY_MULTI_WRITE: &[u8] = b"\x1b]5522;type=write:id=multi\x07\
+\x1b]5522;type=wdata:mime=dGV4dC9odG1s;PGI+Zml4dHVyZTwvYj4=\x1b\\\
+\x1b]5522;type=wdata:mime=aW1hZ2UvcG5n;UE5H\x1b\\\
+\x1b]5522;type=wdata:mime=YXBwbGljYXRpb24veC1zb25pY3Rlcm0tdGVzdA==;Y3VzdG9t\x1b\\\
+\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\\
+\x1b]5522;type=wdata\x07";
+
+/// The exact reply to [`KITTY_MULTI_WRITE`].
+const KITTY_MULTI_WRITE_DONE: &[u8] = b"\x1b]5522;type=write:status=DONE:id=multi\x07";
+
+/// The name of the multi-type OSC 5522 write row.
+const KITTY_MULTI_WRITE_CASE: &str = "osc5522-write-multi";
+
+/// An OSC 5522 read of `text/html`, `image/png`, a custom MIME type and `text/plain`.
+const KITTY_MULTI_READ: &str = "\x1b]5522;type=read:id=m;\
+dGV4dC9odG1sIGltYWdlL3BuZyBhcHBsaWNhdGlvbi94LXNvbmljdGVybS10ZXN0IHRleHQvcGxhaW4=\x1b\\";
+
+/// The exact reply to [`KITTY_MULTI_READ`]: only the `text/plain` the fake clipboard holds is read.
+const KITTY_MULTI_READ_REPLY: &[u8] = b"\x1b]5522;type=read:status=OK:id=m\x1b\\\
+\x1b]5522;type=read:status=DATA:id=m:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\\
+\x1b]5522;type=read:status=DONE:id=m\x1b\\";
+
+/// The name of the multi-type OSC 5522 read row.
+const KITTY_MULTI_READ_CASE: &str = "osc5522-read-multi";
+
 /// The name of the DECRQM 5522 row, whose expectation is [`DECRQM_5522_REPLY`].
 const DECRQM_5522_CASE: &str = "decrqm-5522";
 
@@ -85,6 +112,14 @@ impl Engine for AppEngine {
             // When: the case is the OSC 5522 read, its OK/DATA/DONE bytes are pinned.
             return KITTY_READ_REPLY.to_vec();
         }
+        if case.name == KITTY_MULTI_WRITE_CASE {
+            // When: the case is the multi-type OSC 5522 write, `DONE` is pinned.
+            return KITTY_MULTI_WRITE_DONE.to_vec();
+        }
+        if case.name == KITTY_MULTI_READ_CASE {
+            // When: the case is the multi-type OSC 5522 read, its text-only reply is pinned.
+            return KITTY_MULTI_READ_REPLY.to_vec();
+        }
         if case.name == DECRQM_5522_CASE {
             // When: the case is the DECRQM 5522 query, the advertised `1` is pinned.
             return DECRQM_5522_REPLY.to_vec();
@@ -114,6 +149,8 @@ fn cases() -> Vec<Case> {
         Case::new(KITTY_READ_CASE, "\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\")
             .input(reply())
             .input_required(),
+        Case::new(KITTY_MULTI_WRITE_CASE, KITTY_MULTI_WRITE).input(reply()).input_required(),
+        Case::new(KITTY_MULTI_READ_CASE, KITTY_MULTI_READ).input(reply()).input_required(),
         // The trailer resets the mode, so the live pane's later rows paste as before.
         Case::new(DECRQM_5522_CASE, DECRQM_5522)
             .input(reply())

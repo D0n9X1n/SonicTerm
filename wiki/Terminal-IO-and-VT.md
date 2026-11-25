@@ -402,18 +402,28 @@ limit is `clipboard_write_limit_bytes`, read when the write opens: past it the w
 `write`. Statuses echo the opening `write`'s sanitized id and `loc=primary`, and end with the
 answered packet's terminator.
 
-At commit the aliases are applied in order over every staged representation, then the first
-`text/plain` one becomes the clipboard text, so an alias that names `text/plain` for another
-type still yields text. A commit with nothing staged clears the clipboard. Nothing holdable,
-or `loc=primary` off Linux, answers `ENOSYS`. The `osc52` policy is checked again: `deny`
+At commit the aliases are applied in order over every staged representation, then every name is
+mapped to a native format (see [Platform Integration](Platform-Integration)): `text/plain`,
+`text/plain;…`, `UTF8_STRING`, `TEXT` and `STRING` are text; `text/html`, `image/png` and
+`text/uri-list` are well known; any other RFC 6838 `type/subtype` name of at most 255 bytes is a
+custom type. A name that is not a MIME name, or that the platform cannot hold, is omitted, as
+Ghostty does. Each format is kept once and its first name wins, so an alias that names
+`text/plain` for another type still yields text. A commit with nothing staged clears the
+clipboard. When every name is omitted, or for `loc=primary` off Linux (PRIMARY holds text only),
+it answers `ENOSYS`. Text alone takes the text path below. Any other kept type forms one offer
+with the rest: its buffers and one native copy of each are reserved from the staging budget
+before it is posted (`EBUSY` when they do not fit), every native buffer is staged before the
+clipboard is touched, and all are published in one operation. A staging or publish failure
+answers `EIO` and a staging failure keeps the previous clipboard; `DONE` means every kept
+representation was published. The `osc52` policy is checked again: `deny`
 answers `EPERM`, `ask` opens the same consent page as an OSC 52 write, and a refusal there
 answers `EPERM`. The write then follows the OSC 52 write path to the clipboard worker, and the
 event loop answers `DONE`, `EIO` (native failure) or `EPERM` on the source pane's PTY. A write
 the clipboard worker held when it stopped answers `EIO`. An asked write whose consent ends without
 an answer (its page lost, its pane moved, the policy changed) answers `EPERM` while the same PTY
 and command still own the pane; after a PTY or command change, or once the pane closed, nothing
-is sent, because another program would read it as input. Other representations are released at
-the commit.
+is sent, because another program would read it as input. Omitted representations are released
+at the commit.
 
 An open write ends `EBUSY` 30 s after its last packet or 10 min after it opened, and `EPERM`
 when the policy becomes `deny`; the VT worker wakes for both even while the child prints

@@ -340,6 +340,7 @@ pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
 mod shared_gpu;
 pub(crate) use shared_gpu::{font_fallback_waker, gpu_device_state_waker};
 mod clipboard_worker;
+mod kitty_clipboard_offer;
 mod kitty_clipboard_read;
 mod kitty_clipboard_tx;
 mod osc52_read;

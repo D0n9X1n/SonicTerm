@@ -556,6 +556,11 @@ impl super::App {
             return Some(ClipWriteOutcome::Denied);
         }
         self.drain_clipboard_completions();
+        if job.offer.is_some() {
+            // When: the job carries an offer, it is published here in one native operation. Only
+            // macOS holds more than text, and it has no worker, so no posted write is overtaken.
+            return Some(self.publish_offer_inline(job));
+        }
         self.ensure_clipboard_worker();
         if self.clip_state.domain.has_worker() {
             // When: has_worker, every program write goes to it, in order with user copies; a
@@ -571,6 +576,30 @@ impl super::App {
         let epoch = live_epoch.load(Ordering::SeqCst);
         let (committed, _) = commit_program(&mut InlineSink(self), job, epoch, &live_epoch, None);
         Some(self.settle_program(committed))
+    }
+
+    /// Publish an offer job on this thread: refused too large past the inline limit, else every
+    /// representation in one native operation; its lease and slot end when the call returns.
+    fn publish_offer_inline(&mut self, job: ClipboardJob) -> ClipWriteOutcome {
+        let offer = job.offer.as_ref().expect("an offer job");
+        if !self.may_write_inline(offer.byte_len(), false) {
+            // When: may_write_inline refuses the offer's size, the write is refused unpublished.
+            return ClipWriteOutcome::TooLarge;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if self.testing.test_clipboard_write_failure || self.test_clipboard_installed() {
+            // When: test_clipboard_write_failure or test_clipboard_installed is set, the test
+            // buffer takes the offer's text, never the clipboard.
+            let text = String::from_utf8_lossy(offer.text().unwrap_or_default()).into_owned();
+            let written = self.write_clipboard_inline(&text, job.targets);
+            return if written { ClipWriteOutcome::Written } else { ClipWriteOutcome::Failed };
+        }
+        if super::kitty_clipboard_offer::publish_native(offer) {
+            ClipWriteOutcome::Written
+        } else {
+            // When: publish_native did not take every representation, the write failed.
+            ClipWriteOutcome::Failed
+        }
     }
 
     /// Keep a committed write's retained lease and return its outcome.

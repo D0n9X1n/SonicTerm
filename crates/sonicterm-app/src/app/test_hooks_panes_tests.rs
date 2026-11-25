@@ -72,3 +72,31 @@ fn clipboard_reply_pane_answers_a_kitty_read_exactly() {
     let reply = pane.replies(b"\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\");
     assert_eq!(String::from_utf8(reply).unwrap(), expected);
 }
+
+/// Contract: the F-ConPTY app smoke's multi-type OSC 5522 write (`text/html`, `image/png`, a custom
+/// MIME type and `text/plain`) settles `DONE` with the opening id: a type the clipboard cannot hold
+/// is omitted, never an error, so the smoke's expected reply is the bytes this pins.
+#[test]
+fn clipboard_reply_pane_answers_a_multi_type_kitty_write_done() {
+    let write = b"\x1b]5522;type=write:id=multi\x07\
+\x1b]5522;type=wdata:mime=dGV4dC9odG1s;PGI+Zml4dHVyZTwvYj4=\x1b\\\
+\x1b]5522;type=wdata:mime=aW1hZ2UvcG5n;UE5H\x1b\\\
+\x1b]5522;type=wdata:mime=YXBwbGljYXRpb24veC1zb25pY3Rlcm0tdGVzdA==;Y3VzdG9t\x1b\\\
+\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\\
+\x1b]5522;type=wdata\x07";
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    assert_eq!(pane.replies(write), b"\x1b]5522;type=write:status=DONE:id=multi\x07".to_vec());
+}
+
+/// Contract: the F-ConPTY app smoke's multi-type OSC 5522 read answers OK, one DATA packet for the
+/// `text/plain` it holds and DONE; the other requested types are omitted, as reads carry text only.
+#[test]
+fn clipboard_reply_pane_answers_a_multi_type_kitty_read_with_text() {
+    let mut pane = App::__test_clipboard_reply_pane(80, 24, "fixture");
+    let request = b"\x1b]5522;type=read:id=m;\
+dGV4dC9odG1sIGltYWdlL3BuZyBhcHBsaWNhdGlvbi94LXNvbmljdGVybS10ZXN0IHRleHQvcGxhaW4=\x1b\\";
+    let expected = "\x1b]5522;type=read:status=OK:id=m\x1b\\\
+                    \x1b]5522;type=read:status=DATA:id=m:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\\
+                    \x1b]5522;type=read:status=DONE:id=m\x1b\\";
+    assert_eq!(String::from_utf8(pane.replies(request)).unwrap(), expected);
+}

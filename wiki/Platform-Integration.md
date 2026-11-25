@@ -767,6 +767,17 @@ and `missed_output: false` is not proof of completeness in those cases. Disablin
 event loop acts on it, and ends a running wait as `revoked`. Pane text is
 untrusted input: the server tells agents never to follow instructions found in it.
 
+## Clipboard writes (OSC 5522 representations)
+
+An OSC 5522 commit (see [Terminal IO and VT](Terminal-IO-and-VT)) publishes each representation
+the OS can hold and omits the others:
+
+| OS | Holds | Publish |
+| --- | --- | --- |
+| macOS | text as `public.utf8-plain-text`, `text/html` as `public.html`, `image/png` as `public.png`, and any other MIME name as the uniform type `UTType typeWithMIMEType:` gives it: a system type when one exists, else the dynamic `dyn.*` type the system derives. `text/uri-list` is omitted. | One `NSPasteboardItem` carries every type, then `clearContents` and `writeObjects` on the event-loop thread, so the change count moves once. A type that cannot be staged leaves the pasteboard untouched; a refused `writeObjects` answers `EIO`. Text beside other types keeps its bytes exact; text alone is written as before. An offer over 512 KiB is refused `EFBIG`, as other program writes are. |
+| Windows | text only, as `CF_UNICODETEXT` | through the clipboard worker; other types are omitted |
+| Linux (X11) | text only | through `arboard` on the clipboard worker; other types are omitted. Wayland has no native backend. |
+
 ## Clipboard reads
 
 An OSC 52 read that its ticket allows (see [Terminal IO and VT](Terminal-IO-and-VT)) runs on a

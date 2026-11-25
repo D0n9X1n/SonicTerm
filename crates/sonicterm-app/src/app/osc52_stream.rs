@@ -550,6 +550,8 @@ pub(in crate::app) struct ClipboardJob {
     _slot: ProgramSlot,
     /// Where an OSC 5522 write's status goes once it settles; `None` for OSC 52.
     pub(in crate::app) kitty: Option<super::kitty_clipboard_tx::KittyReply>,
+    /// An OSC 5522 write's representations beside text, published together; `text` is then empty.
+    pub(in crate::app) offer: Option<super::kitty_clipboard_offer::NativeOffer>,
 }
 
 impl ClipboardJob {
@@ -561,7 +563,7 @@ impl ClipboardJob {
         assert!(lease.grow_to(text.len() + native_clipboard_bytes(text)), "test staging budget");
         let slot = staging.take_program_slot().expect("a free program slot");
         let targets = ClipTargets { clipboard: true, primary: false };
-        Self { text: text.to_owned(), targets, lease, _slot: slot, kitty: None }
+        Self { text: text.to_owned(), targets, lease, _slot: slot, kitty: None, offer: None }
     }
 
     /// The write an OSC 5522 commit resolved: `bytes` become text with `lease` grown first, and a
@@ -575,7 +577,20 @@ impl ClipboardJob {
     ) -> Result<Self, Osc52Refusal> {
         let (text, lease) = into_text(bytes, lease)?;
         let slot = staging.take_program_slot().ok_or(Osc52Refusal::Busy)?;
-        Ok(Self { text, targets, lease, _slot: slot, kitty: Some(reply) })
+        Ok(Self { text, targets, lease, _slot: slot, kitty: Some(reply), offer: None })
+    }
+
+    /// The multi-representation write an OSC 5522 commit planned, `lease` already covering it.
+    pub(in crate::app) fn kitty_offer(
+        staging: &Arc<ClipboardStaging>,
+        offer: super::kitty_clipboard_offer::NativeOffer,
+        lease: ClipLease,
+        targets: ClipTargets,
+        reply: super::kitty_clipboard_tx::KittyReply,
+    ) -> Result<Self, Osc52Refusal> {
+        let slot = staging.take_program_slot().ok_or(Osc52Refusal::Busy)?;
+        let (text, kitty, offer) = (String::new(), Some(reply), Some(offer));
+        Ok(Self { text, targets, lease, _slot: slot, kitty, offer })
     }
 }
 
@@ -852,7 +867,7 @@ impl Osc52Intake {
         let (text, lease) = into_text(bytes, lease)?;
         // The slot is taken here, in the reader thread, before the write is posted.
         let slot = self.staging.take_program_slot().ok_or(Osc52Refusal::Busy)?;
-        Ok(ClipboardJob { text, targets, lease, _slot: slot, kitty: None })
+        Ok(ClipboardJob { text, targets, lease, _slot: slot, kitty: None, offer: None })
     }
 
     /// Match the parser's open stream after a section: start tracking a stream that opened with

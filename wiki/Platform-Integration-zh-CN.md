@@ -575,6 +575,16 @@ socket 或发现记录；被强制终止的 SonicTerm 会留下它们，下次�
 关闭服务器、修改 `control`、断开连接或超过 10 s 截止时间，都会在事件循环执行前丢弃已排队的请求，并以
 `revoked` 结束正在进行的等待。窗格文本是不可信输入：服务器告知 agent 从不执行其中的指令。
 
+## 剪贴板写入（OSC 5522 表示）
+
+OSC 5522 提交（见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）发布系统能保存的每种表示，省略其余表示：
+
+| 系统 | 保存 | 发布 |
+| --- | --- | --- |
+| macOS | 文本为 `public.utf8-plain-text`，`text/html` 为 `public.html`，`image/png` 为 `public.png`，其他 MIME 名称使用 `UTType typeWithMIMEType:` 给出的统一类型：有系统类型时用系统类型，否则用系统派生的动态 `dyn.*` 类型。`text/uri-list` 被省略。 | 一个 `NSPasteboardItem` 携带所有类型，然后在事件循环线程上调用 `clearContents` 和 `writeObjects`，因此变更计数只增加一次。无法暂存的类型不会改动剪贴板；`writeObjects` 被拒绝时回复 `EIO`。与其他类型并存的文本保持字节不变；只有文本时照旧写入。超过 512 KiB 的提供与其他程序写入一样以 `EFBIG` 拒绝。 |
+| Windows | 只保存文本，格式为 `CF_UNICODETEXT` | 经剪贴板工作线程；其他类型被省略 |
+| Linux（X11） | 只保存文本 | 经剪贴板工作线程上的 `arboard`；其他类型被省略。Wayland 没有原生后端。 |
+
 ## 剪贴板读取
 
 票据允许的 OSC 52 读取（见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）在一次性的读取线程上运行，

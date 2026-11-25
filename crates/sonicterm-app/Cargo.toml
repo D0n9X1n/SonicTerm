@@ -71,8 +71,8 @@ objc2 = "0.6"
 # The integrated titlebar reads the traffic lights' frames, the current event's click count and
 # the system's titlebar double-click preference.
 # OSC 52 clipboard reads measure the pasteboard's string data before copying it.
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSRunLoop", "NSString", "NSUserDefaults", "NSGeometry", "NSBundle", "NSError", "NSData"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSView", "NSWindow", "NSButton", "NSControl", "NSEvent", "NSApplication", "NSPasteboard", "objc2-quartz-core"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSObject", "NSRunLoop", "NSString", "NSUserDefaults", "NSGeometry", "NSBundle", "NSError", "NSData"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSView", "NSWindow", "NSButton", "NSControl", "NSEvent", "NSApplication", "NSPasteboard", "NSPasteboardItem", "objc2-quartz-core"] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CABase", "CADisplayLink", "CAFrameRateRange", "objc2-core-foundation"] }
 # Desktop notifications through the user notification center, only from a bundled app.
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger"] }
