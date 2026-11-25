@@ -296,14 +296,11 @@ fn a_covered_atlas_shrinks_only_when_grown_and_settled() {
 /// ledger.
 #[test]
 fn the_shrink_invalidates_the_old_atlas_before_rebuilding_its_texture() {
-    let lifecycle = include_str!("atlas_lifecycle.rs");
-    let body = lifecycle
-        .split_once("fn shrink_glyph_atlas_to_start(")
-        .expect("the shrink")
-        .1
-        .split_once("\n    }\n")
-        .expect("its body")
-        .0;
+    // `method_body` normalizes line endings, so a CRLF checkout (Windows) reads the same.
+    let body = super::super::core_tests::method_body(
+        include_str!("atlas_lifecycle.rs"),
+        "fn shrink_glyph_atlas_to_start(",
+    );
     let order = [
         "glyph_atlas_shrink_due(",
         "self.glyph_atlas.shrink_to(target)",
@@ -317,7 +314,7 @@ fn the_shrink_invalidates_the_old_atlas_before_rebuilding_its_texture() {
         let found = body[at..].find(step).unwrap_or_else(|| panic!("{step} out of order"));
         at += found + step.len();
     }
-    let retention = include_str!("core_retention.rs");
+    let retention = include_str!("core_retention.rs").replace("\r\n", "\n");
     let trim = retention.split_once("pub fn trim_for_occlusion(").expect("the trim").1;
     let released = trim.find("self.row_glyph_cache.release_all();").expect("row caches released");
     let shrunk = trim.find("self.shrink_glyph_atlas_to_start()").expect("the trim shrinks");
