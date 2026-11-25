@@ -92,8 +92,9 @@ const DECRQM_5522_CASE: &str = "decrqm-5522";
 
 /// Each query row and its exact reply under the default theme: palette entry 1, the foreground
 /// and background, OSC 21's foreground with an unknown key named in unpadded Base64, the pointer
-/// shape query (`1` supported, `0` not), and the program-status capability list.
-const QUERY_REPLIES: [(&str, &str, &[u8]); 5] = [
+/// shape query (`1` supported, `0` not), the program-status capability list, and the theme's
+/// selection background through OSC 17 (16-bit) and OSC 21 (8-bit).
+const QUERY_REPLIES: [(&str, &str, &[u8]); 7] = [
     ("osc4-query", "\x1b]4;1;?\x1b\\", b"\x1b]4;1;rgb:fbfb/4949/3434\x1b\\"),
     (
         "osc10-query-chain",
@@ -110,6 +111,12 @@ const QUERY_REPLIES: [(&str, &str, &[u8]); 5] = [
         "osc7501-query",
         "\x1b]7501;?\x07",
         b"\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x07",
+    ),
+    ("osc17-query", "\x1b]17;?\x07", b"\x1b]17;rgb:3c3c/3838/3636\x07"),
+    (
+        "osc21-selection-query",
+        "\x1b]21;selection_background=?\x1b\\",
+        b"\x1b]21;selection_background=rgb:3c/38/36\x1b\\",
     ),
 ];
 
@@ -175,6 +182,8 @@ fn cases() -> Vec<Case> {
         Case::new(QUERY_REPLIES[2].0, QUERY_REPLIES[2].1).input(reply()).input_required(),
         Case::new(QUERY_REPLIES[3].0, QUERY_REPLIES[3].1).input(reply()).input_required(),
         Case::new(QUERY_REPLIES[4].0, QUERY_REPLIES[4].1).input(reply()).input_required(),
+        Case::new(QUERY_REPLIES[5].0, QUERY_REPLIES[5].1).input(reply()).input_required(),
+        Case::new(QUERY_REPLIES[6].0, QUERY_REPLIES[6].1).input(reply()).input_required(),
         Case::new(OSC52_READ_CASE, "\x1b]52;cp;?\x07").input(reply()).input_required(),
         Case::new(KITTY_WRITE_CASE, KITTY_WRITE).input(reply()).input_required(),
         Case::new(KITTY_READ_CASE, "\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\")

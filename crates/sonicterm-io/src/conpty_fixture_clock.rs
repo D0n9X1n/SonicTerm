@@ -5,14 +5,14 @@
 //! later sentinel extends it, and a chunk received at or past the deadline in force is refused
 //! whole, before any sentinel in it can close, abandon or open a section. [`RunClock`] is the
 //! outer test's one total deadline over staging and both hosts, with a teardown allowance held
-//! back after every host. [`reap`] and [`abandon`] spend one teardown deadline across their steps,
-//! and a step that fails or completes after it is a failure. [`settle_input`] and
+//! back after every host. [`reap`] and [`abandon`] spend one teardown deadline across their steps:
+//! a failed step fails, and only a poll that begins before the deadline counts. [`settle_input`] and
 //! [`collect_input`] bound the child's input by time and bytes; a reply that overflows or never
 //! goes quiet is reported as such, never as a cut or half reply.
 //!
-//! Quiet input is a heuristic for attribution, not a fence: a reply delayed outside the child's
-//! queue for longer than [`SETTLE_QUIET`] can still be read by the next echo case. Such a reply
-//! adds bytes, so it shows as a mismatch rather than a false `exact`.
+//! Quiet input reduces carry-over; it does not prove which case produced a reply. A reply delayed
+//! outside the child's queue for longer than [`SETTLE_QUIET`] can still be read by the next echo
+//! case, so echo rows inject distinct bytes, and a carried reply then reads as a mismatch.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -28,8 +28,9 @@ pub(crate) const TOTAL_BUDGET: Duration = Duration::from_secs(150);
 pub(crate) const HOST_BUDGET: Duration = Duration::from_secs(60);
 /// What a host keeps after its scanning loop to print its rows and end line.
 pub(crate) const REPORT_MARGIN: Duration = Duration::from_secs(10);
-/// The least scanning a host is launched with: every case list's rows fit in it.
-pub(crate) const MIN_LOOP_BUDGET: Duration = Duration::from_secs(20);
+/// The least scanning a host is launched with. A runtime that answers no query spends a 2 s read
+/// and a settle on every echo case, so the longest case list needs most of a full host's loop.
+pub(crate) const MIN_LOOP_BUDGET: Duration = Duration::from_secs(45);
 /// One host's teardown: exit, job termination and an empty job, together.
 pub(crate) const TEARDOWN_BUDGET: Duration = Duration::from_secs(5);
 /// The part of a teardown a host gets to exit on its own before its job is ended.

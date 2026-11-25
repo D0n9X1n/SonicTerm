@@ -170,7 +170,7 @@ fn run_host<E: Engine>(role: &str, test_name: &str, cases: &[Case], mut engine: 
         spawned.is_ok(),
         selected.unwrap_or_default(),
     );
-    let closed = match spawned {
+    let (closed, scanned) = match spawned {
         Ok(pty) => drive(&pty, cases, &mut engine, loop_budget),
         Err(error) => {
             // The launch failed, so every row is inconclusive; the error names no payload.
@@ -178,21 +178,24 @@ fn run_host<E: Engine>(role: &str, test_name: &str, cases: &[Case], mut engine: 
                 "{LINE_PREFIX}{{\"kind\":\"launch-error\",\"error\":{:?}}}",
                 error.to_string()
             );
-            HashMap::new()
+            (HashMap::new(), false)
         }
     };
     emit_rows(cases, &closed, runtime_ok, &mut engine);
-    println!("{LINE_PREFIX}{{\"kind\":\"end\",\"role\":\"{role}\"}}");
+    // `scan` says whether the child's DONE arrived in time; an expired scan is never a full run.
+    let scan = if scanned { "done" } else { "expired" };
+    println!("{LINE_PREFIX}{{\"kind\":\"end\",\"role\":\"{role}\",\"scan\":\"{scan}\"}}");
 }
 
 /// Scan the child's output until `DONE` or the deadline [`CaseClock`] puts in force; return each
-/// section's evidence that closed in time. Dropping `pty` afterwards kills and reaps the child.
+/// section's evidence that closed in time and whether `DONE` arrived. A chunk's time is when the
+/// host received it from the PTY reader. Dropping `pty` afterwards kills and reaps the child.
 fn drive<E: Engine>(
     pty: &PtyHandle,
     cases: &[Case],
     engine: &mut E,
     loop_budget: Duration,
-) -> HashMap<String, Evidence> {
+) -> (HashMap<String, Evidence>, bool) {
     let started = Instant::now();
     let mut clock = CaseClock::new(started, started + loop_budget);
     let mut scanner = Scanner::default();
@@ -212,7 +215,7 @@ fn drive<E: Engine>(
         else {
             // When: checked_duration_since finds the deadline in force passed, open sections read
             // inconclusive.
-            return closed;
+            return (closed, false);
         };
         // The wait never runs past the deadline in force, so a chunk is stamped when it arrived.
         let chunk = match pty.out_rx.recv_timeout(left.min(Duration::from_millis(50))) {
@@ -223,14 +226,14 @@ fn drive<E: Engine>(
             }
             Err(RecvTimeoutError::Disconnected) => {
                 // When: the output channel is Disconnected, the child is gone; report what closed.
-                return closed;
+                return (closed, false);
             }
         };
         let received_at = Instant::now();
         if clock.admits(received_at) == Arrival::Late {
             // When: admits says Arrival::Late, the chunk is refused whole: none of its sentinels
             // may end the expired section, open another or finish the run.
-            return closed;
+            return (closed, false);
         }
         let reply = engine.output(&chunk);
         if !reply.is_empty() {
@@ -243,7 +246,7 @@ fn drive<E: Engine>(
                     // When: a section `Opened`, an `/in` section may need injected bytes or a resize.
                     if clock.opened(&name, received_at) == Arrival::Late {
                         // When: clock.opened says Arrival::Late, nothing after it is evidence.
-                        return closed;
+                        return (closed, false);
                     }
                     let phase = name
                         .strip_suffix("/in")
@@ -266,7 +269,7 @@ fn drive<E: Engine>(
                     // When: a section `Closed`, its evidence counts only inside its case's deadline.
                     if clock.closed(received_at) == Arrival::Late {
                         // When: clock.closed says Arrival::Late, the late row is refused.
-                        return closed;
+                        return (closed, false);
                     }
                     closed.insert(name, evidence);
                 }
@@ -275,12 +278,12 @@ fn drive<E: Engine>(
                     // inconclusive; silence is measured from it.
                     if clock.abandoned(received_at) == Arrival::Late {
                         // When: clock.abandoned says Arrival::Late, nothing after it is evidence.
-                        return closed;
+                        return (closed, false);
                     }
                 }
                 ScanEvent::Done => {
                     // When: the child printed `Done`, every section it will print has arrived.
-                    return closed;
+                    return (closed, true);
                 }
             }
         }
@@ -504,16 +507,28 @@ fn run_outer(test_name: &str, manifest_dir: &Path, cases: &[Case]) {
         let report = run_one_host(&host, role, test_name, launch, &run);
         check_report(role, cases, &report, &mut problems);
     }
-    if !abandoned_copy {
-        // When: abandoned_copy is false, no copy may still write, so the directory goes; an
-        // unreaped host's files stay, and that host is already a problem.
-        let doomed = base.clone();
-        let _ = within(run.total_deadline(), move || {
-            let _ = std::fs::remove_dir_all(&doomed);
-            Ok(())
-        });
-    }
+    problems.extend(remove_fixture_directory(&base, abandoned_copy, run.total_deadline()));
     assert!(problems.is_empty(), "F-ConPTY fixture failed:\n{}", problems.join("\n"));
+}
+
+/// Remove the fixture directory before `deadline`, or say why it remains: a copy abandoned at its
+/// deadline may still write, so its directory is reported and left. An unreaped host's files also
+/// stay; that host is already a reported problem.
+fn remove_fixture_directory(
+    base: &Path,
+    abandoned_copy: bool,
+    deadline: Instant,
+) -> Option<String> {
+    if abandoned_copy {
+        // When: abandoned_copy is true, the directory is left for that copy and reported.
+        return Some(format!(
+            "the fixture directory {} was left for an abandoned copy",
+            base.display()
+        ));
+    }
+    let doomed = base.to_path_buf();
+    let removed = within(deadline, move || std::fs::remove_dir_all(&doomed));
+    removed.err().map(|problem| format!("removing the fixture directory failed: {problem}"))
 }
 
 /// What [`within`] reports for work that did not finish before its deadline.
@@ -531,6 +546,11 @@ fn within(
     }
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
+        // A worker scheduled at or past the deadline starts nothing; nobody waits for it.
+        if Instant::now() >= deadline {
+            // When: now is at or past the deadline on the worker, the work is never started.
+            return;
+        }
         // A send fails only when the deadline already passed and nobody waits.
         let _ = sender.send(work());
     });
@@ -545,7 +565,11 @@ fn within(
 /// a script still running then is killed and reaped, and the failure says whether it was.
 fn stage_runtime(manifest_dir: &Path, destination: &Path, run: &RunClock) -> PathBuf {
     let deadline = run.work_deadline();
-    std::fs::create_dir_all(destination).expect("create staging directory");
+    let staging = destination.to_path_buf();
+    if let Err(problem) = within(deadline, move || std::fs::create_dir_all(&staging)) {
+        // The staging directory was not made before the deadline.
+        panic!("creating the staging directory failed: {problem}");
+    }
     let script = manifest_dir.join("../../scripts/setup-windows-conpty.py");
     let mut child = Command::new("python")
         .arg(&script)
@@ -612,9 +636,11 @@ fn run_one_host(
     }
     let stdout = child.stdout.take().expect("host stdout");
     let (sender, receiver) = mpsc::channel();
+    // Each line is stamped when the reader takes it from the pipe, so a late end line is late
+    // even if the outer test is slow to dequeue it.
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if sender.send(line).is_err() {
+            if sender.send((line, Instant::now())).is_err() {
                 // When: `sender` fails, the outer test stopped listening for this output.
                 return;
             }
@@ -625,19 +651,26 @@ fn run_one_host(
     // The deadline was fixed when the run admitted this host, so spawning and the handshake
     // count against it.
     while let Some(left) = launch.host_deadline.checked_duration_since(Instant::now()) {
-        let Ok(line) = receiver.recv_timeout(left) else {
+        let Ok((line, read_at)) = receiver.recv_timeout(left) else {
             // When: `recv_timeout` expired or the reader ended, no further `line` arrives in budget.
             break;
         };
+        if read_at >= launch.host_deadline {
+            // When: read_at is at or past launch.host_deadline, the line is late and not evidence.
+            break;
+        }
         let Some(at) = line.find(LINE_PREFIX) else {
             // When: the `line` has no LINE_PREFIX, it is libtest's own output, not a control line.
             continue;
         };
         let control = line[at..].to_owned();
-        finished = json_field(&control, "kind").as_deref() == Some("end");
+        // Only an end line whose scan reached the child's DONE is a finished run.
+        finished = json_field(&control, "kind").as_deref() == Some("end")
+            && json_field(&control, "scan").as_deref() == Some("done");
+        let ended = json_field(&control, "kind").as_deref() == Some("end");
         lines.push(control);
-        if finished {
-            // When: the host `finished` with its end line, every row it reports has arrived.
+        if ended {
+            // When: the host `ended` with its end line, every row it reports has arrived.
             break;
         }
     }
@@ -686,7 +719,9 @@ fn check_report(role: &str, cases: &[Case], report: &HostReport, problems: &mut 
         println!("{role}: {line}");
     }
     if !report.finished {
-        problems.push(format!("{role}: the host did not finish within its budget"));
+        problems.push(format!(
+            "{role}: the host did not finish within its budget, or its scan expired before DONE"
+        ));
     }
     if !report.reaped {
         problems.push(format!("{role}: a process in the host's job outlived teardown"));

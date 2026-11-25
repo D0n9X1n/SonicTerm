@@ -100,10 +100,10 @@ fn a_launch_fits_its_loop_report_and_teardown_in_the_total() {
     assert_eq!(first.host_deadline, start + HOST_BUDGET);
     assert_eq!(first.loop_budget, HOST_BUDGET - REPORT_MARGIN);
     // Late staging leaves less than a whole host budget: the host gets only what is left.
-    let late = start + TOTAL_BUDGET - TEARDOWN_BUDGET - secs(40);
-    let squeezed = run.launch(late).expect("40 s still covers the least loop and its report");
+    let late = start + TOTAL_BUDGET - TEARDOWN_BUDGET - secs(57);
+    let squeezed = run.launch(late).expect("57 s still covers the least loop and its report");
     assert_eq!(squeezed.host_deadline, run.work_deadline());
-    assert_eq!(squeezed.loop_budget, secs(40) - REPORT_MARGIN);
+    assert_eq!(squeezed.loop_budget, secs(57) - REPORT_MARGIN);
 }
 
 /// No host launches once the work deadline passed, or when what is left cannot cover a loop
@@ -406,4 +406,16 @@ fn input_delayed_across_a_no_echo_case_is_settled_away() {
     let reply =
         collect_input_within(&receiver, Duration::from_millis(200), Duration::from_millis(30));
     assert_eq!(reply, Input::Bytes(b"reply".to_vec()));
+}
+
+/// The least loop covers the slowest list a host runs when its runtime answers no query: every
+/// echo case's settle and empty 2 s read, plus a resize case's waits, within MIN_LOOP_BUDGET.
+#[test]
+fn the_least_loop_covers_a_runtime_that_answers_nothing() {
+    let echo_cases = 14u32;
+    let per_echo = SETTLE_QUIET + READ_DEADLINE;
+    let resize_case = Duration::from_millis(1500 + 700);
+    assert!(per_echo * echo_cases + resize_case < MIN_LOOP_BUDGET);
+    // Pre-staged runs admit both hosts a full loop with their teardowns.
+    assert!(HOST_BUDGET * 2 + TEARDOWN_BUDGET * 2 <= TOTAL_BUDGET);
 }

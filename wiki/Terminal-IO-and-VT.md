@@ -827,20 +827,23 @@ rows answer only the console's own cursor and device-attribute queries and injec
 replies, so they prove forwarding, not behavior; app rows answer through a pane that runs the
 production VT publisher. The positive control must be `exact` on both runtimes and every
 required row on the packaged runtime; the other rows are printed as evidence. Each case has
-one 5 s deadline from its first section, which no later sentinel extends. A chunk of output that
-arrives at or past the deadline in force is refused whole, so none of its sentinels can close,
-abandon or open a section; between cases a host waits at most 5 s. One 150 s deadline covers
-staging, the host copies, both hosts and their teardowns. A host runs at most 60 s and is not
-launched with less than 20 s of scanning left before its 10 s report margin. Its teardown is one
-5 s allowance from when it starts, never past the run: the host gets 2 s to exit, then its job
-is ended, and it must have exited with an empty job by the end; a failed job end or a later exit
-is a failure. A copy still running at the deadline is abandoned and its directory left in
-place. Before an echo case the child discards earlier input until 300 ms pass quietly, within
+one 5 s deadline from its first section, which no later sentinel extends. A chunk of output the
+host receives at or past the deadline in force is refused whole, so none of its sentinels can
+close, abandon or open a section; between cases a host waits at most 5 s. A host's end line says
+whether its scan reached the child's `DONE`, and an expired scan fails the run. One 150 s
+deadline covers staging, the host copies, both hosts and their teardowns. A host runs at most
+60 s and is not launched with less than 45 s of scanning left before its 10 s report margin,
+enough for a runtime that answers no query. The outer test refuses an end line its reader took
+from the host's pipe at or past the host's deadline. A teardown is one 5 s allowance from when it
+starts, never past the run: the host gets 2 s to exit, then its job is ended, and it must have
+exited with an empty job by the end; a failed job end, or an exit first seen on a poll begun
+after the deadline, is a failure. A copy still running at the deadline is abandoned and its
+directory reported and left in place; a directory that cannot be removed is also reported. Before an echo case the child discards earlier input until 300 ms pass quietly, within
 1 s and 64 KiB, then reads its reply for 2 s, up to 64 KiB. More bytes, or input that never
 settles, reads as `OVERFLOW`, and a reply still arriving at 2 s reads as `UNSETTLED`, never as a
-cut reply. Quiet is a heuristic for which case a reply belongs to, not a fence: a reply delayed
-longer than that outside the child's queue can reach the next echo case, where its extra bytes
-show as a mismatch.
+cut reply. Quiet reduces carry-over but does not prove which case a reply belongs to: a reply
+delayed longer than that outside the child's queue can reach the next echo case. Echo rows
+therefore inject distinct bytes, so a carried reply reads as a mismatch.
 `SONICTERM_CONPTY_FIXTURE_RUNTIME_DIR` names a directory that
 `setup-windows-conpty.py --destination` already staged; without it each binary stages its own.
 The required clipboard transport rows are `52;c;<b64>`, `52;cp;<b64>`, `52;c`,

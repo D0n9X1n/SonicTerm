@@ -36,7 +36,8 @@ fn cases() -> Vec<Case> {
         Case::new("osc111-119-reset", "\x1b]111\x07\x1b]112\x07\x1b]117\x07\x1b]119\x07"),
         Case::new("osc110-query", "\x1b]110;?\x07"),
         Case::new("osc17-19-set", "\x1b]17;#334455\x07\x1b]19;#ddeeff\x07"),
-        Case::new("osc17-query", "\x1b]17;?\x07"),
+        Case::new("osc17-query", "\x1b]17;?\x07").output_required(),
+        Case::new("osc21-selection-query", "\x1b]21;selection_background=?\x1b\\"),
         Case::new("osc21-query", "\x1b]21;foreground=?;nonsense=?\x1b\\")
             .input(echo(b"\x1b]21;foreground=rgb:ff/ff/ff;nonsense=\x1b\\"))
             .output_required()
@@ -61,8 +62,9 @@ fn cases() -> Vec<Case> {
             .input(echo(b"\x1b[<0;12;34M"))
             .input_required()
             .trailer(mouse_off),
-        Case::new("osc1-icon-title", "\x1b]1;fixture tab\x07"),
-        Case::new("osc1337-set-user-var", "\x1b]1337;SetUserVar=fixture=dmFsdWU=\x07"),
+        Case::new("osc1-icon-title", "\x1b]1;fixture tab\x07").output_required(),
+        Case::new("osc1337-set-user-var", "\x1b]1337;SetUserVar=fixture=dmFsdWU=\x07")
+            .output_required(),
         Case::new("osc1337-current-dir", "\x1b]1337;CurrentDir=file://localhost/C:/fixture\x07"),
         // OSC 52 writes and OSC 1337 `Copy=:`.
         Case::new("osc52-c", "\x1b]52;c;Zml4dHVyZQ==\x07").output_required(),
@@ -97,14 +99,15 @@ fn cases() -> Vec<Case> {
             .trailer("\x1b[?5522l"),
         // The follow-up read naming itself and echoing the one-time `pw` reaches the host, and an
         // injected OK/DATA/DONE reaches the child.
+        // Its own id and payload, so a reply carried from the read above cannot match this row.
         Case::new(
             "osc5522-read-paste-otp",
-            "\x1b]5522;type=read:id=r:name=UGFzdGUgZXZlbnQ=:pw=b3Rw;dGV4dC9wbGFpbg==\x1b\\",
+            "\x1b]5522;type=read:id=p:name=UGFzdGUgZXZlbnQ=:pw=b3Rw;dGV4dC9wbGFpbg==\x1b\\",
         )
         .input(echo(
-            b"\x1b]5522;type=read:status=OK:id=r\x1b\\\
-\x1b]5522;type=read:status=DATA:id=r:mime=dGV4dC9wbGFpbg==;Zml4dHVyZQ==\x1b\\\
-\x1b]5522;type=read:status=DONE:id=r\x1b\\",
+            b"\x1b]5522;type=read:status=OK:id=p\x1b\\\
+\x1b]5522;type=read:status=DATA:id=p:mime=dGV4dC9wbGFpbg==;cGFzdGVk\x1b\\\
+\x1b]5522;type=read:status=DONE:id=p\x1b\\",
         ))
         .output_required(),
         Case::new("osc7501-report", "\x1b]7501;app=fixture:state=working:progress=40\x07"),
@@ -123,8 +126,10 @@ fn cases() -> Vec<Case> {
              \x1b]133;A;redraw=last;click_events=2\x07\x1b]133;C;cmdline_url=ls%20-l\x07\x1b]9;12\x07",
         )
         .output_required(),
+        // A prompt click's input: the SGR press, an arrow key and the `special_key` CSI-u.
         Case::new("osc133-click-events", "\x1b]133;A;click_events=1\x07")
-            .input(echo(b"\x1b[D\x1b[D")),
+            .input(echo(b"\x1b[<0;5;1M\x1b[D\x1b[1;1u"))
+            .input_required(),
         Case::new("osc9-4-lenient", "\x1b]9;4;1\x07\x1b]9;4;2;abc\x07\x1b]9;4;0\x07"),
         Case::new("osc777-notify", "\x1b]777;notify;Fixture\x07"),
         Case::new("prompt-resize", "\x1b]133;A;redraw=last\x07")
