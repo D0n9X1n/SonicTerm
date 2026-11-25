@@ -668,6 +668,7 @@ impl super::App {
         // default log level has the same memory to get back. It runs before the snapshot below,
         // so that snapshot already reports the lower renderer figures.
         self.trim_covered_renderers(now);
+        self.trim_idle_background_frames(now);
 
         // Owner reattribution and charging also run before the gate, for the
         // same reason.
@@ -834,6 +835,10 @@ pub enum TrimSkip {
 
 /// How long a window must stay natively occluded before the retention pass trims it.
 pub(super) const COVERED_TRIM_AFTER: Duration = Duration::from_secs(30);
+
+/// How long a visible background window must go without presenting, and without a focus change,
+/// before the retention pass gives back its retained frame texture.
+pub(super) const IDLE_FRAME_TRIM_AFTER: Duration = Duration::from_secs(60);
 
 /// Which age rule a trim request applies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -675,8 +675,9 @@ including blank and missing sentinels. Growth copies resident pixels in place,
 recomputes their UVs and advances the atlas identity without rasterizing
 anything again. `GlyphAtlas::grow_to` accepts only the growth policy's next
 doubling: a fixed atlas, an atlas at its maximum, and any other size are
-refused without changing the atlas. Only the glyph atlas grows, and a reset
-remains the only path that clears it.
+refused without changing the atlas. Only the glyph atlas grows. A reset clears
+it in place at its size; a covered-window trim may also shrink a grown atlas back
+to its start (`GlyphAtlas::shrink_to`), which clears it into a smaller buffer.
 
 On a miss, the atlas uses reclaimed rectangles before its shelf packer. Under
 metadata or packing pressure, a growable atlas below 2,048 grows first; at

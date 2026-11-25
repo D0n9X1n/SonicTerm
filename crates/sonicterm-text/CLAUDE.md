@@ -38,6 +38,12 @@ cargo build -p sonicterm-text
   running sum and report uses that one function.
 - UV-bearing caches use `GlyphAtlas::identity()`, not the resettable eviction
   counter, and still clear promptly when their owning seam changes.
+- `GlyphAtlas::shrink_to` empties a grown growable atlas to a smaller power of two (at or above
+  `MIN_ATLAS_DIM`), replacing the pixel buffer so its capacity falls, and keeps the growth and
+  eviction counts, the eviction permission, `ever_evicted` and the cap.
+- Pixels live in `buffer::AtlasPixels`: from 1 MiB on macOS an anonymous `memmap2` mapping,
+  unmapped when dropped (the system allocator keeps a freed large block's pages in the
+  footprint), else a vector. Growth and shrink each replace the buffer.
 - A `GlyphAtlas::growable` atlas doubles up to its maximum before it evicts;
   `new` and `default_size` stay fixed. `grow_to` accepts only the policy's
   next doubling and refuses anything else without changing the atlas. Growth
@@ -45,13 +51,16 @@ cargo build -p sonicterm-text
   typed re-upload rect per tile, advances the identity and counts one growth
   that a reset does not clear; it never rasterizes again.
   `retained_amount().bytes` is the pixel capacity plus the dirty list's
-  capacity. Pixels move only with growth; the dirty list grows with inserts
+  capacity. Pixels move only with growth and shrink; the dirty list grows with inserts
   and a drain shrinks it to 64 rects once it exceeds 1,024, so even a fixed
   atlas's figure varies. A test bounding memory must assert the term it means.
-- `START_ATLAS_DIM_1X` is 1024 and `START_ATLAS_DIM_2X` is 2048, each equal to
+- `START_ATLAS_DIM_1X` is 1024 and `START_ATLAS_DIM_2X` is 512, each equal to
   `start_size_inputs::ruled_start` over `START_SIZE_INPUTS` at its scale; a unit
   test checks the equality, because `validate_table_start` accepts the maximum
-  unconditionally. Warm spares start at `MIN_ATLAS_DIM`. The table holds 64 CI
+  unconditionally. At `PERF_SCALE` (1) every row sizes the start; elsewhere only
+  rows `decides_start` admits (not `Helper`) do, and helper rows only bound growth:
+  one incomplete or not fitting selects the maximum. The working-set step and its
+  fallback check helpers through `helper_bound` (start at 1x, maximum at 2x). Warm spares start at `MIN_ATLAS_DIM`. The table holds 64 CI
   rows, each with its `Provenance` (run, attempt, measured SHA, side, pull
   request, set and origin): 32 perf-end rows from a Performance comparison's
   base side, 8 helper rows and 24 Windows real-renderer rows, kept apart by

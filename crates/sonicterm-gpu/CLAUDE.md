@@ -46,7 +46,7 @@ cargo build -p sonicterm-gpu
 ```
 
 ## Guardrails
-- `trim_for_occlusion` releases only what the next frame rebuilds, inside the device gate; it never touches the glyph atlas, its retry or eviction state. A trimmed frame texture is restored by `ensure_frame_texture`, the first step of the wgpu present, and every other texture install clears the mark.
+- `trim_for_occlusion` releases only what the next frame rebuilds, inside the device gate. It may shrink a glyph atlas that grew past `start_dim` for the current scale (`shrink_glyph_atlas_to_start`), only between attempts and with no atlas retry or growth timing pending; it never changes the retry, its eviction mode or the counters. `trim_idle_frame_texture` is the texture-only idle trim: it releases only the retained frame texture through the shared, gated and idempotent `release_frame_texture`, clears the frame key, and keeps the atlas and every cache. A trimmed frame texture is restored by `ensure_frame_texture`, the first step of the wgpu present, and every other texture install clears the mark.
 - `core.rs` and `text_pipeline.rs` are hot files; keep changes narrow.
 - CPU composition stays in `software_frame`, compiled for Windows and every host's
   unit tests; its shared color encoding also compiles on every host. Keep pixel loops and
@@ -74,7 +74,7 @@ cargo build -p sonicterm-gpu
   the committed slots before the first admission, stage slot keys, and commit
   them only through `settle_retained_frame` on `Presented`; every `Err` exit
   discards the stage. Nothing drops a glyph row for dirt; only the quad cache does.
-- Only the glyph atlas is built growable (`start_dim`: 1024 at scale 1, 2048
+- Only the glyph atlas is built growable (`start_dim`: 1024 at scale 1, 512
   above 1.5, 256 for a warm spare; then doubling to 2048);
   the promoted image atlas stays fixed. A growth-only stamp change retries
   through `retry_after_glyph_atlas_growth`, reached only from the retry arm

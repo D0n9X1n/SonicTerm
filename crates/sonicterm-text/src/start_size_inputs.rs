@@ -211,9 +211,9 @@ pub fn start_rule(inputs: &[RuleInput]) -> Result<StartVerdict, String> {
 /// Validate a normal renderer's start dimension `start` at `scale` against measured `rows`.
 ///
 /// The maximum is always valid: it saves nothing, so it needs no measurement, and its verdict says
-/// whether any recorded row would have chosen it anyway. A smaller start is valid only when
-/// `oracle_complete` is true, every [`required_inputs`] entry has a row at `scale`, and
-/// [`start_rule`] over the scale's rows selects exactly `start`.
+/// what the rule over the recorded rows would choose. A smaller start is valid only when
+/// `oracle_complete` is true, every [`required_inputs`] entry has a row at `scale`, and the rule
+/// over the scale's rows, split by [`decides_start`], selects exactly `start`.
 ///
 /// # Errors
 ///
@@ -224,12 +224,11 @@ pub fn validate_start_dim(
     rows: &[StartSizeInput],
     oracle_complete: bool,
 ) -> Result<StartVerdict, String> {
-    let inputs = rule_inputs(scale, rows);
     if start == ATLAS_DIM {
         // When: start is the maximum it claims no savings, so an empty or incomplete table is fine.
-        let verdict = match start_rule(&inputs) {
-            Ok(rule) => format!("maximum selected, no savings ({})", rule.verdict),
-            Err(_) => format!("no measured {scale}x input: maximum selected, no savings"),
+        let verdict = match split_rule(scale, rows) {
+            Ok(rule) => format!("maximum selected, no savings (the rule selects {})", rule.verdict),
+            Err(_) => format!("no deciding {scale}x input: maximum selected, no savings"),
         };
         return Ok(StartVerdict { dim: ATLAS_DIM, verdict });
     }
@@ -247,7 +246,7 @@ pub fn validate_start_dim(
             missing.join(", ")
         ));
     }
-    let rule = start_rule(&inputs)?;
+    let rule = split_rule(scale, rows)?;
     if rule.dim != start {
         // When: rule.dim differs from start the constant is not what the measurements select.
         return Err(format!(
@@ -279,7 +278,74 @@ pub fn ruled_start(
         // When: missing names an unrecorded input, the rule over the other rows is incomplete.
         return Err(format!("{scale}x lacks required inputs: {}", missing.join(", ")));
     }
-    start_rule(&rule_inputs(scale, rows))
+    split_rule(scale, rows)
+}
+
+/// The scale the perf scenarios run at. A growth there would land inside a measured scenario, so
+/// every row, the helper's superset included, sizes that scale's start.
+pub const PERF_SCALE: u32 = 1;
+
+/// Whether `row` decides its scale's start. At [`PERF_SCALE`] every row does. Elsewhere only the
+/// rows that measured what a real renderer drew (`InputSource::RealRenderer`) do; the helper's
+/// superset only bounds what the atlas must grow to, because growth there costs one retried frame
+/// that no measured scenario contains.
+#[must_use]
+pub fn decides_start(row: &StartSizeInput) -> bool {
+    row.scale == PERF_SCALE || row.source == InputSource::RealRenderer
+}
+
+/// A helper measurement's need at one scale and the atlas size that must hold it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperBound {
+    /// What [`start_rule`] selects over the helper measurements.
+    pub need: StartVerdict,
+    /// The size that must hold `need`: the start constant at [`PERF_SCALE`], where a growth would
+    /// land inside a measured scenario, and the maximum elsewhere, where the atlas grows to it.
+    pub limit: u32,
+}
+
+/// Check helper measurements at `scale` against `start`, that scale's start constant, as the
+/// working-set step and its local fallback both do.
+///
+/// # Errors
+///
+/// When the inputs are empty. Away from [`PERF_SCALE`], also when any input is incomplete or does
+/// not fit, since every such outcome would otherwise read as a need of the maximum and pass.
+pub fn helper_bound(scale: u32, start: u32, inputs: &[RuleInput]) -> Result<HelperBound, String> {
+    let need = start_rule(inputs)?;
+    if scale == PERF_SCALE {
+        // When: scale is the perf scale, the start itself must hold the helper's working set.
+        return Ok(HelperBound { need, limit: start });
+    }
+    if let Some(bad) = inputs
+        .iter()
+        .find(|input| input.incomplete_glyphs > 0 || !matches!(input.outcome, FitOutcome::Fits(_)))
+    {
+        // When: incomplete_glyphs is nonzero or outcome is not Fits, growth cannot hold the helper.
+        return Err(format!(
+            "{}: {} with {} unresolved or unrasterized glyphs cannot bound growth",
+            bad.label,
+            bad.outcome.label(),
+            bad.incomplete_glyphs
+        ));
+    }
+    Ok(HelperBound { need, limit: ATLAS_DIM })
+}
+
+/// [`start_rule`] at `scale` with rows split by [`decides_start`]. A non-deciding row still
+/// selects the maximum when it is incomplete or does not fit, as it would in [`start_rule`]: the
+/// atlas must be able to grow to hold it. Otherwise the deciding rows alone choose the start.
+fn split_rule(scale: u32, rows: &[StartSizeInput]) -> Result<StartVerdict, String> {
+    let at_scale = || rows.iter().filter(move |row| row.scale == scale);
+    for bound in at_scale().filter(|row| !decides_start(row)) {
+        if bound.incomplete_glyphs > 0 || !matches!(bound.outcome, FitOutcome::Fits(_)) {
+            // When: incomplete_glyphs is nonzero or outcome is not Fits, its own rule selects the max.
+            return start_rule(&rule_inputs(scale, std::slice::from_ref(bound)));
+        }
+    }
+    let deciding: Vec<StartSizeInput> =
+        at_scale().filter(|row| decides_start(row)).copied().collect();
+    start_rule(&rule_inputs(scale, &deciding))
 }
 
 /// Each [`required_inputs`] entry at `scale` with no row in `rows`, named for a message.

@@ -167,8 +167,9 @@ fn judge_helper(
 }
 
 /// Check a helper a suite measured itself, because the oracle producer ran on another runner
-/// image, as the producer checks its own before publishing: the shared judgement, then the start
-/// constant for `scale` must hold this measurement's need. Returns the drift advisories to print.
+/// image, as the producer checks its own before publishing: the shared judgement, then
+/// [`sonicterm_text::start_size_inputs::helper_bound`] (the start at the perf scale, growth to the
+/// maximum elsewhere) must hold this measurement's need. Returns the drift advisories to print.
 ///
 /// # Errors
 ///
@@ -181,22 +182,29 @@ fn validate_local_helper(
     policy: &sonicterm_text::recording_image::DriftPolicy,
 ) -> Result<Vec<String>, String> {
     use sonicterm_text::glyph_atlas::{START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
-    use sonicterm_text::start_size_inputs::{start_rule, RuleInput};
+    use sonicterm_text::start_size_inputs::{helper_bound, RuleInput};
     let constant = if scale == 1 { START_ATLAS_DIM_1X } else { START_ATLAS_DIM_2X };
     let judgement = judge_helper(set, platform, name, scale, constant, policy);
     if !judgement.failures.is_empty() {
         // When: failures is not empty the measurement fails a check the producer would refuse.
         return Err(format!("the local helper fails its gate: {:?}", judgement.failures));
     }
-    let need = start_rule(&[RuleInput {
-        label: format!("{platform} {scale}x {name} local helper"),
-        outcome: set.fit_outcome,
-        max_tile: set.max_tile_dims,
-        incomplete_glyphs: judgement.incomplete_glyphs,
-    }])?;
-    if constant < need.dim {
-        // When: constant is below need.dim the shipped start cannot hold this working set.
-        return Err(format!("the local helper needs {} but starts at {constant}", need.dim));
+    let bound = helper_bound(
+        scale,
+        constant,
+        &[RuleInput {
+            label: format!("{platform} {scale}x {name} local helper"),
+            outcome: set.fit_outcome,
+            max_tile: set.max_tile_dims,
+            incomplete_glyphs: judgement.incomplete_glyphs,
+        }],
+    )?;
+    if bound.limit < bound.need.dim {
+        // When: limit is below need.dim the atlas cannot hold this working set at its start or by growth.
+        return Err(format!(
+            "the local helper needs {} but holds {} (start {constant})",
+            bound.need.dim, bound.limit
+        ));
     }
     Ok(judgement.advisories)
 }

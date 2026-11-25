@@ -127,6 +127,9 @@ pub(crate) struct WindowRedrawState {
     pub(super) occluded_since: Option<Instant>,
     /// The renderer was trimmed during the current covered stretch; visibility clears it.
     pub(super) trimmed: bool,
+    /// When this window last gained or lost native focus, at the dispatch clock; `None` until the
+    /// first focus event. The idle background trim waits `IDLE_FRAME_TRIM_AFTER` past it.
+    pub(super) focus_changed_at: Option<Instant>,
     /// Requested GPU bytes that stretch's trim gave back; zero while untrimmed.
     pub(super) trim_released_requested_bytes: u64,
     pub(super) timeout_pending: bool,
@@ -183,6 +186,7 @@ impl Default for WindowRedrawState {
             backend_occluded: false,
             occluded_since: None,
             trimmed: false,
+            focus_changed_at: None,
             trim_released_requested_bytes: 0,
             timeout_pending: false,
             pacing: None,

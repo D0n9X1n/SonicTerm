@@ -20,3 +20,8 @@ sonicterm-types.workspace = true
 # don't reference cosmic-text after the chrome migration.
 bytemuck.workspace = true
 tracing.workspace = true
+
+# Large atlas pixel buffers are anonymous mappings on macOS (`glyph_atlas_buffer.rs`), whose drop
+# unmaps them: the system allocator keeps a freed large block's pages in the footprint.
+[target.'cfg(target_os = "macos")'.dependencies]
+memmap2 = "0.9"

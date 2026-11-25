@@ -104,6 +104,43 @@ impl GpuRenderer {
         self.preedit_glyph_cache = None;
     }
 
+    /// Shrink a glyph atlas larger than the start for the window's current scale back to that
+    /// start, returning the side before and after; `None` when it is kept.
+    ///
+    /// Kept while an atlas retry is armed (its eviction mode must settle first) or a growth is
+    /// still waiting to be timed, and never grown toward the target. Called inside the device
+    /// gate. The shrink drops every tile, so the row glyph UVs, the preedit UV cache and the frame
+    /// key are invalidated, and the GPU texture is rebuilt at the new size through the one upload
+    /// seam, which records the ledger. The next frame rasterizes only what it shows.
+    pub(super) fn shrink_glyph_atlas_to_start(&mut self) -> Option<(u32, u32)> {
+        let before = self.glyph_atlas.width();
+        let target = start_dim(self.window.scale_factor() as f32, GlyphAtlasStart::Normal);
+        let pending = self.glyph_atlas_retry_without_eviction
+            || self.growth_episodes.has_pending(self.glyph_atlas.growths());
+        if !glyph_atlas_shrink_due(before, target, pending) {
+            // When: glyph_atlas_shrink_due is false, the atlas is at its start or a retry is pending.
+            return None;
+        }
+        if !self.glyph_atlas.shrink_to(target) {
+            // When: shrink_to refuses (a fixed atlas), the atlas is kept as it is.
+            return None;
+        }
+        self.mark_glyph_atlas_replaced();
+        self.row_glyph_cache.invalidate_all();
+        self.last_frame_key = None;
+        self.rebuild_glyph_upload_if_needed();
+        tracing::debug!(
+            target: "memory",
+            renderer_role = self.render_timing_label,
+            window_id = ?self.window.id(),
+            before,
+            after = target,
+            cpu_payload_bytes = atlas_payload_bytes(target, target),
+            "glyph atlas shrank to its start"
+        );
+        Some((before, target))
+    }
+
     /// Reset CPU glyph contents in place and invalidate preedit identity.
     pub(super) fn reset_glyph_atlas_in_place(&mut self, reason: &'static str) {
         let width = self.glyph_atlas.width();
@@ -419,6 +456,13 @@ fn settle_glyph_atlas_retry(
     atlas.set_eviction_enabled(true);
     *preedit = None;
     Some(rows.len())
+}
+
+/// Whether a covered window's glyph atlas of side `side` shrinks to `target`, the start for its
+/// current scale: only when it is larger, and never while an atlas retry or growth timing is
+/// `pending`, since the retry's eviction mode and the timed growth must settle on this atlas.
+pub(super) fn glyph_atlas_shrink_due(side: u32, target: u32, pending: bool) -> bool {
+    side > target && !pending
 }
 
 #[cfg(test)]

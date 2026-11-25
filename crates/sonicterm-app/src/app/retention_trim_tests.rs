@@ -151,3 +151,83 @@ fn the_trim_hook_shares_the_scheduler_rules_and_runs_no_retention_pass() {
     assert_eq!(panes_after, panes_before);
     assert_eq!(app.registry.windows.len(), 1, "no window was created or removed");
 }
+
+/// A quiescent background window that presented 60 s ago and has not changed focus since is due;
+/// 1 s earlier on either clock is not.
+#[test]
+fn an_idle_background_window_is_due_after_sixty_seconds() {
+    let base = test_base();
+    let idle = IdleFrameFacts {
+        quiescent: true,
+        frontmost: false,
+        warm: false,
+        last_present: Some(base),
+        focus_changed_at: Some(base),
+    };
+    let at = |secs| base + Duration::from_secs(secs);
+    assert!(idle_frame_trim_due(idle, at(60)));
+    assert!(!idle_frame_trim_due(idle, at(59)), "presented and blurred 59 s ago");
+    let recent_focus = IdleFrameFacts { focus_changed_at: Some(at(30)), ..idle };
+    assert!(!idle_frame_trim_due(recent_focus, at(60)), "focus changed 30 s ago");
+    assert!(idle_frame_trim_due(recent_focus, at(90)));
+    let never_focused = IdleFrameFacts { focus_changed_at: None, ..idle };
+    assert!(idle_frame_trim_due(never_focused, at(60)), "no focus edge to wait for");
+}
+
+/// Each exclusion keeps the texture whatever the age: a window that is not quiescent (hidden,
+/// covered, parked, stopped, deferred, in flight or with a pending cause), the frontmost window, a
+/// warm spare, and one that has never presented.
+#[test]
+fn every_idle_trim_exclusion_keeps_the_texture() {
+    let base = test_base();
+    let late = base + Duration::from_secs(600);
+    let idle = IdleFrameFacts {
+        quiescent: true,
+        frontmost: false,
+        warm: false,
+        last_present: Some(base),
+        focus_changed_at: None,
+    };
+    for (name, facts) in [
+        ("busy", IdleFrameFacts { quiescent: false, ..idle }),
+        ("frontmost", IdleFrameFacts { frontmost: true, ..idle }),
+        ("warm", IdleFrameFacts { warm: true, ..idle }),
+        ("never presented", IdleFrameFacts { last_present: None, ..idle }),
+    ] {
+        assert!(!idle_frame_trim_due(facts, late), "{name}");
+    }
+}
+
+/// A native focus edge, gained or lost, stamps the window's focus clock at the dispatch clock, so
+/// the idle trim's wait restarts on it.
+#[test]
+fn a_focus_edge_stamps_the_window_at_the_dispatch_clock() {
+    let base = test_base();
+    set_fake_now(base);
+    let mut app = app_with_private_pools();
+    app.__test_set_dispatch_clock(fake_now);
+    let child = app.__test_seed_child_window(&["background"]);
+    assert_eq!(app.registry.windows[&child].redraw.focus_changed_at, None);
+    app.handle_window_focus_changed(child, true);
+    assert_eq!(app.registry.windows[&child].redraw.focus_changed_at, Some(base));
+    set_fake_now(base + Duration::from_secs(5));
+    app.handle_window_focus_changed(child, false);
+    assert_eq!(
+        app.registry.windows[&child].redraw.focus_changed_at,
+        Some(base + Duration::from_secs(5))
+    );
+}
+
+/// The retention pass runs the idle background trim right after the covered trim, both above the
+/// logging gate, and the idle trim reads the shared quiescence rule rather than its own.
+#[test]
+fn the_retention_pass_runs_the_idle_trim_after_the_covered_trim() {
+    let retention = include_str!("retention.rs");
+    let covered = retention.find("self.trim_covered_renderers(now);").expect("covered trim");
+    let idle = retention.find("self.trim_idle_background_frames(now);").expect("idle trim");
+    assert!(covered < idle, "the covered trim runs first");
+    let trim = include_str!("retention_trim.rs");
+    let body = trim.split_once("fn trim_idle_background_frames(").expect("the idle trim").1;
+    assert!(body.contains("window.image_atlas_release_collectable()"), "shared quiescence rule");
+    assert!(body.contains("renderer.trim_idle_frame_texture()"), "the texture-only trim");
+}

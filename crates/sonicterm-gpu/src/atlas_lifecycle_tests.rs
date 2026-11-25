@@ -278,3 +278,45 @@ fn settling_a_presented_retry_keeps_the_admitted_row_and_drops_preedit() {
     assert_eq!(row_cache_atlas_identity(&atlas), identity, "the identity is unchanged");
     assert_eq!(rows.get(PANE, KEY, identity, |_| true), Some(&row), "the row still hits");
 }
+
+/// A covered window's atlas shrinks only when it grew past its start, and never while a retry or a
+/// growth timing is pending: those must settle on the atlas that armed them.
+#[test]
+fn a_covered_atlas_shrinks_only_when_grown_and_settled() {
+    assert!(glyph_atlas_shrink_due(2048, 512, false));
+    assert!(glyph_atlas_shrink_due(1024, 512, false));
+    assert!(!glyph_atlas_shrink_due(512, 512, false), "at its start");
+    assert!(!glyph_atlas_shrink_due(512, 1024, false), "below the target is never grown to it");
+    assert!(!glyph_atlas_shrink_due(2048, 512, true), "a retry or growth timing is pending");
+}
+
+/// The shrink invalidates everything that names the old atlas before the GPU texture is rebuilt,
+/// and the covered trim reaches it after the caches it already drops: the replacement marker
+/// (preedit UVs), the row glyph UVs and the frame key, then the one upload seam, which records the
+/// ledger.
+#[test]
+fn the_shrink_invalidates_the_old_atlas_before_rebuilding_its_texture() {
+    // `method_body` normalizes line endings, so a CRLF checkout (Windows) reads the same.
+    let body = super::super::core_tests::method_body(
+        include_str!("atlas_lifecycle.rs"),
+        "fn shrink_glyph_atlas_to_start(",
+    );
+    let order = [
+        "glyph_atlas_shrink_due(",
+        "self.glyph_atlas.shrink_to(target)",
+        "self.mark_glyph_atlas_replaced();",
+        "self.row_glyph_cache.invalidate_all();",
+        "self.last_frame_key = None;",
+        "self.rebuild_glyph_upload_if_needed();",
+    ];
+    let mut at = 0;
+    for step in order {
+        let found = body[at..].find(step).unwrap_or_else(|| panic!("{step} out of order"));
+        at += found + step.len();
+    }
+    let retention = include_str!("core_retention.rs").replace("\r\n", "\n");
+    let trim = retention.split_once("pub fn trim_for_occlusion(").expect("the trim").1;
+    let released = trim.find("self.row_glyph_cache.release_all();").expect("row caches released");
+    let shrunk = trim.find("self.shrink_glyph_atlas_to_start()").expect("the trim shrinks");
+    assert!(released < shrunk, "the trim releases its caches before it shrinks the atlas");
+}

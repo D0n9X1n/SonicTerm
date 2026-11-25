@@ -243,6 +243,11 @@ cargo build -p sonicterm-app
 - Recovery prepares and commits all live/warm renderers in one callback, retires
   failed candidates before dispatch resumes, and never joins its request worker.
 - Do not add unconditional heartbeat redraws at the tail of event handling.
+- The retention pass also gives back the retained frame texture of a visible background window that
+  has presented nothing and changed focus not at all for `IDLE_FRAME_TRIM_AFTER` (60 s)
+  (`trim_idle_background_frames`, rule `idle_frame_trim_due`): not frontmost, not warm, and quiescent
+  by `image_atlas_release_collectable`. Every native focus edge stamps `redraw.focus_changed_at` on
+  the dispatch clock.
 - The retention pass trims each window natively covered for 30 s through `trim_window_if_eligible`,
   before charging and the snapshot and outside every logging gate. `App::__trim_covered_now` (feature
   `perf-hook-trim`, doc-hidden) runs the same body without the age rule; it runs no retention pass,

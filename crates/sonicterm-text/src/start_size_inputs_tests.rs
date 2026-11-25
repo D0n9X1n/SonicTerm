@@ -200,6 +200,46 @@ fn a_start_below_the_maximum_must_equal_the_rule() {
     }
 }
 
+/// At a scale no perf scenario runs, the helper's superset bounds what the atlas must grow to, not
+/// where it starts: complete helper rows that fit only the maximum leave the start to the rows that
+/// measured a real renderer, while one incomplete or unfitting helper row still selects the maximum.
+#[test]
+fn at_a_scale_no_perf_scenario_runs_helpers_bound_growth_not_the_start() {
+    let mut rows = complete_rows(2, 512);
+    for row in rows.iter_mut().filter(|row| row.source == InputSource::Helper) {
+        row.outcome = FitOutcome::Fits(ATLAS_DIM);
+    }
+    assert_eq!(ruled_start(2, &rows, true).map(|verdict| verdict.dim), Ok(512));
+    assert_eq!(validate_start_dim(2, 512, &rows, true).map(|verdict| verdict.dim), Ok(512));
+
+    let mut incomplete = rows.clone();
+    incomplete
+        .iter_mut()
+        .find(|row| row.source == InputSource::Helper)
+        .unwrap()
+        .incomplete_glyphs = 1;
+    let verdict = ruled_start(2, &incomplete, true).expect("a ruled start");
+    assert_eq!(verdict.dim, ATLAS_DIM, "{}", verdict.verdict);
+    assert!(verdict.verdict.contains("unresolved or unrasterized"), "{}", verdict.verdict);
+
+    let mut unfit = rows.clone();
+    unfit.iter_mut().find(|row| row.source == InputSource::Helper).unwrap().outcome =
+        FitOutcome::DoesNotFit;
+    assert_eq!(ruled_start(2, &unfit, true).map(|verdict| verdict.dim), Ok(ATLAS_DIM));
+}
+
+/// At the scale the perf scenarios run, every row still sizes the start, the helper's included, so a
+/// growth never lands inside a measured scenario: the same helper rows that leave a 2x start at 512
+/// hold the 1x start at the maximum.
+#[test]
+fn at_the_perf_scale_every_row_sizes_the_start() {
+    let mut rows = complete_rows(1, 512);
+    for row in rows.iter_mut().filter(|row| row.source == InputSource::Helper) {
+        row.outcome = FitOutcome::Fits(ATLAS_DIM);
+    }
+    assert_eq!(ruled_start(1, &rows, true).map(|verdict| verdict.dim), Ok(ATLAS_DIM));
+}
+
 /// The shipped start constants pass the same validation as every case above, over the recorded
 /// table and the shipped oracle guard.
 #[test]
@@ -225,15 +265,16 @@ fn each_start_constant_equals_the_rule_over_the_recorded_rows() {
     }
 }
 
-/// The rule's result depends on the rows that set each scale's largest fit: dropping any one of
-/// them either loses a required input or lowers the ruled start, so the equality above stops
-/// holding. The test finds those rows itself, so it covers whichever rows set the maximum.
+/// The rule's result depends on the inputs that set each scale's largest deciding fit: dropping any
+/// one of them, with every row that measured it (an input can be recorded more than once), either
+/// loses a required input or lowers the ruled start, so the equality above stops holding. The test finds those inputs itself through [`decides_start`], so it covers whichever
+/// rows decide, and a helper row that only bounds growth is not one of them.
 #[test]
 fn dropping_a_row_that_sets_the_largest_fit_breaks_the_equality() {
     for (scale, constant) in [(1, START_ATLAS_DIM_1X), (2, START_ATLAS_DIM_2X)] {
         let largest = START_SIZE_INPUTS
             .iter()
-            .filter(|row| row.scale == scale)
+            .filter(|row| row.scale == scale && decides_start(row))
             .filter_map(|row| match row.outcome {
                 FitOutcome::Fits(dim) => Some(dim),
                 _ => None,
@@ -243,13 +284,20 @@ fn dropping_a_row_that_sets_the_largest_fit_breaks_the_equality() {
         let deciding: Vec<usize> = START_SIZE_INPUTS
             .iter()
             .enumerate()
-            .filter(|(_, row)| row.scale == scale && row.outcome == FitOutcome::Fits(largest))
+            .filter(|(_, row)| {
+                row.scale == scale && decides_start(row) && row.outcome == FitOutcome::Fits(largest)
+            })
             .map(|(index, _)| index)
             .collect();
         assert!(!deciding.is_empty(), "{scale}x has a row setting its largest fit");
         for dropped in deciding {
-            let mut rows = START_SIZE_INPUTS.to_vec();
-            let removed = rows.remove(dropped);
+            let removed = START_SIZE_INPUTS[dropped];
+            let same_input = |row: &StartSizeInput| {
+                (row.platform, row.scale, row.fixture, row.source)
+                    == (removed.platform, removed.scale, removed.fixture, removed.source)
+            };
+            let rows: Vec<StartSizeInput> =
+                START_SIZE_INPUTS.iter().filter(|row| !same_input(row)).copied().collect();
             let ruled = ruled_start(scale, &rows, true);
             assert!(
                 ruled.as_ref().map_or(true, |verdict| verdict.dim != constant),

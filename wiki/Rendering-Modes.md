@@ -116,14 +116,16 @@ device below). A `SurfaceTexture` is dropped before reconfiguration. The next
 frame therefore cannot treat a blank or replaced swapchain as already rendered.
 
 A normal renderer's glyph atlas starts at 1024×1024 at scale 1 (up to 1.5) and
-at 2048×2048 above it, and doubles up to 2048×2048 when a glyph does not fit;
-a warm spare starts at 256×256. On the GPU path the glyph texture has the same
-size as the CPU atlas, so a scale-1 window starts with 4 MiB in each instead of
-16 MiB, saving 12 MiB of CPU memory and 12 MiB of GPU memory. Scale 2 starts at
-the maximum and saves nothing. Both starts are what the sizing rule in
-`sonicterm-text`'s `start_size_inputs` selects over CI measurements of the S9
-and S12 working sets: the largest scale-1 working set fits 1024 and the largest
-scale-2 one needs 2048.
+at 512×512 above it, and doubles up to 2048×2048 when a glyph does not fit; a
+warm spare starts at 256×256. On the GPU path the glyph texture has the same
+size as the CPU atlas, so instead of 16 MiB in each, a scale-1 window starts
+with 4 MiB and a scale-2 window with 1 MiB. Both starts are what the sizing
+rule in `sonicterm-text`'s `start_size_inputs` selects over CI measurements of
+the S9 and S12 working sets. At scale 1, where the perf scenarios run, the
+helper's largest S9 and S12 working set fits 1024. At scale 2 the real
+renderer's working set fits 512, and a window that draws more, such as many CJK
+or emoji glyphs, doubles on demand; a frame that grows the atlas, once or more,
+is retried once.
 
 ### Windows LCD subpixel policy
 

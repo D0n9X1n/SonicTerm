@@ -105,6 +105,65 @@ impl super::super::App {
     }
 }
 
+/// What the idle background trim reads about one window, so the rule is testable without one.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::app) struct IdleFrameFacts {
+    /// Visible, not parked or stopped, nothing deferred, in flight or pending (a retry included).
+    pub(in crate::app) quiescent: bool,
+    /// The window holds native focus.
+    pub(in crate::app) frontmost: bool,
+    /// A warm spare, never shown.
+    pub(in crate::app) warm: bool,
+    /// Its last presented or reused frame; `None` before the first.
+    pub(in crate::app) last_present: Option<Instant>,
+    /// Its last native focus change; `None` before the first.
+    pub(in crate::app) focus_changed_at: Option<Instant>,
+}
+
+/// Whether a window's retained frame texture may be given back at `now`: it is a quiescent,
+/// visible background window that has presented at least once, nothing since
+/// [`IDLE_FRAME_TRIM_AFTER`] ago, and has not gained or lost focus within it either.
+pub(in crate::app) fn idle_frame_trim_due(facts: IdleFrameFacts, now: Instant) -> bool {
+    let aged = |at: Instant| now.saturating_duration_since(at) >= IDLE_FRAME_TRIM_AFTER;
+    facts.quiescent
+        && !facts.frontmost
+        && !facts.warm
+        && facts.last_present.is_some_and(aged)
+        && facts.focus_changed_at.is_none_or(aged)
+}
+
+impl super::super::App {
+    /// The retention pass's idle trim: every visible background window that has drawn nothing for
+    /// [`IDLE_FRAME_TRIM_AFTER`] gives back its retained frame texture, keeping everything else.
+    /// A renderer whose texture is already released, or that runs the software presenter, does
+    /// nothing, so repeated passes over a still idle window release nothing more.
+    pub(in crate::app) fn trim_idle_background_frames(&mut self, now: Instant) {
+        let frontmost = self.registry.frontmost_window;
+        let window_ids: Vec<WindowId> = self.registry.windows.keys().copied().collect();
+        for window_id in window_ids {
+            let warm = self.is_warm_window_id(window_id);
+            let Some(window) = self.registry.windows.get_mut(&window_id) else {
+                // When: window_id names no live window, there is nothing to trim.
+                continue;
+            };
+            let facts = IdleFrameFacts {
+                quiescent: window.image_atlas_release_collectable(),
+                frontmost: frontmost == Some(window_id),
+                warm,
+                last_present: window.redraw.last_present,
+                focus_changed_at: window.redraw.focus_changed_at,
+            };
+            if !idle_frame_trim_due(facts, now) {
+                // When: idle_frame_trim_due is false, the window is busy, focused or recent.
+                continue;
+            }
+            if let Some(renderer) = window.renderer.as_mut() {
+                let _released = renderer.trim_idle_frame_texture();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "retention_trim_tests.rs"]
 mod retention_trim_tests;

@@ -372,3 +372,106 @@ fn eviction_enabled_reports_the_configured_permission() {
     atlas.set_eviction_enabled(true);
     assert!(atlas.eviction_enabled());
 }
+
+/// Fill `atlas` with 30×30 tiles until it has grown to `dim`.
+fn grow_by_inserting(atlas: &mut GlyphAtlas, dim: u32) {
+    let mut tiles = ShapedRasterizer { width: 30, height: 30, is_color: false };
+    let mut index = 0;
+    while atlas.width() < dim {
+        atlas.get_or_insert(numbered_key(index), &mut tiles).expect("a tile");
+        index += 1;
+    }
+}
+
+/// Shrinking a grown atlas gives its pixel memory back: every tile and its pending upload is
+/// dropped, the buffer's capacity (not only its length) falls to the new size, the identity
+/// advances so every UV-bearing cache rebuilds, and the growth and eviction counts survive.
+#[test]
+fn shrinking_a_grown_atlas_releases_its_pixels() {
+    let mut atlas = GlyphAtlas::growable(START_ATLAS_DIM_2X, ATLAS_DIM);
+    grow_by_inserting(&mut atlas, ATLAS_DIM);
+    let (growths, evictions, identity) = (atlas.growths(), atlas.evictions(), atlas.identity());
+    assert!(growths >= 2, "the atlas doubled to the maximum");
+
+    assert!(atlas.shrink_to(START_ATLAS_DIM_2X), "a grown atlas shrinks to its start");
+
+    assert_eq!((atlas.width(), atlas.height()), (START_ATLAS_DIM_2X, START_ATLAS_DIM_2X));
+    assert_eq!(atlas.retained_pixel_bytes(), (START_ATLAS_DIM_2X.pow(2) * 4) as usize);
+    assert_eq!(atlas.retained_amount().bytes, expected_retained_bytes(&atlas));
+    assert!(atlas.is_empty(), "every tile is dropped");
+    let mut pending = Vec::new();
+    atlas.drain_dirty_rects_into(&mut pending);
+    assert!(pending.is_empty(), "no upload refers to the old atlas");
+    assert_ne!(atlas.identity(), identity, "UV-bearing caches see a new atlas");
+    assert_eq!((atlas.growths(), atlas.evictions()), (growths, evictions));
+    assert_eq!(atlas.growth_policy(), GrowthPolicy::Growable { max: ATLAS_DIM });
+}
+
+/// Shrinking keeps what a real eviction left: the eviction count, `ever_evicted` (an atlas that has
+/// evicted reports `Evicted` for its fit) and the entry cap, so the next fill evicts at that cap.
+#[test]
+fn shrinking_keeps_a_real_evictions_state_and_the_cap() {
+    let mut atlas = GlyphAtlas::growable(START_ATLAS_DIM_2X, ATLAS_DIM);
+    grow_by_inserting(&mut atlas, 1024);
+    let cap = atlas.len();
+    atlas.__set_entry_cap_for_test(cap);
+    let mut tiles = ShapedRasterizer { width: 30, height: 30, is_color: false };
+    atlas.tick_frame();
+    atlas.get_or_insert(numbered_key(100_000), &mut tiles).expect("an insert past the cap");
+    let evictions = atlas.evictions();
+    assert!(evictions > 0, "the insert past the cap evicted");
+    assert_eq!(atlas.fit_outcome(), FitOutcome::Evicted);
+
+    assert!(atlas.shrink_to(START_ATLAS_DIM_2X));
+
+    assert_eq!(atlas.evictions(), evictions, "the eviction count survives");
+    assert_eq!(atlas.fit_outcome(), FitOutcome::Evicted, "ever_evicted survives");
+    for index in 0..cap as u32 {
+        atlas.tick_frame();
+        atlas.get_or_insert(numbered_key(200_000 + index), &mut tiles).expect("a refill");
+    }
+    assert_eq!(atlas.len(), cap, "the refill stops at the kept cap");
+    atlas.tick_frame();
+    atlas.get_or_insert(numbered_key(300_000), &mut tiles).expect("one more");
+    assert!(atlas.evictions() > evictions, "and evicts there again");
+}
+
+/// Shrinking keeps the eviction permission a bounded retry set: an atlas with eviction disabled
+/// stays disabled, where a plain reset would re-enable it.
+#[test]
+fn shrinking_keeps_the_eviction_permission() {
+    let mut atlas = GlyphAtlas::growable(START_ATLAS_DIM_2X, ATLAS_DIM);
+    grow_by_inserting(&mut atlas, 1024);
+    atlas.set_eviction_enabled(false);
+    assert!(atlas.shrink_to(START_ATLAS_DIM_2X));
+    assert!(!atlas.eviction_enabled(), "a shrink never re-enables eviction");
+}
+
+/// A shrunk atlas fills and grows again by doubling from its new size, as a new one would.
+#[test]
+fn a_shrunk_atlas_grows_again_from_its_new_size() {
+    let mut atlas = GlyphAtlas::growable(START_ATLAS_DIM_2X, ATLAS_DIM);
+    grow_by_inserting(&mut atlas, ATLAS_DIM);
+    assert!(atlas.shrink_to(START_ATLAS_DIM_2X));
+    let growths = atlas.growths();
+    grow_by_inserting(&mut atlas, START_ATLAS_DIM_2X * 2);
+    assert_eq!(atlas.width(), START_ATLAS_DIM_2X * 2);
+    assert_eq!(atlas.growths(), growths + 1, "one doubling from the shrunk size");
+    assert_eq!(atlas.retained_pixel_bytes(), ((START_ATLAS_DIM_2X * 2).pow(2) * 4) as usize);
+}
+
+/// Only a smaller power-of-two size at or above the floor shrinks a growable atlas; anything else,
+/// and any fixed atlas, is refused and changes nothing.
+#[test]
+fn shrinking_refuses_sizes_it_cannot_hold() {
+    let mut atlas = GlyphAtlas::growable(START_ATLAS_DIM_2X, ATLAS_DIM);
+    grow_by_inserting(&mut atlas, 1024);
+    let (width, identity, resident) = (atlas.width(), atlas.identity(), atlas.len());
+    for refused in [1024, 2048, 700, MIN_ATLAS_DIM / 2, 0] {
+        assert!(!atlas.shrink_to(refused), "{refused} refused");
+        assert_eq!((atlas.width(), atlas.identity(), atlas.len()), (width, identity, resident));
+    }
+    let mut fixed = GlyphAtlas::new(512, 512);
+    assert!(!fixed.shrink_to(MIN_ATLAS_DIM), "a fixed atlas never changes size");
+    assert_eq!(fixed.width(), 512);
+}

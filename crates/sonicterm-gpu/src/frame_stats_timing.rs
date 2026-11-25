@@ -250,6 +250,13 @@ impl GrowthEpisodes {
 }
 
 impl GrowthEpisodes {
+    /// Whether a growth is waiting for a successful present to time it, or is not counted yet.
+    pub(crate) fn has_pending(&self, atlas_growths: u64) -> bool {
+        self.pending_since.is_some() || atlas_growths > self.counted_growths
+    }
+}
+
+impl GrowthEpisodes {
     /// At a successful present, record the pending episode's growth-to-present time.
     pub(crate) fn present(&mut self) {
         if let Some(pending_since) = self.pending_since.take() {

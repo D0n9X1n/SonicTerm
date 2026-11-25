@@ -31,8 +31,8 @@ pub(super) fn released_parts(renderer: &GpuRenderer) -> [sonicterm_types::Resour
     ]
 }
 
-/// A trim on the GPU presenter returns every released part to a new renderer's figure, keeps the
-/// glyph atlas, lowers the vertex and upload storage, leaves a 1x1 frame texture marked trimmed, and
+/// A trim on the GPU presenter returns every released part to a new renderer's figure, keeps a
+/// glyph atlas still at its start, lowers the vertex and upload storage, leaves a 1x1 frame texture marked trimmed, and
 /// reports the frame texture and present buffers it gave back as request sizes.
 pub(super) fn trim_releases_and_accounts(active: &ActiveEventLoop) -> Result<(), String> {
     // The fresh renderer is built first: the case's own binding shadows the helper's name.
@@ -48,6 +48,8 @@ pub(super) fn trim_releases_and_accounts(active: &ActiveEventLoop) -> Result<(),
     let after = renderer.retained_amounts();
     check(!report.refused, "a usable device admits the trim")?;
     check(released_parts(&renderer) == released_parts(&fresh), "released parts read as new")?;
+    // The split scene fits the atlas's start, so there is nothing to shrink and the atlas is kept.
+    check(report.glyph_atlas_shrunk.is_none(), "an atlas at its start is not shrunk")?;
     check(after.glyph_atlas == before.glyph_atlas, "the glyph atlas is kept")?;
     check(after.image_atlas == fresh.retained_amounts().image_atlas, "no media: the placeholder")?;
     check(
@@ -205,4 +207,120 @@ pub(super) fn graphics_ledger_follows_create_resize_trim_and_drop(
         )?;
     }
     Ok(())
+}
+
+/// The idle background trim on the GPU presenter gives back only the retained frame texture: the
+/// row caches and glyph atlas stay, the ledger's frame slot falls once (a second idle trim releases
+/// nothing), and the next frame, drawn from the clean grid with nothing marked dirty, is one full
+/// frame equal to the settled reference. A one-row edit after it presents a partial frame that
+/// leaves every other row as the reference drew it. A covered trim after an idle trim releases
+/// its other resources without counting the texture twice.
+pub(super) fn idle_trim_releases_only_the_texture(active: &ActiveEventLoop) -> Result<(), String> {
+    use sonicterm_gpu::graphics_ledger::GraphicsClass;
+    // The fresh renderer is built first: the case's own binding shadows the helper's name.
+    let (_fresh_window, fresh) =
+        renderer(active, SoftwareRenderMode::Off, &Theme::default(), (480, 240), true)?;
+    let (_window, mut renderer) =
+        renderer(active, SoftwareRenderMode::Off, &Theme::default(), (480, 240), true)?;
+    let ledger = renderer.__graphics_ledger_handle();
+    let mut scene = split_scene(&renderer, &["shell", "logs"]);
+    let settled = settle_fallback(&mut renderer, &mut scene)?;
+    let reference = pixels(&mut renderer)?;
+    let surface = renderer.surface_size();
+    let before = renderer.retained_amounts();
+    let frame_slot = |ledger: &sonicterm_gpu::graphics_ledger::GraphicsLedgerHandle| {
+        ledger.snapshot().class(GraphicsClass::FrameTexture).live_bytes
+    };
+    // The whole frame-texture tally, so a redundant same-size replacement shows in its counts.
+    let frame_tally = |ledger: &sonicterm_gpu::graphics_ledger::GraphicsLedgerHandle| {
+        ledger.snapshot().class(GraphicsClass::FrameTexture)
+    };
+    let slot_before = frame_slot(&ledger);
+
+    let released = renderer.trim_idle_frame_texture();
+    let texture_bytes = u64::from(surface.0) * u64::from(surface.1) * 4 - 4;
+    check(
+        released == texture_bytes,
+        &format!("the idle trim releases {texture_bytes}: {released}"),
+    )?;
+    let tally_trimmed = frame_tally(&ledger);
+    check(renderer.trim_idle_frame_texture() == 0, "a second idle trim releases nothing")?;
+    check(frame_tally(&ledger) == tally_trimmed, "a second idle trim replaces nothing")?;
+    check(slot_before - frame_slot(&ledger) == texture_bytes, "the frame slot falls once")?;
+    let after = renderer.retained_amounts();
+    check(after.row_glyph_cache == before.row_glyph_cache, "the row glyph cache stays")?;
+    check(after.row_quad_cache == before.row_quad_cache, "the row quad cache stays")?;
+    check(after.glyph_atlas == before.glyph_atlas, "the glyph atlas stays")?;
+    check(renderer.frame_texture_extent() == (1, 1), "the texture is 1x1")?;
+
+    // The grid is clean: nothing is marked dirty, so only the cleared frame key forces this frame.
+    let stats_before = renderer.frame_stats();
+    check(
+        matches!(frame(&mut renderer, &mut scene), PresentOutcome::Presented),
+        "the first frame after the idle trim presents",
+    )?;
+    let stats_after = renderer.frame_stats();
+    check(
+        stats_after.full_frames == stats_before.full_frames + 1
+            && stats_after.partial_frames == stats_before.partial_frames,
+        &format!("one full frame: {stats_before:?} -> {stats_after:?}"),
+    )?;
+    check(renderer.frame_texture_extent() == surface, "the texture is restored")?;
+    check_settled(&scene, settled, "frame after the idle trim")?;
+    check(pixels(&mut renderer)? == reference, "the restored frame equals the reference")?;
+
+    let row_bytes = surface.0 as usize * 4;
+    let rows_px = surface.1 as usize;
+    let (edit_px_top, edit_px_bottom) = {
+        let (_, cell_h) = renderer.cell_size();
+        let pane = &scene.panes[0];
+        let top = pane.rect.y.max(0) as usize;
+        (top, (top + cell_h.ceil() as usize).min(rows_px))
+    };
+    write(&mut scene.panes[0].grid, 0, 0, "edited");
+    let edit_before = renderer.frame_stats();
+    present(&mut renderer, &mut scene)?;
+    let edit_after = renderer.frame_stats();
+    check(
+        edit_after.partial_frames == edit_before.partial_frames + 1,
+        &format!("the edit presents a partial frame: {edit_before:?} -> {edit_after:?}"),
+    )?;
+    let edited = pixels(&mut renderer)?;
+    let below = edit_px_bottom * row_bytes;
+    check(
+        edited.len() == reference.len() && edited[below..] == reference[below..],
+        "every row below the edited one is as the reference drew it",
+    )?;
+    check(
+        edited[edit_px_top * row_bytes..below] != reference[edit_px_top * row_bytes..below],
+        "the edit drew",
+    )?;
+
+    // A window idle-trimmed and then covered: the covered trim finds the texture already released,
+    // so it counts only the present buffers, and still releases every other part.
+    check(renderer.trim_idle_frame_texture() == texture_bytes, "the idle trim releases again")?;
+    let tally_idle = frame_tally(&ledger);
+    let covered = renderer.trim_for_occlusion();
+    check(frame_tally(&ledger) == tally_idle, "the covered trim replaces no texture")?;
+    check(
+        covered.gpu_released_requested_bytes < texture_bytes
+            && covered.present_buffer_bytes_before > 0,
+        &format!("the covered trim does not count the texture twice: {covered:?}"),
+    )?;
+    check(released_parts(&renderer) == released_parts(&fresh), "the covered trim releases the rest")
+}
+
+/// Under the software presenter the idle trim releases nothing: its texture is already 1x1, so
+/// nothing is replaced, the frame key stays, and the software frame and every cache are kept.
+pub(super) fn idle_trim_on_the_software_presenter(active: &ActiveEventLoop) -> Result<(), String> {
+    let (_window, mut renderer) =
+        renderer(active, SoftwareRenderMode::Force, &Theme::default(), (480, 240), true)?;
+    let mut scene = split_scene(&renderer, &["shell", "logs"]);
+    settle_fallback(&mut renderer, &mut scene)?;
+    let before = renderer.retained_amounts();
+    let rebuilds = renderer.__frame_texture_rebuilds();
+    check(renderer.trim_idle_frame_texture() == 0, "the GDI idle trim releases nothing")?;
+    check(!renderer.__frame_texture_trimmed(), "the GDI texture is never marked")?;
+    check(renderer.__frame_texture_rebuilds() == rebuilds, "no texture was built")?;
+    check(renderer.retained_amounts() == before, "every part and the software frame are kept")
 }

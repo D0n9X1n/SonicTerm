@@ -438,7 +438,7 @@ const PINNED_HOOKS: [(usize, &str, &str); 25] = [
     (0, "fn new_async(", "renderer.record_glyph_atlas_request();"),
     (0, "fn new_async(", "renderer.record_image_atlas_request();"),
     (0, "fn rebuild_frame_texture(", "self.record_frame_texture_request();"),
-    (0, "fn trim_for_occlusion(", "self.record_frame_texture_request();"),
+    (0, "fn release_frame_texture(", "self.record_frame_texture_request();"),
     (0, "fn try_resize_outcome(", "self.record_surface_request();"),
     (0, "fn set_software_render_degrade(", "self.record_surface_request();"),
     (0, "impl Drop for GpuRenderer", "\"renderer graphics teardown\""),

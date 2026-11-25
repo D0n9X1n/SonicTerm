@@ -28,7 +28,7 @@ This page explains what those figures count; protocol and atlas details are in
 | PTY output | 64 queued chunks plus one blocked sender chunk, each backed by a 64 KiB reader ring; structural worst case 4.0625 MiB. Each chunk is 64 B on 64-bit targets (const-asserted), 16 B of it the optional read stamp. Chunk timestamp-storage subtotal: 1,024 B per PTY in the 64 reserved channel slots, stamped or not, plus 16 B each for the blocked sender's chunk and the chunk the VT worker holds, 1,056 B; freed with the PTY. Whether a PTY stamps its reads is chosen at its creation (while the pane's counter gate is on) and fixed for the reader's lifetime, as an immutable boolean the reader owns; its layout contribution is not covered by that subtotal | block the reader and apply OS backpressure |
 | S2 echo watch | one per pane while the counter gate is on: 232 B measured on 64-bit macOS, const-asserted ≤ 256 B (`ECHO_WATCH_MAX_BYTES`), not charged to the pane ledger; freed with the pane and its worker's handles | fixed size; a re-arm replaces the record |
 | S2 echo timeline | per window, inline in its redraw state: 104 B, of which 40 B are accepted-tick metadata and 64 B the owner slot. Per window owner, from its arm: a 1,640 B slot record, whose 64 events of 24 B are 1,536 B (const-asserted) plus 104 B of metadata, and a 4,120 B flood ring, whose 256 entries of 16 B are 4,096 B (const-asserted) plus 24 B. The owner's take copies at most 4,096 B of flood entries (256 × 16 B) into the record, whose 32 B `FrozenFlood` metadata, comprising the 24 B vector header and eviction metadata, sits in its metadata, and frees the ring; the transfer builds at most 2,048 B of events (64 × 32 B), moves them, the copied entries and an 88 B `EchoTimelineV1` to the caller, and frees the record, so the App keeps nothing. Sizes other than the const-asserted arrays are measured on 64-bit macOS, not guaranteed. An owner that ends early, by a re-arm, the pane leaving the window or retiring, or the window closing, frees its ring and an unfrozen record; a frozen record not yet transferred lasts until the pane is re-armed or retired | the 65th event sets `overflow` and is dropped; the 257th flood entry evicts the oldest and records its `loop_seq`; a non-owner arming records nothing |
-| Glyph atlas | one BGRA8 CPU atlas per renderer that starts at 1024×1024 (4 MiB) at scale 1, 2048×2048 (16 MiB) at scale 2 and 256×256 (256 KiB) for a warm spare, then grows by doubling up to 2048×2048, 16 MiB and 16,384 entries; a GPU-presented renderer's glyph texture has the same size | grow first; at 2048 or the entry cap, evict the coldest quarter and retry |
+| Glyph atlas | one BGRA8 CPU atlas per renderer that starts at 1024×1024 (4 MiB) at scale 1, 512×512 (1 MiB) at scale 2 and 256×256 (256 KiB) for a warm spare, then grows by doubling up to 2048×2048, 16 MiB and 16,384 entries; a GPU-presented renderer's glyph texture has the same size | grow first; at 2048 or the entry cap, evict the coldest quarter and retry |
 | Image atlas | 1×1 placeholder; 2048×2048 BGRA8 only while media is active | skip older images when full; release to placeholder after 240 media-free frames, or without a frame 30 s after renderable media was last visible |
 | Windows software frame | axis ≤ 16,384; total ≤ 160 MiB | reject construction or resize and preserve the old valid allocation |
 | Pane command events | 1,024 events | drop the oldest and shrink retained vector capacity |
@@ -488,6 +488,25 @@ mapped buffers the draw reads) stayed at the clear-only figure in the probe,
 but only while no frame copied: new glyphs (atlas writes), buffer growth or a
 fallback bring the copy back. SonicTerm does not use such a path.
 
+The figure is held once for the shared device, not once per window. Every
+window shares one device and queue, so these readings cannot tell a per-process
+cost from a per-device one. In a release build at scale 2, each window's shell
+printed a line every 50 ms (952x905 pt windows, `footprint` read after 45 s):
+
+| Windows presenting | Graphics | Change |
+| --- | --- | --- |
+| 1 | 246 MB | — |
+| 2 | 272 MB | +26 MB |
+| 4 | 322 MB | +76 MB, about 25 MB per window |
+
+Each added window brings its own frame texture, GPU glyph atlas and present
+buffers, not another copy of the presenting cost. One window that printed for
+20 s and then went quiet read 221 MB while printing and 29 MB in every later
+sample, from about 10 s to 100 s after its output stopped; when it is released
+within those first 10 s is not measured. With frame latency 1 instead of 2 the
+same window read 221 MB, and its total footprint 309 MB against 310 MB, so
+frame latency changed only the drawable limit, not this figure.
+
 The Memory Usage report's `GPU (OS)` row and the `graphics_os_*` snapshot
 fields read the kernel's per-task graphics ledgers, not the `footprint`
 category above. `GPU requested` shows only what SonicTerm asked for. The three
@@ -621,18 +640,35 @@ buffers, back to their initial 4,096 quads, and the vertex scratch; the row
 glyph, row quad and row ink caches; both atlas uploads' staging buffers and rect
 lists; the held frame scratch (a lent one is dropped when its lease returns);
 the chrome title and run tables, keeping the palette; and a promoted image atlas
-when no media is visible. It keeps the glyph atlas and its GPU texture, a
-pending atlas retry and its eviction state, the Windows software frame and the
-preedit cache. A device that refuses the work changes nothing. The next frame
+when no media is visible. A glyph atlas that grew past the start for the
+window's current scale shrinks back to that start, on the CPU and, under the GPU
+presenter, its texture: every tile is dropped, and the next frame rasterizes
+only what it shows. On macOS an atlas buffer of 1 MiB or more is an anonymous
+memory mapping that is unmapped when the atlas grows or shrinks, because the
+system allocator keeps a freed large block's pages in the footprint as
+"Malloc Large (empty)". The atlas is kept while an atlas retry or a growth's timing
+is still pending, and is never grown toward the start. The trim keeps a pending
+atlas retry and its eviction state, the Windows software frame and the preedit
+composition. A device that refuses the work changes nothing. The next frame
 is a full first frame, and everything regrows on its normal path; returning to
 view clears the trim mark.
+
+A window that stays visible but in the background, such as a stacked or tiled
+terminal window that is never fully covered, gives back only its retained frame
+texture. The same retention pass releases it when the window is visible, not
+frontmost and not a warm spare, has nothing deferred, in flight or pending, and
+has presented nothing, and gained or lost no focus, for 60 s. The texture goes
+down to 1×1 and the next frame is a full frame that rebuilds it; the row caches,
+atlases, drawables and preedit composition stay. The software presenter's
+texture is already 1×1, so there it releases nothing. A window that is later
+covered still gets the covered-window trim.
 
 Renderer parts are reports, not ledger entries, so the trim lowers
 `renderer_total_bytes` in the same pass's snapshot and never a pane charge.
 Each renderer entry also reports `renderer_trimmed` and
 `renderer_gpu_released_requested_bytes`:
-the frame texture and present buffers the trim gave back, as request sizes, not
-residency, and outside the total.
+the frame texture, present buffers and installed glyph texture bytes a shrink
+removed, as request sizes, not residency, and outside the total.
 
 While a window is visible, the present buffers shrink too: at the end of each
 600-draw window, empty draws included, if their capacity exceeds four times that window's peak use
