@@ -190,9 +190,10 @@ pub struct PaneState {
     pub(crate) creator: crate::app::mcp::agents::PaneOwner,
     /// The OSC 7501 summary the tab marker reads; replaced only by a newer generation.
     pub(crate) program_status: sonicterm_vt::vt::StatusSummary,
-    /// Whether the pane was the focused pane of the frontmost window when focus was last applied,
-    /// so focus acknowledges its done and error records once, on the edge.
-    pub(crate) status_focused: bool,
+    /// The window in which the pane was the frontmost window's focused pane when focus was last
+    /// applied, so focus acknowledges its done and error records once, on the edge. It names the
+    /// window, so a pane torn out into another window is a new edge there.
+    pub(crate) status_focused: Option<WindowId>,
     /// The parser's own flag for a held `done` or `error` record, set before its summary event
     /// reaches the App, so an acknowledgment never waits on that event.
     pub(crate) status_unseen: Arc<std::sync::atomic::AtomicBool>,
@@ -401,7 +402,7 @@ impl PaneState {
             exit_reported: false,
             creator: crate::app::mcp::agents::PaneOwner::User,
             program_status: sonicterm_vt::vt::StatusSummary::default(),
-            status_focused: false,
+            status_focused: None,
             status_unseen,
             exit_status: Arc::new(std::sync::OnceLock::new()),
             change_signal: Arc::default(),

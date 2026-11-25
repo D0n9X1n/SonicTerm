@@ -264,6 +264,30 @@ fn a_split_visited_and_left_between_redraws_acknowledges() {
     assert_eq!(markers(&mut app, child), vec![None]);
 }
 
+/// A pane moved into another window, as a tear-out does, is a new focus edge there: its focus
+/// is recorded per window, so becoming the destination's focused pane ends its done record even
+/// though it was the focused pane of the window it left, with no redraw in between.
+#[test]
+fn a_focused_pane_moved_to_another_window_acknowledges_there() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let source = app.__test_seed_child_window(&["moving", "staying"]);
+    let target = app.__test_seed_child_window(&["resident"]);
+    let moving = app.registry.windows[&source].tab_states[0].active_pane;
+    app.registry.windows.get_mut(&source).unwrap().tabs.activate(0);
+    app.handle_window_focus_changed(source, true);
+    app.after_dispatch();
+    feed(&mut app, moving, "\x1b]7501;state=done\x07");
+    // A destination needs presentation geometry before it accepts a tab.
+    let viewport = sonicterm_ui::pane::Rect::new(0.0, 0.0, 400.0, 200.0);
+    assert!(app.__test_set_child_pane_viewport(target, viewport, 10.0, 10.0));
+    // The tab moves to the target, which becomes frontmost with the moved tab active.
+    app.transfer_tab(Some(source), 0, Some(target), 1).expect("the tab moves");
+    app.registry.windows.get_mut(&target).unwrap().tabs.activate(1);
+    app.handle_window_focus_changed(target, true);
+    app.after_dispatch();
+    assert_eq!(markers(&mut app, target), vec![None, None]);
+}
+
 /// Focus-loss key cleanup is not the user looking: the release bytes it writes as keyboard input
 /// leave a done or error record in place.
 #[test]
@@ -284,6 +308,23 @@ fn both_redraw_paths_acknowledge_focus_before_refreshing_markers() {
         let acknowledged = source.find("acknowledge_focused_status_in(").expect(name);
         let refreshed = source.find("refresh_window_tab_privileges(").expect(name);
         assert!(acknowledged < refreshed, "{name} acknowledges after refreshing");
+    }
+}
+
+/// The production handlers settle focus after every event: both the window-event and the
+/// user-event wrapper call `after_dispatch` right after their dispatch, so the focus tests above
+/// exercise the hook the real event loop runs.
+#[test]
+fn every_dispatch_wrapper_settles_focus_after_its_event() {
+    let source = include_str!("application_handler.rs");
+    for dispatch in ["self.do_window_event(", "self.do_user_event("] {
+        let at = source.find(dispatch).expect(dispatch);
+        let after = &source[at..];
+        let next_statement = after.find(";\n").map(|end| &after[end + 2..]).expect(dispatch);
+        assert!(
+            next_statement.trim_start().starts_with("self.after_dispatch();"),
+            "{dispatch} is not followed by after_dispatch"
+        );
     }
 }
 

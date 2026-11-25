@@ -708,16 +708,21 @@ impl super::PaneState {
     }
 }
 
-/// Acknowledge, on its focus edge, the active pane of `window` when it is the frontmost window:
-/// a pane that just gained focus sees its done and error records end. Returns whether any ended.
-pub(super) fn acknowledge_focused_status(window: &mut super::WindowState, frontmost: bool) -> bool {
+/// Acknowledge, on its focus edge, the active pane of window `win_id` when it is the frontmost
+/// window: a pane that just gained focus there, including one moved in from another window, sees
+/// its done and error records end. Returns whether any ended.
+pub(super) fn acknowledge_focused_status(
+    window: &mut super::WindowState,
+    win_id: WindowId,
+    frontmost: bool,
+) -> bool {
     let focused = frontmost
         .then(|| window.tab_states.get(window.tabs.active_index()).map(|tab| tab.active_pane))
         .flatten();
     let mut ended = false;
     for (pane_id, pane) in window.panes.iter_mut() {
-        let now_focused = Some(*pane_id) == focused;
-        if now_focused && !pane.status_focused {
+        let now_focused = (Some(*pane_id) == focused).then_some(win_id);
+        if now_focused.is_some() && pane.status_focused != now_focused {
             ended |= pane.acknowledge_program_status();
         }
         pane.status_focused = now_focused;
@@ -750,7 +755,6 @@ impl App {
         }
     }
 
-    /// Acknowledge focus in window `win_id` before its markers are read for a frame.
     /// Settle what one dispatched event changed: tab visits and the frontmost window's focused
     /// pane. A focus move (a split, a tab or a closed pane) is acknowledged on the event that made
     /// it, so a pane focused and left again before the next redraw still sees its records end.
@@ -762,10 +766,12 @@ impl App {
         }
     }
 
+    /// Acknowledge focus in window `win_id`: after an event, and before its markers are read for a
+    /// frame.
     pub(super) fn acknowledge_focused_status_in(&mut self, win_id: WindowId) {
         let frontmost = self.registry.frontmost_window == Some(win_id);
         if let Some(window) = self.registry.windows.get_mut(&win_id) {
-            acknowledge_focused_status(window, frontmost);
+            acknowledge_focused_status(window, win_id, frontmost);
         }
     }
 }
