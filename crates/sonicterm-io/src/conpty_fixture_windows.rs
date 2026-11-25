@@ -59,7 +59,13 @@ const TOTAL_BUDGET: Duration = Duration::from_secs(150);
 const HOST_BUDGET: Duration = Duration::from_secs(60);
 /// The host's own loop ends first, so its rows and end line reach the outer test in time.
 const HOST_LOOP_BUDGET: Duration = Duration::from_secs(50);
+/// Silence allowed between two sentinels of one case before its open sections read inconclusive.
 const CASE_BUDGET: Duration = Duration::from_secs(5);
+/// One case's whole run, from its first section opening, however many sentinels it sends: its
+/// output, its input phase and a resize wait together stay under it.
+const WHOLE_CASE_BUDGET: Duration = Duration::from_secs(15);
+/// Chunks the child's stdin reader may queue ahead of the case reading them; each is at most 4 KiB.
+const INPUT_QUEUE_CHUNKS: usize = 16;
 const REAP_BUDGET: Duration = Duration::from_secs(5);
 const READ_DEADLINE: Duration = Duration::from_secs(2);
 const READ_QUIET: Duration = Duration::from_millis(300);
@@ -183,13 +189,17 @@ fn run_host<E: Engine>(role: &str, test_name: &str, cases: &[Case], mut engine: 
 fn drive<E: Engine>(pty: &PtyHandle, cases: &[Case], engine: &mut E) -> HashMap<String, Evidence> {
     let host_deadline = Instant::now() + HOST_LOOP_BUDGET;
     let mut case_deadline = Instant::now() + CASE_BUDGET;
+    // The case whose sections are open and when it must finish, whatever sentinels it sends.
+    let mut whole_case: Option<(String, Instant)> = None;
     let mut scanner = Scanner::default();
     let mut closed = HashMap::new();
     let mut resize_at: Option<(Instant, u16)> = None;
     loop {
         let now = Instant::now();
-        if now >= host_deadline.min(case_deadline) {
-            // When: `now` passed host_deadline or case_deadline, open sections read inconclusive.
+        let whole_deadline = whole_case.as_ref().map_or(host_deadline, |(_, due)| *due);
+        if now >= host_deadline.min(case_deadline).min(whole_deadline) {
+            // When: `now` passed the host, silence or whole-case deadline, open sections read
+            // inconclusive.
             return closed;
         }
         if let Some((_, rows)) = resize_at.filter(|(due, _)| now >= *due) {
@@ -220,6 +230,12 @@ fn drive<E: Engine>(pty: &PtyHandle, cases: &[Case], engine: &mut E) -> HashMap<
             match event {
                 ScanEvent::Opened(name) => {
                     // When: a section `Opened`, an `/in` section may need injected bytes or a resize.
+                    let case_name = name.rsplit_once('/').map_or(name.as_str(), |(case, _)| case);
+                    if whole_case.as_ref().is_none_or(|(open, _)| open != case_name) {
+                        // A section of another case opened, so that case's whole clock starts now.
+                        whole_case =
+                            Some((case_name.to_owned(), Instant::now() + WHOLE_CASE_BUDGET));
+                    }
                     let phase = name
                         .strip_suffix("/in")
                         .and_then(|case_name| cases.iter().find(|case| case.name == case_name))
@@ -293,7 +309,9 @@ fn emit_rows<E: Engine>(
 // Lock order: stdin (reader thread only) then stdout (this thread only); no thread holds both.
 fn run_child(cases: &[Case]) {
     configure_console();
-    let (sender, receiver) = mpsc::channel::<Vec<u8>>();
+    // Bounded: a burst the current case does not read waits in the console's own buffer, not in
+    // an unbounded queue; the reader blocks until the case drains it.
+    let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(INPUT_QUEUE_CHUNKS);
     // The reader runs for the child's life: console input arrives whenever the host writes it,
     // and the process exit ends the thread with its blocking read.
     std::thread::spawn(move || {
@@ -428,13 +446,14 @@ fn run_outer(test_name: &str, manifest_dir: &Path, cases: &[Case]) {
         .parent()
         .expect("test executable directory")
         .join(format!("conpty-fixture-{}", std::process::id()));
+    // The total budget covers staging the runtime too, so a slow copy cannot add to it unseen.
+    let started = Instant::now();
     // A leftover directory from an earlier process with the same id is replaced.
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).expect("create fixture directory");
     let runtime = std::env::var_os(RUNTIME_DIR_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|| stage_runtime(manifest_dir, &base.join("staged")));
-    let started = Instant::now();
     let mut problems = Vec::new();
     for role in ["packaged", "system"] {
         let role_dir = base.join(role);
@@ -499,11 +518,11 @@ fn run_one_host(host: &Path, role: &str, test_name: &str, budget: Duration) -> H
     let job = Job::new().expect("create job object");
     let mut child = command.spawn().expect("spawn fixture host");
     if let Err(error) = job.assign(&child) {
-        // When: assign fails, the host is outside the job, so it is killed and reaped here before
-        // the failure, never left to read `go` from a closed pipe and spawn its PTY.
-        let _ = child.kill();
-        wait_exit(&mut child, REAP_BUDGET);
-        panic!("assign fixture host to its job: {error}");
+        // The host is outside the job: kill and reap it before the failure, so it never reads
+        // `go` from a closed pipe and spawns its PTY.
+        let killed = child.kill().is_ok();
+        let reaped = wait_exit(&mut child, REAP_BUDGET);
+        panic!("assign fixture host to its job: {error} (killed: {killed}, reaped: {reaped})");
     }
     if let Some(mut stdin) = child.stdin.take() {
         // When: the host's `stdin` pipe exists, send `go`; a failed write shows as a budget expiry.
