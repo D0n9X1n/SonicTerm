@@ -223,7 +223,7 @@ impl GpuRenderer {
         };
         let frame_texture_before = self.frame_texture_extent();
         let present_buffer_bytes_before = self.present_pipeline.present_buffer_bytes();
-        let mut released_bytes = self.release_frame_texture();
+        let mut released_bytes = self.release_frame_texture().unwrap_or(0);
         released_bytes += self.present_pipeline.reset_to_initial(&self.device);
         self.row_glyph_cache.release_all();
         self.line_quad_cache.release_all();
@@ -265,17 +265,21 @@ impl GpuRenderer {
 
 impl GpuRenderer {
     /// Replace the retained frame texture with a 1x1 placeholder and return the requested bytes
-    /// given back. Idempotent: a texture already trimmed, or the software presenter's 1x1 one, is
-    /// left alone and returns 0, as is any call on a device that refuses work. The ledger records
-    /// the replacement once, and the next present rebuilds the surface-sized texture first.
-    fn release_frame_texture(&mut self) -> u64 {
-        if self.frame_texture_trimmed || self.uses_windows_software_presenter() {
-            // When: frame_texture_trimmed is set or the software presenter owns a 1x1 texture.
-            return 0;
+    /// given back, or `None` when nothing was replaced. Idempotent: a texture already trimmed or
+    /// already 1x1 (the software presenter's, or a 1x1 surface's) is left alone, as is any call on
+    /// a device that refuses work. The ledger records a replacement once, and the next present
+    /// rebuilds the surface-sized texture first.
+    fn release_frame_texture(&mut self) -> Option<u64> {
+        if self.frame_texture_trimmed
+            || self.uses_windows_software_presenter()
+            || self.frame_texture_extent() == (1, 1)
+        {
+            // When: frame_texture_trimmed is set, or the software presenter or surface is already 1x1.
+            return None;
         }
         let Some(_scope) = self.device_errors.enter_gpu_work("frame_texture.release") else {
             // When: enter_gpu_work refuses, the stopped device keeps the texture untouched.
-            return 0;
+            return None;
         };
         let before = self.frame_texture_extent();
         let (frame_texture, frame_view) = build_frame_texture(
@@ -290,31 +294,31 @@ impl GpuRenderer {
         self.frame_view = frame_view;
         self.frame_texture_trimmed = true;
         self.record_frame_texture_request();
-        frame_texture_payload_bytes(before).saturating_sub(frame_texture_payload_bytes((1, 1)))
+        Some(
+            frame_texture_payload_bytes(before).saturating_sub(frame_texture_payload_bytes((1, 1))),
+        )
     }
 
     /// Give back an idle background window's retained frame texture, keeping its row caches,
-    /// atlases, drawables and preedit composition; returns the requested bytes released, 0 when the
-    /// texture was already released or the device refused the work. The frame key is cleared, so
-    /// the next frame is a full frame that rebuilds the texture before drawing into it.
+    /// atlases, drawables and preedit composition; returns the requested bytes released, 0 when
+    /// nothing was replaced (already released, already 1x1, or a refusing device). A replacement
+    /// clears the frame key, so the next frame is a full frame that rebuilds the texture first.
     pub fn trim_idle_frame_texture(&mut self) -> u64 {
-        let Some(_scope) = self.device_errors.enter_gpu_work("idle_trim") else {
-            // When: enter_gpu_work refuses, the stopped device keeps the texture untouched.
+        // The release gates its own GPU work, so a no-op call changes no device admission count.
+        let Some(released) = self.release_frame_texture() else {
+            // When: release_frame_texture replaced nothing, the frame and its key stay valid.
             return 0;
         };
-        let released = self.release_frame_texture();
-        // A released texture means the next frame must draw in full.
-        if released > 0 {
-            self.last_frame_key = None;
-            tracing::debug!(
-                target: "memory",
-                renderer_role = self.render_timing_label,
-                window_id = ?self.window.id(),
-                gpu_released_requested_bytes = released,
-                reason = "idle_trim",
-                "idle background window trimmed"
-            );
-        }
+        // The pixels are gone even when the byte delta is zero, so the next frame must draw in full.
+        self.last_frame_key = None;
+        tracing::debug!(
+            target: "memory",
+            renderer_role = self.render_timing_label,
+            window_id = ?self.window.id(),
+            gpu_released_requested_bytes = released,
+            reason = "idle_trim",
+            "idle background window trimmed"
+        );
         released
     }
 }

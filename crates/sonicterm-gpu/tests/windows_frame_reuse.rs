@@ -486,7 +486,7 @@ struct SingleFrame {
 }
 
 fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
-    let cases: [(&str, Case); 14] = [
+    let cases: [(&str, Case); 16] = [
         ("assembled frames reuse scratch", assembled_frames_reuse_scratch),
         ("scratch survives failed and retried frames", scratch_survives_failed_and_retried_frames),
         ("scratch caps hold", scratch_caps_hold_after_unbounded_frames),
@@ -501,6 +501,8 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
         ),
         ("trim restores without a resize", trim_restores_without_a_resize),
         ("trim on the software presenter", trim_on_the_software_presenter),
+        ("idle trim releases only the texture", idle_trim_releases_only_the_texture),
+        ("idle trim on the software presenter", idle_trim_on_the_software_presenter),
         ("trim during a pending atlas retry", trim_during_a_pending_atlas_retry),
         ("atlas retry keeps rebuilt rows", atlas_retry_keeps_rebuilt_rows),
         (
@@ -581,6 +583,8 @@ use chrome::search_overlay_reuses_its_runs;
 #[path = "support/windows_frame_reuse_retention.rs"]
 mod retention;
 use retention::graphics_ledger_follows_create_resize_trim_and_drop;
+use retention::idle_trim_on_the_software_presenter;
+use retention::idle_trim_releases_only_the_texture;
 use retention::split_scene;
 use retention::trim_on_the_software_presenter;
 use retention::trim_releases_and_accounts;
